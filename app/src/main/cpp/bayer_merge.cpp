@@ -686,3 +686,116 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
 }
 
 }  // extern "C"
+
+
+// ---------------------------------------------------------------------------
+// Capture sharpening.
+//
+// Mirrors Sharpen.kt, which is where the tests are. A Bayer sensor measures one
+// colour per site and the demosaic reconstructs the other two, so even a
+// perfect reconstruction delivers less acutance than the lens projected. This
+// restores it rather than adding an effect.
+//
+// Safe here in a way it is not on a single frame: a merged burst has already
+// had its noise reduced by the square root of the frame count, so the same
+// sharpening lands on a much cleaner signal.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+inline float lumaOf(int r, int g, int b) {
+    return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+}
+
+inline uint8_t shiftChannel(int value, float shift) {
+    const int moved = static_cast<int>(std::lround(value + shift));
+    return static_cast<uint8_t>(std::clamp(moved, 0, 255));
+}
+
+}  // namespace
+
+extern "C" {
+
+JNIEXPORT jboolean JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
+        JNIEnv* env, jobject, jobject bitmap,
+        jfloat amount, jfloat threshold, jfloat maxShift) {
+    if (amount <= 0.0f) return JNI_TRUE;
+
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
+        return JNI_FALSE;
+    }
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
+
+    const int width = static_cast<int>(info.width);
+    const int height = static_cast<int>(info.height);
+    if (width < 3 || height < 3) return JNI_TRUE;
+
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS) {
+        return JNI_FALSE;
+    }
+    auto* base = static_cast<uint8_t*>(pixels);
+    const int stride = static_cast<int>(info.stride);
+
+    // Luminance once for the whole image: the mask needs each pixel's
+    // neighbours, and recomputing it per neighbour would do the work nine
+    // times over. At twelve megapixels that is 50 MB, which is native memory
+    // and not the managed heap.
+    std::vector<float> luma(static_cast<size_t>(width) * height);
+    parallelBands(height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            const uint8_t* row = base + static_cast<size_t>(y) * stride;
+            for (int x = 0; x < width; ++x) {
+                const uint8_t* p = row + static_cast<size_t>(x) * 4;
+                luma[static_cast<size_t>(y) * width + x] = lumaOf(p[0], p[1], p[2]);
+            }
+        }
+    });
+
+    // Written into a copy of the rows being read, since a pixel's neighbours
+    // must be the original values rather than already-sharpened ones.
+    std::vector<uint8_t> output(static_cast<size_t>(height) * stride);
+    std::memcpy(output.data(), base, output.size());
+
+    parallelBands(height, [&](int y0, int y1) {
+        const int from = std::max(y0, 1);
+        const int to = std::min(y1, height - 1);
+        for (int y = from; y < to; ++y) {
+            uint8_t* dst = output.data() + static_cast<size_t>(y) * stride;
+            const uint8_t* src = base + static_cast<size_t>(y) * stride;
+            for (int x = 1; x < width - 1; ++x) {
+                float sum = 0.0f;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const size_t row = static_cast<size_t>(y + dy) * width;
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        sum += luma[row + x + dx];
+                    }
+                }
+                const float blurred = sum / 9.0f;
+                const float detail = luma[static_cast<size_t>(y) * width + x] - blurred;
+
+                // Below the threshold this is noise or texture the merge just
+                // finished cleaning up.
+                if (std::fabs(detail) < threshold) continue;
+
+                const float shift = std::clamp(detail * amount, -maxShift, maxShift);
+                const uint8_t* p = src + static_cast<size_t>(x) * 4;
+                uint8_t* q = dst + static_cast<size_t>(x) * 4;
+                // The same shift in all three channels moves brightness without
+                // moving hue; scaling per channel is what puts coloured
+                // speckle along every edge.
+                q[0] = shiftChannel(p[0], shift);
+                q[1] = shiftChannel(p[1], shift);
+                q[2] = shiftChannel(p[2], shift);
+            }
+        }
+    });
+
+    std::memcpy(base, output.data(), output.size());
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return JNI_TRUE;
+}
+
+}  // extern "C"

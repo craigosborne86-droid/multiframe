@@ -100,6 +100,14 @@ class NativeMerge private constructor(
             bitmap.recycle()
             return null
         }
+        // A second pass, because the mask needs each pixel's neighbours and the
+        // develop loop writes one pixel at a time.
+        if (params.sharpen.enabled) {
+            nSharpen(
+                bitmap, params.sharpen.amount, params.sharpen.threshold,
+                params.sharpen.maxShift,
+            )
+        }
         Log.i(TAG, "native develop gain=%.2f".format(gain))
         return bitmap
     }
@@ -130,6 +138,9 @@ class NativeMerge private constructor(
         exposureGain: Float, knee: Float,
         contrast: Float, desatStrength: Float, desatStart: Float, blackPoint: Float,
         shading: FloatArray?, shadingColumns: Int, shadingRows: Int,
+    ): Boolean
+    private external fun nSharpen(
+        bitmap: Bitmap, amount: Float, threshold: Float, maxShift: Float,
     ): Boolean
     private external fun nFramesMerged(h: Long): Int
     private external fun nEstimatedSigma(h: Long): Float

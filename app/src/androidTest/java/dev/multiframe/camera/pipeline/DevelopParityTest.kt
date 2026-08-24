@@ -1,5 +1,6 @@
 package dev.multiframe.camera.pipeline
 
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -112,6 +113,67 @@ class DevelopParityTest {
         // the claim. A demosaic that had actually diverged would be off by tens.
         assertThat(worst).isAtMost(2)
         assertThat(mean).isLessThan(0.25)
+    }
+
+    /**
+     * Sharpening actually runs in the binary that ships.
+     *
+     * The parity test cannot show this: if sharpening were silently disabled in
+     * both implementations they would still agree perfectly. This guards the
+     * wiring rather than the arithmetic.
+     */
+    @Test
+    fun nativeSharpeningRunsAndRespectsItsThreshold() {
+        val w = 96
+        val h = 72
+        val profile = SensorProfile.DEFAULT
+        // A hard vertical edge, which is what sharpening acts on.
+        val stepped = BayerFrame(w, h, ShortArray(w * h) { i ->
+            if ((i % w) < w / 2) 250.toShort() else 700.toShort()
+        })
+
+        fun renderWith(params: DevelopParams): Bitmap {
+            val merger = NativeMerge.create(w, h, profile)!!
+            return merger.use {
+                it.develop(directBufferOf(stepped), ColorProfile.NEUTRAL, params)!!
+            }
+        }
+
+        val soft = renderWith(fixedGain.copy(sharpen = Sharpen.Params(amount = 0f)))
+        val sharp = renderWith(fixedGain)
+
+        fun contrastAcrossEdge(bitmap: Bitmap): Int {
+            val row = h / 2
+            return Color.green(bitmap.getPixel(w / 2, row)) -
+                Color.green(bitmap.getPixel(w / 2 - 1, row))
+        }
+
+        val before = contrastAcrossEdge(soft)
+        val after = contrastAcrossEdge(sharp)
+        Log.i(TAG, "native sharpening: edge contrast $before -> $after")
+
+        assertThat(after).isGreaterThan(before)
+
+        // And a flat frame must come through untouched, or the threshold is
+        // not doing its job and every sky gets its noise amplified.
+        val flat = BayerFrame(w, h, ShortArray(w * h) { 500.toShort() })
+        val flatSoft = NativeMerge.create(w, h, profile)!!.use {
+            it.develop(directBufferOf(flat), ColorProfile.NEUTRAL,
+                fixedGain.copy(sharpen = Sharpen.Params(amount = 0f)))!!
+        }
+        val flatSharp = NativeMerge.create(w, h, profile)!!.use {
+            it.develop(directBufferOf(flat), ColorProfile.NEUTRAL, fixedGain)!!
+        }
+        var differing = 0
+        for (y in 2 until h - 2) {
+            for (x in 2 until w - 2) {
+                if (flatSoft.getPixel(x, y) != flatSharp.getPixel(x, y)) differing++
+            }
+        }
+        Log.i(TAG, "flat frame pixels changed by sharpening: $differing")
+        assertThat(differing).isEqualTo(0)
+
+        soft.recycle(); sharp.recycle(); flatSoft.recycle(); flatSharp.recycle()
     }
 
     /**

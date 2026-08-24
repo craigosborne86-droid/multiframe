@@ -40,6 +40,11 @@ data class DevelopParams(
     val desaturationStart: Float = 1.0f,
     /** Toe. A little density in the deepest shadows, as film has. */
     val blackPoint: Float = 0.012f,
+    /**
+     * Capture sharpening, restoring the acutance the CFA sampling and demosaic
+     * cost. See [Sharpen] for why this is not an effect.
+     */
+    val sharpen: Sharpen.Params = Sharpen.Params(),
 ) {
     companion object {
         const val AUTO_EXPOSURE = -1f
@@ -159,6 +164,14 @@ object RawDeveloper {
             bitmap.setPixels(band, 0, w, 0, y, w, rows)
             y += rows
         }
+        // Applied after the whole image exists, since the mask needs each
+        // pixel's neighbours and a band does not have them at its edges.
+        if (params.sharpen.enabled) {
+            val all = IntArray(w * h)
+            bitmap.getPixels(all, 0, w, 0, 0, w, h)
+            Sharpen.apply(all, w, h, params.sharpen)
+            bitmap.setPixels(all, 0, w, 0, 0, w, h)
+        }
         return bitmap
     }
 
@@ -197,6 +210,7 @@ object RawDeveloper {
         parallelRows(h) { yStart, yEnd ->
             renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading)
         }
+        if (resolved.sharpen.enabled) Sharpen.apply(out, w, h, resolved.sharpen)
         return out
     }
 
