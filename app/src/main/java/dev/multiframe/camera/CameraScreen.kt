@@ -325,12 +325,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                         characteristics = characteristics!!,
                                         captureResult = lastCaptureResult.get(),
                                         frameCount = burstFrames,
+                                        rotationDegrees = caps?.let {
+                                            orientation.captureRotation(it.sensorOrientation)
+                                        } ?: 0,
                                         onProgress = { },
                                     )
                                 }
                                 Log.i(TAG, "raw burst result: $r")
-                                status = "%s  capture %dms  merge %dms  write %dms".format(
-                                    r.message, r.captureMillis, r.mergeMillis, r.writeMillis,
+                                status = ("%s  capture %dms  merge %dms  " +
+                                    "develop %dms  write %dms").format(
+                                    r.message, r.captureMillis, r.mergeMillis,
+                                    r.developMillis, r.writeMillis,
                                 )
                                 busy = false
                             }

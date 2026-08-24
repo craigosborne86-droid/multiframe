@@ -38,11 +38,15 @@ class BayerAccumulator(
     private val params: BayerMergeParams = BayerMergeParams(),
 ) {
 
-    private val sum = FloatArray(width * height)
-    private val weight = FloatArray(width * height)
+    // Two full-resolution float buffers at 12.5 MP is 100 MB of Java heap, so
+    // they are released as soon as the merge is finished rather than lingering
+    // while the render buffers are allocated.
+    private var sum = FloatArray(width * height)
+    private var weight = FloatArray(width * height)
 
     private var reference: BayerFrame? = null
     private var refPyramid: List<Plane>? = null
+    private var released = false
     private var noiseVar: FloatArray? = null
 
     private var merged = 0
@@ -120,7 +124,22 @@ class BayerAccumulator(
         merged++
     }
 
+    /**
+     * Frees the accumulation buffers, the reference frame and its pyramid.
+     * Call once [finish] has produced the merged frame; nothing else is usable
+     * afterwards.
+     */
+    fun release() {
+        if (released) return
+        released = true
+        sum = FloatArray(0)
+        weight = FloatArray(0)
+        reference = null
+        refPyramid = null
+    }
+
     fun finish(): Pair<BayerFrame, BayerMergeStats> {
+        check(!released) { "accumulator already released" }
         val out = ShortArray(width * height)
         val ceiling = profile.whiteLevel
         for (i in out.indices) {

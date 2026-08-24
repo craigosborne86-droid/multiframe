@@ -324,3 +324,54 @@ streaming impractical. At zero, full-resolution raw can run continuously at
 Consequence: an 8-frame raw burst spans 233 ms at 30 fps, against the 5.6 s
 window the current sequential takePicture approach produces. That is a 24x
 tighter capture window, and it is what makes zero shutter lag possible for raw.
+
+## Unified raw front end
+
+One raw merge now feeds both outputs, matching the pipeline shape Indigo
+describes: raw frames are aligned and merged once, then the merged CFA data
+goes to the DNG untouched and through a develop stage to the JPEG. The two
+outputs carry identical merge benefit instead of coming from separate
+pipelines.
+
+Back end: bilinear demosaic via a generic 3x3 gather (works for any CFA
+arrangement), white balance from COLOR_CORRECTION_GAINS, sensor-to-sRGB via
+COLOR_CORRECTION_TRANSFORM, global auto exposure, the same restrained shoulder
+curve, then sRGB encode. No local tone mapping, no sharpening, no saturation
+boost.
+
+    raw merge -> DNG + JPEG, 8 frames
+    capture 1937 ms  merge 4245 ms  develop 1960 ms  write 179 ms
+    meanContribution 0.979
+
+### Auto exposure was necessary
+
+Rendering linear sensor data with a fixed gain leaves everything crushed. The
+first unified render came out at a median luma of 17 with 72% of pixels below
+32. Measuring a global exposure multiplier from the frame (92nd percentile of
+the green sites mapped to 0.62 linear) fixed it:
+
+    median luma      17 -> 62
+    below 32       0.723 -> 0.208
+    above 250          -> 0.040
+
+`p7_autoexp.png` shows the result. Colour is correct: warm brickwork, blue sky
+with cloud detail retained, green foliage, neutral wall.
+
+### An OOM on the way
+
+The first attempt wrote the DNG then died allocating 50 MB for the render
+buffer. The accumulator holds two full-resolution float buffers, 100 MB at
+12.5 MP, and they were still live when the render buffers were requested.
+Two fixes: `BayerAccumulator.release()` frees them once the merge is done, and
+the developer renders into the Bitmap in horizontal bands rather than building
+a full-resolution IntArray.
+
+### Heap limits on this device
+
+    dalvik.vm.heapgrowthlimit   256m     current ceiling
+    dalvik.vm.heapsize          512m     what largeHeap would raise it to
+    MemTotal                    15.2 GB  physical RAM
+    MemAvailable                1.2 GB   at time of measurement
+
+Process after a raw burst: Dalvik heap 42 MB of a 256 MB limit, native heap
+16 MB, graphics 89 MB, total PSS 249 MB.

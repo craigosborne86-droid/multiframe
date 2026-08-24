@@ -32,8 +32,10 @@ data class RawBurstResult(
     val stats: BayerMergeStats?,
     val captureMillis: Long,
     val mergeMillis: Long,
+    val developMillis: Long,
     val writeMillis: Long,
-    val savedName: String?,
+    val savedDng: String?,
+    val savedJpeg: String?,
     val message: String,
 )
 
@@ -61,6 +63,7 @@ object RawBurstCapture {
         characteristics: CameraCharacteristics,
         captureResult: TotalCaptureResult?,
         frameCount: Int,
+        rotationDegrees: Int,
         onProgress: (String) -> Unit,
     ): RawBurstResult {
         val profile = SensorProfile.from(characteristics)
@@ -94,31 +97,50 @@ object RawBurstCapture {
 
         if (accumulator == null || captured == 0) {
             return RawBurstResult(
-                frameCount, 0, null, captureMillis, mergeMillis, 0, null,
+                frameCount, 0, null, captureMillis, mergeMillis, 0, 0, null, null,
                 "raw burst failed: no frames",
             )
         }
 
         val t1 = System.currentTimeMillis()
         val (merged, stats) = accumulator.finish()
+        // 100 MB of accumulation buffers are dead once the merge is done, and
+        // must go before the render buffers are allocated or the heap runs out.
+        accumulator.release()
         mergeMillis += System.currentTimeMillis() - t1
 
-        if (captureResult == null) {
-            return RawBurstResult(
-                frameCount, captured, stats, captureMillis, mergeMillis, 0, null,
-                "merged $captured raw frames but no capture metadata for DNG",
-            )
-        }
+        val stamp = stamp()
 
+        // One merged raw image feeds both outputs, so the DNG and the JPEG
+        // carry identical merge benefit instead of coming from separate
+        // pipelines. The DNG gets the raw data untouched; the JPEG is developed
+        // from that same data.
         val t2 = System.currentTimeMillis()
-        val name = "MF_${stamp()}_merged_${captured}f.dng"
-        val ok = writeDng(context, merged, characteristics, captureResult, name)
+        val dngName = "MF_${stamp}_merged_${captured}f.dng"
+        val dngOk = captureResult != null &&
+            writeDng(context, merged, characteristics, captureResult, dngName)
         val writeMillis = System.currentTimeMillis() - t2
 
+        val t3 = System.currentTimeMillis()
+        val color = ColorProfile.from(captureResult)
+        var bitmap = RawDeveloper.developIntoBitmap(merged, profile, color)
+        bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
+        val jpegName = "MF_${stamp}_merged_${captured}f.jpg"
+        val jpegOk = ImageSaver.saveJpeg(context, bitmap, jpegName) != null
+        bitmap.recycle()
+        val developMillis = System.currentTimeMillis() - t3
+
+        val parts = buildList {
+            if (dngOk) add("DNG")
+            if (jpegOk) add("JPEG")
+        }
         return RawBurstResult(
-            frameCount, captured, stats, captureMillis, mergeMillis, writeMillis,
-            if (ok) name else null,
-            if (ok) "merged DNG, $captured frames" else "merge ok, DNG write failed",
+            frameCount, captured, stats, captureMillis, mergeMillis,
+            developMillis, writeMillis,
+            if (dngOk) dngName else null,
+            if (jpegOk) jpegName else null,
+            if (parts.isEmpty()) "merge ok but nothing could be written"
+            else "raw merge -> ${parts.joinToString(" + ")}, $captured frames",
         )
     }
 

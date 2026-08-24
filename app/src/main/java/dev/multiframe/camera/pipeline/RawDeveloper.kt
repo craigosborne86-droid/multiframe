@@ -1,0 +1,266 @@
+package dev.multiframe.camera.pipeline
+
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import kotlin.math.exp
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+
+/**
+ * Tone settings for the raw back end.
+ *
+ * Same philosophy as the YUV path: linear below the knee, gentle exponential
+ * roll-off above it, no local tone mapping, no sharpening, no saturation boost.
+ */
+data class DevelopParams(
+    /**
+     * Linear exposure multiplier. Zero or negative means measure it from the
+     * frame, which is what a raw developer normally does: sensor data is linear
+     * and typically far darker than a viewable image, so rendering it with a
+     * fixed gain leaves everything crushed.
+     */
+    val exposureGain: Float = AUTO_EXPOSURE,
+    val shoulderKnee: Float = 0.70f,
+    /** Linear level the bright end of the scene is mapped to. */
+    val highlightTarget: Float = 0.62f,
+    /** Percentile treated as the bright end, ignoring speculars. */
+    val highlightPercentile: Float = 0.92f,
+) {
+    companion object {
+        const val AUTO_EXPOSURE = -1f
+    }
+}
+
+/**
+ * Turns merged CFA data into viewable sRGB.
+ *
+ * This is the back end of the unified pipeline: one raw merge feeds both the
+ * DNG (written straight from the merged CFA) and the JPEG (developed here), so
+ * the two outputs carry identical computational-photography benefit rather than
+ * coming from separate pipelines.
+ *
+ * Demosaicing is bilinear via a generic 3x3 gather, which works for any CFA
+ * arrangement rather than hard-coding one pattern. A 3x3 window around any
+ * Bayer pixel always contains all three colours.
+ */
+object RawDeveloper {
+
+    private val threads = max(2, Runtime.getRuntime().availableProcessors())
+    private val pool = Executors.newFixedThreadPool(threads)
+
+    /** sRGB transfer function, applied only at the very end. */
+    private val gammaLut = IntArray(4096) { i ->
+        val v = i / 4095f
+        val e = if (v <= 0.0031308f) v * 12.92f else 1.055f * v.pow(1f / 2.4f) - 0.055f
+        (e * 255f + 0.5f).toInt().coerceIn(0, 255)
+    }
+
+    /**
+     * Measures a global exposure multiplier from the frame.
+     *
+     * Deliberately one number for the whole image: a global scale plus the
+     * highlight roll-off, with no local tone mapping, which is what keeps the
+     * result looking photographic rather than processed.
+     */
+    fun autoExposureGain(
+        frame: BayerFrame,
+        sensor: SensorProfile,
+        color: ColorProfile,
+        params: DevelopParams = DevelopParams(),
+    ): Float {
+        val w = frame.width
+        val h = frame.height
+        val range = sensor.range.toFloat()
+        val cfa = sensor.cfaPattern
+
+        // Sample the green sites only; green carries most of the luminance and
+        // is half the CFA, so it is both representative and cheap.
+        val samples = ArrayList<Float>(8192)
+        val stepY = max(1, h / 400)
+        val stepX = max(1, w / 400)
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                if (cfa[(y and 1) * 2 + (x and 1)] == 1) {
+                    val raw = frame.data[y * w + x].toInt() and 0xFFFF
+                    val lin = (raw - sensor.blackAt(x, y)).toFloat() / range
+                    samples.add(lin.coerceAtLeast(0f) * color.gainFor(1, y))
+                }
+                x += stepX
+            }
+            y += stepY
+        }
+        if (samples.size < 32) return 1f
+
+        samples.sort()
+        val idx = ((samples.size - 1) * params.highlightPercentile).toInt()
+        val bright = samples[idx]
+        if (bright <= 1e-5f) return MAX_AUTO_GAIN
+
+        return (params.highlightTarget / bright).coerceIn(MIN_AUTO_GAIN, MAX_AUTO_GAIN)
+    }
+
+    private const val MIN_AUTO_GAIN = 0.25f
+    private const val MAX_AUTO_GAIN = 64f
+
+    private fun resolveGain(
+        frame: BayerFrame,
+        sensor: SensorProfile,
+        color: ColorProfile,
+        params: DevelopParams,
+    ): Float = if (params.exposureGain > 0f) {
+        params.exposureGain
+    } else {
+        autoExposureGain(frame, sensor, color, params)
+    }
+
+    /**
+     * Develops directly into a Bitmap in horizontal bands.
+     *
+     * Bitmap pixel storage lives in native memory, but a full-resolution
+     * IntArray does not: at 12.5 MP that is a 50 MB Java allocation, which is
+     * what previously exhausted the heap. Only one band is held at a time.
+     */
+    fun developIntoBitmap(
+        frame: BayerFrame,
+        sensor: SensorProfile,
+        color: ColorProfile,
+        params: DevelopParams = DevelopParams(),
+        bandRows: Int = 128,
+    ): android.graphics.Bitmap {
+        val w = frame.width
+        val h = frame.height
+        val bitmap = android.graphics.Bitmap.createBitmap(
+            w, h, android.graphics.Bitmap.Config.ARGB_8888,
+        )
+        val gain = resolveGain(frame, sensor, color, params)
+        val resolved = params.copy(exposureGain = gain)
+        val band = IntArray(w * bandRows)
+        var y = 0
+        while (y < h) {
+            val rows = min(bandRows, h - y)
+            developBand(frame, sensor, color, resolved, y, rows, band)
+            bitmap.setPixels(band, 0, w, 0, y, w, rows)
+            y += rows
+        }
+        return bitmap
+    }
+
+    private fun developBand(
+        frame: BayerFrame,
+        sensor: SensorProfile,
+        color: ColorProfile,
+        params: DevelopParams,
+        yOffset: Int,
+        rows: Int,
+        out: IntArray,
+    ) {
+        val w = frame.width
+        val h = frame.height
+        parallelRows(rows) { rStart, rEnd ->
+            renderRows(frame, sensor, color, params, w, h, yOffset + rStart, yOffset + rEnd, out, yOffset)
+        }
+    }
+
+    /**
+     * Returns packed ARGB pixels for the whole frame. Used by tests, where the
+     * images are small; production goes through [developIntoBitmap].
+     */
+    fun develop(
+        frame: BayerFrame,
+        sensor: SensorProfile,
+        color: ColorProfile,
+        params: DevelopParams = DevelopParams(),
+    ): IntArray {
+        val w = frame.width
+        val h = frame.height
+        val out = IntArray(w * h)
+        val resolved = params.copy(exposureGain = resolveGain(frame, sensor, color, params))
+        parallelRows(h) { yStart, yEnd ->
+            renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0)
+        }
+        return out
+    }
+
+    /** Shared per-pixel render. [rowBase] lets a band write into a smaller buffer. */
+    private fun renderRows(
+        frame: BayerFrame,
+        sensor: SensorProfile,
+        color: ColorProfile,
+        params: DevelopParams,
+        w: Int,
+        h: Int,
+        yStart: Int,
+        yEnd: Int,
+        out: IntArray,
+        rowBase: Int,
+    ) {
+        val cfa = sensor.cfaPattern
+        val m = color.matrix
+        val acc = FloatArray(3)
+        val cnt = IntArray(3)
+        val range = sensor.range.toFloat()
+
+        for (y in yStart until yEnd) {
+            for (x in 0 until w) {
+                acc[0] = 0f; acc[1] = 0f; acc[2] = 0f
+                cnt[0] = 0; cnt[1] = 0; cnt[2] = 0
+
+                // Gather every channel present in the 3x3 neighbourhood.
+                for (dy in -1..1) {
+                    val sy = y + dy
+                    if (sy < 0 || sy >= h) continue
+                    for (dx in -1..1) {
+                        val sx = x + dx
+                        if (sx < 0 || sx >= w) continue
+                        val c = cfa[(sy and 1) * 2 + (sx and 1)]
+                        val raw = frame.data[sy * w + sx].toInt() and 0xFFFF
+                        val lin = (raw - sensor.blackAt(sx, sy)).toFloat() / range
+                        acc[c] += lin.coerceAtLeast(0f) * color.gainFor(c, sy)
+                        cnt[c]++
+                    }
+                }
+
+                val r0 = if (cnt[0] > 0) acc[0] / cnt[0] else 0f
+                val g0 = if (cnt[1] > 0) acc[1] / cnt[1] else 0f
+                val b0 = if (cnt[2] > 0) acc[2] / cnt[2] else 0f
+
+                var r = m[0] * r0 + m[1] * g0 + m[2] * b0
+                var g = m[3] * r0 + m[4] * g0 + m[5] * b0
+                var b = m[6] * r0 + m[7] * g0 + m[8] * b0
+
+                r = shoulder(r * params.exposureGain, params.shoulderKnee)
+                g = shoulder(g * params.exposureGain, params.shoulderKnee)
+                b = shoulder(b * params.exposureGain, params.shoulderKnee)
+
+                out[(y - rowBase) * w + x] = (0xFF shl 24) or
+                    (encode(r) shl 16) or (encode(g) shl 8) or encode(b)
+            }
+        }
+    }
+
+    private fun encode(v: Float): Int =
+        gammaLut[(v.coerceIn(0f, 1f) * 4095f).toInt()]
+
+    /** Linear below the knee, soft exponential roll-off above it. */
+    fun shoulder(x: Float, knee: Float): Float {
+        if (x <= 0f) return 0f
+        if (x <= knee) return x
+        val headroom = 1f - knee
+        return knee + headroom * (1f - exp(-(x - knee) / headroom))
+    }
+
+    private inline fun parallelRows(height: Int, crossinline body: (Int, Int) -> Unit) {
+        val band = (height + threads - 1) / threads
+        val tasks = ArrayList<Callable<Unit>>(threads)
+        for (t in 0 until threads) {
+            val start = t * band
+            val end = min(start + band, height)
+            if (start >= end) continue
+            tasks.add(Callable { body(start, end) })
+        }
+        pool.invokeAll(tasks).forEach { it.get() }
+    }
+}
