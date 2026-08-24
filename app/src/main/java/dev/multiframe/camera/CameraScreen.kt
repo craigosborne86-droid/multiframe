@@ -79,6 +79,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var mergeEnabled by remember { mutableStateOf(true) }
     var burstFrames by remember { mutableIntStateOf(8) }
     var busy by remember { mutableStateOf(false) }
+    var abMode by remember { mutableStateOf(false) }
     var exposureNote by remember { mutableStateOf("") }
 
     val buffer = remember { BurstBuffer(RING_CAPACITY) }
@@ -181,6 +182,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     active = mergeEnabled,
                 ) { if (!busy) mergeEnabled = !mergeEnabled }
 
+                Chip(label = "A/B", active = abMode) {
+                    if (!busy) abMode = !abMode
+                }
+
                 Chip(label = "$burstFrames FRAMES", active = false) {
                     if (!busy) {
                         burstFrames = when (burstFrames) {
@@ -217,24 +222,46 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             onClick = {
                 if (busy) return@ShutterButton
                 busy = true
-                status = "Capturing $burstFrames frames…"
+                status = if (abMode) "A/B capture, $burstFrames frames…"
+                    else "Capturing $burstFrames frames…"
 
                 scope.launch {
-                    val label = if (mergeEnabled) "merged" else "single"
+                    val label = if (abMode) "ab" else if (mergeEnabled) "merged" else "single"
                     val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
                         .format(System.currentTimeMillis())
 
                     val result = withContext(Dispatchers.Default) {
-                        val frames = buffer.snapshot(if (mergeEnabled) burstFrames else 1)
-                        if (frames.isEmpty()) return@withContext null
-                        val merged = Merger.process(frames, mergeEnabled)
-                        val uri = ImageSaver.saveJpeg(
-                            context,
-                            merged.bitmap,
-                            "MF_${stamp}_$label.jpg",
+                        // One snapshot drives every output, so an A/B pair is
+                        // guaranteed to be the same scene at the same instant.
+                        val frames = buffer.snapshot(
+                            if (mergeEnabled || abMode) burstFrames else 1
                         )
-                        merged.bitmap.recycle()
-                        merged.stats to uri
+                        if (frames.isEmpty()) return@withContext null
+
+                        if (abMode) {
+                            // Reference frame alone, then the merge of that same
+                            // burst. Identical tone curve, so the only difference
+                            // is the merge itself.
+                            val single = Merger.process(frames, mergeEnabled = false)
+                            ImageSaver.saveJpeg(
+                                context, single.bitmap, "MF_${stamp}_ab_single.jpg",
+                            )
+                            single.bitmap.recycle()
+
+                            val both = Merger.process(frames, mergeEnabled = true)
+                            val uri = ImageSaver.saveJpeg(
+                                context, both.bitmap, "MF_${stamp}_ab_merged.jpg",
+                            )
+                            both.bitmap.recycle()
+                            both.stats to uri
+                        } else {
+                            val merged = Merger.process(frames, mergeEnabled)
+                            val uri = ImageSaver.saveJpeg(
+                                context, merged.bitmap, "MF_${stamp}_$label.jpg",
+                            )
+                            merged.bitmap.recycle()
+                            merged.stats to uri
+                        }
                     }
 
                     status = if (result == null) {
