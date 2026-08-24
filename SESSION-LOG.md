@@ -9,8 +9,8 @@ Indigo demonstrates on iPhone; original code, name, icon and UI throughout.
 
 - Package: `dev.multiframe.camera` (final — cannot change after publication)
 - Target device for development: Pixel 9 Pro XL (`komodo`), Android 17 / API 37
-- ~11,000 lines across 45 Kotlin files and 6 native files
-- 172 JVM unit tests and 32 on-device instrumentation tests passing
+- ~15,000 lines across 65 Kotlin files and 6 native files
+- 218 JVM unit tests and 39 on-device instrumentation tests passing
 
 ---
 
@@ -509,6 +509,30 @@ every method returns zero, so tests written against it compare zeroes and pass
 while proving nothing. Two tests failed exactly that way and were the reason for
 the refactor.
 
+### The rest of the camera
+
+Things every serious camera has and this had none of, added in a block:
+
+- **Tap to focus and pinch to zoom.** The app could not be pointed at a subject
+  that was not in the middle of the frame.
+- **A level**, tested against known gravity vectors because a level that reads
+  backwards is worse than none. Roll is suppressed past seventy degrees of tilt,
+  where gravity lies along the viewing axis and roll is genuinely undefined.
+- **A live histogram**, square-root scaled so a few hundred clipped pixels show
+  against hundreds of thousands of midtones, read in place from the ring so it
+  consumes no frames.
+- **Settings that persist**, reconciled against real capabilities on the way in,
+  because sending manual exposure to a camera without MANUAL_SENSOR has the
+  whole request rejected and takes every other setting with it.
+- **Capture sharpening.** None was applied at all, which is soft rather than
+  neutral: even a perfect demosaic delivers less acutance than the lens
+  projected. Safe here in a way it is not on a single frame, because the merge
+  has already reduced the noise it would otherwise amplify.
+- **The merge now reports the noise it measured.** `estimatedSigmaAtMid` had
+  been returning zero since the native rewrite, so every claim about merge
+  quality rested on a number that was not being computed. Verified against known
+  noise: 2.10 for amplitude 4, 20.97 for amplitude 40.
+
 ---
 
 ## Super-resolution by telephoto mosaic
@@ -574,6 +598,29 @@ render with contrast disabled isolates the actual curve.
 the canvas gain was *not* the focal length ratio. It is exactly that, since
 tan(hfov/2) is 18/f by construction. The real naive error is using the ratio of
 *angles*, which undersizes by 14%.
+
+**A ratio test that kept its worst matches.** The degenerate branch was
+backwards: guarding with "only apply the ratio when the runner-up is imperfect"
+meant that when the runner-up was *exactly* as good as the winner -- a feature
+that is not identifiable at all -- the test was skipped and the match kept. A
+perfectly periodic pattern registered to a confident (-87, -57), not even a
+multiple of its own 16-pixel period.
+
+**Corner detection on a stride.** Scanning every second pixel quantised detected
+positions to even coordinates, so any displacement with an odd component put the
+corner a pixel off in one frame and not the other. A ten-by-five shift matched
+145 points of which 8 agreed. Real displacements are arbitrary, so this would
+have made stitching work only sometimes.
+
+**Gravity pointing the wrong way.** The level's first tests passed a vector up
+the screen instead of down. Two failed immediately, which is what tests against
+known vectors are for.
+
+**A sigma test that measured nothing.** The noise figure was checked on a 64x48
+frame, where the estimator -- which samples every eighth pixel and bins by
+brightness -- had about three samples per bin and fell back to its floor. It
+reported the same number for a quiet burst and a violently noisy one while
+passing an assertion that it was greater than zero.
 
 ## Next step
 
