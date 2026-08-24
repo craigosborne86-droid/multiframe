@@ -87,6 +87,8 @@ class NativeMerge private constructor(
             merged, bitmap, width, height,
             profile.cfaPattern, black, profile.whiteLevel,
             color.gains, color.matrix, gain, params.shoulderKnee,
+            params.contrast, params.highlightDesaturation,
+            params.desaturationStart, params.blackPoint,
         )
         if (!ok) {
             Log.w(TAG, "native develop failed, caller should fall back")
@@ -121,6 +123,7 @@ class NativeMerge private constructor(
         cfa: IntArray, black: IntArray, white: Int,
         gains: FloatArray, matrix: FloatArray,
         exposureGain: Float, knee: Float,
+        contrast: Float, desatStrength: Float, desatStart: Float, blackPoint: Float,
     ): Boolean
     private external fun nFramesMerged(h: Long): Int
     private external fun nDestroy(h: Long)

@@ -351,17 +351,76 @@ void ensureGammaLut() {
     gGammaReady = true;
 }
 
-inline uint8_t encodeSrgb(float v) {
+inline float encodeSrgb(float v) {
     v = std::clamp(v, 0.0f, 1.0f);
-    float e = gGammaLut[static_cast<int>(v * (kGammaLutSize - 1))];
-    return static_cast<uint8_t>(std::clamp(e * 255.0f + 0.5f, 0.0f, 255.0f));
+    return gGammaLut[static_cast<int>(v * (kGammaLutSize - 1))];
+}
+
+inline uint8_t toByte(float v) {
+    return static_cast<uint8_t>(std::clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
 }
 
 inline float shoulderCurve(float x, float knee) {
     if (x <= 0.0f) return 0.0f;
     if (x <= knee) return x;
     float headroom = 1.0f - knee;
+    if (headroom <= 0.0f) return knee;
     return knee + headroom * (1.0f - std::exp(-(x - knee) / headroom));
+}
+
+/**
+ * Rendering curve. Mirrors ToneCurve.kt, which is where the tests are; the
+ * instrumentation parity test pins the two together.
+ */
+struct ToneParams {
+    float exposureGain = 1.0f;
+    float knee = 0.70f;
+    float contrast = 0.30f;
+    float desatStrength = 1.0f;
+    float desatStart = 1.0f;
+    float blackPoint = 0.012f;
+};
+
+/** Hue-preserving roll-off, then highlight desaturation, in linear light. */
+inline void renderLinear(float& r, float& g, float& b, const ToneParams& t) {
+    r = std::max(r, 0.0f);
+    g = std::max(g, 0.0f);
+    b = std::max(b, 0.0f);
+
+    // Measured before compression: afterwards a bright sky and the sun both
+    // sit at 1 and nothing can tell them apart.
+    const float scenePeak = std::max(r, std::max(g, b));
+
+    if (scenePeak > t.knee) {
+        const float scale = shoulderCurve(scenePeak, t.knee) / scenePeak;
+        r *= scale; g *= scale; b *= scale;
+    }
+
+    if (t.desatStrength > 0.0f && scenePeak > t.desatStart) {
+        const float k = 1.0f - t.desatStart / scenePeak;
+        const float mix = std::clamp(k * k * t.desatStrength, 0.0f, 1.0f);
+        const float level = std::max(r, std::max(g, b));
+        r += (level - r) * mix;
+        g += (level - g) * mix;
+        b += (level - b) * mix;
+    }
+}
+
+/** Smootherstep blended with identity: monotonic for any amount in 0..1. */
+inline float sCurve(float x, float amount) {
+    if (amount <= 0.0f) return x;
+    const float c = std::clamp(x, 0.0f, 1.0f);
+    const float s = c * c * c * (c * (c * 6.0f - 15.0f) + 10.0f);
+    return c + amount * (s - c);
+}
+
+/** Black point then S-curve, applied after the gamma encode. */
+inline float renderDisplay(float encoded, const ToneParams& t) {
+    float v = encoded;
+    if (t.blackPoint > 0.0f) {
+        v = std::max((v - t.blackPoint) / (1.0f - t.blackPoint), 0.0f);
+    }
+    return std::clamp(sCurve(v, t.contrast), 0.0f, 1.0f);
 }
 
 }  // namespace
@@ -416,8 +475,17 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         jint width, jint height,
         jintArray jcfa, jintArray jblack, jint white,
         jfloatArray jgains, jfloatArray jmatrix,
-        jfloat exposureGain, jfloat knee) {
+        jfloat exposureGain, jfloat knee,
+        jfloat contrast, jfloat desatStrength, jfloat desatStart, jfloat blackPoint) {
     ensureGammaLut();
+
+    ToneParams tone;
+    tone.exposureGain = exposureGain;
+    tone.knee = knee;
+    tone.contrast = contrast;
+    tone.desatStrength = desatStrength;
+    tone.desatStart = desatStart;
+    tone.blackPoint = blackPoint;
 
     auto* src = static_cast<const uint16_t*>(env->GetDirectBufferAddress(merged));
     if (src == nullptr) return JNI_FALSE;
@@ -527,11 +595,16 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
                 float g = m[3] * r0 + m[4] * g0 + m[5] * b0;
                 float b = m[6] * r0 + m[7] * g0 + m[8] * b0;
 
+                r *= tone.exposureGain;
+                g *= tone.exposureGain;
+                b *= tone.exposureGain;
+                renderLinear(r, g, b, tone);
+
                 uint8_t* p = row + static_cast<size_t>(x) * 4;
                 // RGBA_8888 is byte order R,G,B,A in memory.
-                p[0] = encodeSrgb(shoulderCurve(r * exposureGain, knee));
-                p[1] = encodeSrgb(shoulderCurve(g * exposureGain, knee));
-                p[2] = encodeSrgb(shoulderCurve(b * exposureGain, knee));
+                p[0] = toByte(renderDisplay(encodeSrgb(r), tone));
+                p[1] = toByte(renderDisplay(encodeSrgb(g), tone));
+                p[2] = toByte(renderDisplay(encodeSrgb(b), tone));
                 p[3] = 255;
             }
         }

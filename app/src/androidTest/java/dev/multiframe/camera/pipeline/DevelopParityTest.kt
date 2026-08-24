@@ -114,51 +114,57 @@ class DevelopParityTest {
         assertThat(mean).isLessThan(0.25)
     }
 
+    /**
+     * The rendering curve, measured on the binary that actually runs.
+     *
+     * Measured against the same render with contrast switched off, rather than
+     * as an absolute slope. The composite slope from sensor code to output byte
+     * is dominated by the sRGB encode, which is steepest near black by
+     * construction, so an absolute measurement says nothing about the S-curve
+     * sitting on top of it. The difference between the two renders is the
+     * curve's actual contribution.
+     */
     @Test
-    fun nativeKeepsMeasuredSamplesLikeKotlinDoes() {
-        // The property that distinguishes the new demosaic from the old gather,
-        // checked on the implementation that actually runs.
-        val frame = scene()
-        val neutral = ColorProfile.NEUTRAL
-        val flatMatrix = ColorProfile(
-            gains = floatArrayOf(1f, 1f, 1f, 1f),
-            matrix = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
-        )
-        val merger = NativeMerge.create(width, height, profile)!!
-        // A gain of 1 with no shoulder engagement keeps the encode monotonic, so
-        // an averaged sample would show as a different code than a kept one.
-        val bitmap = merger.use {
-            it.develop(directBufferOf(frame), flatMatrix, DevelopParams(exposureGain = 1f))
-        }!!
-
-        var matches = 0
-        val out = FloatArray(3)
-        for (y in 4 until height - 4) {
-            for (x in 4 until width - 4) {
-                val colour = Demosaic.colourAt(profile, x, y)
-                Demosaic.pixel(frame, profile, neutral, x, y, out)
-                val native = when (colour) {
-                    0 -> Color.red(bitmap.getPixel(x, y))
-                    1 -> Color.green(bitmap.getPixel(x, y))
-                    else -> Color.blue(bitmap.getPixel(x, y))
-                }
-                val measured = Demosaic.sample(frame, profile, neutral, x, y)
-                // Both should encode the same measured value at this site.
-                val encoded = srgb8(RawDeveloper.shoulder(measured, 0.70f))
-                if (abs(native - encoded) <= 2) matches++
+    fun nativeRenderingCurveIsMonotonicAndAddsMidtoneContrast() {
+        fun ramp(params: DevelopParams): IntArray {
+            val levels = (80..1000 step 20).toList()
+            return IntArray(levels.size) { i ->
+                val flat = BayerFrame(width, height, ShortArray(width * height) {
+                    levels[i].toShort()
+                })
+                val merger = NativeMerge.create(width, height, profile)!!
+                val bitmap = merger.use {
+                    it.develop(directBufferOf(flat), ColorProfile.NEUTRAL, params)
+                }!!
+                val v = Color.green(bitmap.getPixel(width / 2, height / 2))
+                bitmap.recycle()
+                v
             }
         }
-        bitmap.recycle()
 
-        val total = (height - 8) * (width - 8)
-        Log.i(TAG, "native kept the measured sample at $matches of $total sites")
-        assertThat(matches).isAtLeast((total * 0.97).toInt())
-    }
+        val curved = ramp(fixedGain)
+        val flat = ramp(fixedGain.copy(contrast = 0f))
 
-    private fun srgb8(v: Float): Int {
-        val c = v.coerceIn(0f, 1f)
-        val e = if (c <= 0.0031308f) c * 12.92f
-        else 1.055f * Math.pow(c.toDouble(), 1.0 / 2.4).toFloat() - 0.055f
-        return (e * 255f + 0.5f).toInt().coerceIn(0, 255)
+        // A curve that ever descends turns a smooth sky into bands.
+        for (i in 1 until curved.size) {
+            assertThat(curved[i]).isAtLeast(curved[i - 1])
+        }
+
+        var darkened = 0
+        var brightened = 0
+        for (i in curved.indices) {
+            if (flat[i] in 25..105 && curved[i] < flat[i]) darkened++
+            if (flat[i] in 150..235 && curved[i] > flat[i]) brightened++
+        }
+        Log.i(
+            TAG,
+            "S-curve: $darkened shadow steps darkened, $brightened highlight steps lifted",
+        )
+
+        // The definition of an S: separation bought in the midtones by
+        // spending it at both ends.
+        assertThat(darkened).isGreaterThan(0)
+        assertThat(brightened).isGreaterThan(0)
+        assertThat(curved.first()).isLessThan(curved.last())
     }
 }

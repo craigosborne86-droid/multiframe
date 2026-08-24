@@ -2,7 +2,6 @@ package dev.multiframe.camera.pipeline
 
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -26,6 +25,21 @@ data class DevelopParams(
     val highlightTarget: Float = 0.62f,
     /** Percentile treated as the bright end, ignoring speculars. */
     val highlightPercentile: Float = 0.92f,
+    /**
+     * Midtone contrast, as the strength of an S-curve applied after the gamma
+     * encode. The slope at mid-grey is 1 + 0.875 * this. Zero renders the scene
+     * with no curve at all, which looks washed out rather than neutral.
+     */
+    val contrast: Float = 0.30f,
+    /** How completely the brightest areas give up their colour. */
+    val highlightDesaturation: Float = 1.0f,
+    /**
+     * Scene-linear level at which that begins, in units where 1.0 is nominal
+     * white. Anything below this keeps its colour untouched.
+     */
+    val desaturationStart: Float = 1.0f,
+    /** Toe. A little density in the deepest shadows, as film has. */
+    val blackPoint: Float = 0.012f,
 ) {
     companion object {
         const val AUTO_EXPOSURE = -1f
@@ -49,10 +63,10 @@ object RawDeveloper {
     private val pool = Executors.newFixedThreadPool(threads)
 
     /** sRGB transfer function, applied only at the very end. */
-    private val gammaLut = IntArray(4096) { i ->
+    private val gammaLut = FloatArray(4096) { i ->
         val v = i / 4095f
         val e = if (v <= 0.0031308f) v * 12.92f else 1.055f * v.pow(1f / 2.4f) - 0.055f
-        (e * 255f + 0.5f).toInt().coerceIn(0, 255)
+        e * 255f
     }
 
     /**
@@ -213,26 +227,28 @@ object RawDeveloper {
                 var g = m[3] * r0 + m[4] * g0 + m[5] * b0
                 var b = m[6] * r0 + m[7] * g0 + m[8] * b0
 
-                r = shoulder(r * params.exposureGain, params.shoulderKnee)
-                g = shoulder(g * params.exposureGain, params.shoulderKnee)
-                b = shoulder(b * params.exposureGain, params.shoulderKnee)
+                rgb[0] = r * params.exposureGain
+                rgb[1] = g * params.exposureGain
+                rgb[2] = b * params.exposureGain
+                ToneCurve.renderLinear(rgb, params)
 
                 out[(y - rowBase) * w + x] = (0xFF shl 24) or
-                    (encode(r) shl 16) or (encode(g) shl 8) or encode(b)
+                    (encode(rgb[0], params) shl 16) or
+                    (encode(rgb[1], params) shl 8) or
+                    encode(rgb[2], params)
             }
         }
     }
 
-    private fun encode(v: Float): Int =
-        gammaLut[(v.coerceIn(0f, 1f) * 4095f).toInt()]
-
-    /** Linear below the knee, soft exponential roll-off above it. */
-    fun shoulder(x: Float, knee: Float): Float {
-        if (x <= 0f) return 0f
-        if (x <= knee) return x
-        val headroom = 1f - knee
-        return knee + headroom * (1f - exp(-(x - knee) / headroom))
+    /** Gamma encode, then the display-domain contrast stage. */
+    private fun encode(v: Float, params: DevelopParams): Int {
+        val gamma = gammaLut[(v.coerceIn(0f, 1f) * 4095f).toInt()] / 255f
+        return (ToneCurve.renderDisplay(gamma, params) * 255f + 0.5f)
+            .toInt().coerceIn(0, 255)
     }
+
+    /** Retained for callers that want the roll-off alone. */
+    fun shoulder(x: Float, knee: Float): Float = ToneCurve.shoulder(x, knee)
 
     private inline fun parallelRows(height: Int, crossinline body: (Int, Int) -> Unit) {
         val band = (height + threads - 1) / threads
