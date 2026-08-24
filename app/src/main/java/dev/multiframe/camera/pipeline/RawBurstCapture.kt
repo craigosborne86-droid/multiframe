@@ -15,6 +15,8 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.text.SimpleDateFormat
@@ -48,6 +50,10 @@ data class RawBurstResult(
 object RawBurstCapture {
 
     private const val MIME_DNG = "image/x-adobe-dng"
+
+    /** RAW_JPEG yields two images per capture: the DNG payload and a JPEG. */
+    private const val EXPECTED_IMAGES = 2
+    private const val RAW_FRAME_TIMEOUT_MS = 15_000L
 
     suspend fun captureAndMerge(
         context: Context,
@@ -116,39 +122,55 @@ object RawBurstCapture {
         )
     }
 
-    /** One in-memory raw frame. Returns null if the delivered format is not raw. */
+    /**
+     * One in-memory raw frame.
+     *
+     * With OUTPUT_FORMAT_RAW_JPEG the callback fires twice, once per image, and
+     * the JPEG usually arrives first. Only the RAW_SENSOR image is wanted; the
+     * companion is closed and ignored. The continuation is guarded because
+     * resuming twice is fatal.
+     */
     private suspend fun takeOne(
         context: Context,
         imageCapture: ImageCapture,
-    ): BayerFrame? = suspendCancellableCoroutine { cont ->
-        imageCapture.takePicture(
-            ContextCompat.getMainExecutor(context),
-            object : ImageCapture.OnImageCapturedCallback() {
-                override fun onCaptureSuccess(image: ImageProxy) {
-                    try {
-                        if (image.format != ImageFormat.RAW_SENSOR) {
-                            Log.w(
-                                TAG,
-                                "expected RAW_SENSOR (${ImageFormat.RAW_SENSOR}) " +
-                                    "but got format ${image.format} " +
-                                    "${image.width}x${image.height}",
-                            )
-                            cont.resume(null)
-                            return
-                        }
-                        cont.resume(BayerFrame.copyFrom(image))
-                    } catch (e: Exception) {
-                        cont.resumeWithException(e)
-                    } finally {
-                        image.close()
-                    }
-                }
+    ): BayerFrame? = withTimeoutOrNull(RAW_FRAME_TIMEOUT_MS) {
+        suspendCancellableCoroutine { cont ->
+            val settled = AtomicBoolean(false)
+            var seen = 0
 
-                override fun onError(exception: ImageCaptureException) {
-                    cont.resumeWithException(exception)
-                }
-            },
-        )
+            imageCapture.takePicture(
+                ContextCompat.getMainExecutor(context),
+                object : ImageCapture.OnImageCapturedCallback() {
+                    override fun onCaptureSuccess(image: ImageProxy) {
+                        try {
+                            seen++
+                            if (image.format == ImageFormat.RAW_SENSOR) {
+                                val frame = BayerFrame.copyFrom(image)
+                                if (settled.compareAndSet(false, true)) cont.resume(frame)
+                            } else if (seen >= EXPECTED_IMAGES && !settled.get()) {
+                                // Both images arrived and neither was raw. If the
+                                // raw already resumed this branch is not a failure,
+                                // hence the settled check before warning.
+                                Log.w(TAG, "no RAW_SENSOR image in this capture")
+                                if (settled.compareAndSet(false, true)) cont.resume(null)
+                            }
+                        } catch (e: Exception) {
+                            if (settled.compareAndSet(false, true)) {
+                                cont.resumeWithException(e)
+                            }
+                        } finally {
+                            image.close()
+                        }
+                    }
+
+                    override fun onError(exception: ImageCaptureException) {
+                        if (settled.compareAndSet(false, true)) {
+                            cont.resumeWithException(exception)
+                        }
+                    }
+                },
+            )
+        }
     }
 
     private fun writeDng(

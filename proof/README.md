@@ -240,3 +240,68 @@ Store assets generated from the same geometry as the in-app adaptive icon:
 
 The store icon is scaled to fill more of the square than the adaptive icon,
 which needs to stay inside the safe zone for launcher masking.
+
+## Merged raw (DNG that carries the burst)
+
+The single-frame DNG above is one unprocessed frame. This is the merged one:
+a burst of raw frames aligned and combined in the Bayer domain, written back
+out as a DNG.
+
+| File | |
+|---|---|
+| `MF_20260824_150646_raw.dng` | single raw frame |
+| `MF_20260824_150707_merged_8f.dng` | 8 raw frames merged |
+| `p6_raw_merge.png` | dark flat region, green plane, 14x gain on both |
+
+Both are valid DNG 1.4.0.0, 4080x3072, 16-bit, photometric 32803 (CFA),
+CFAPattern GBRG, white level 1023. Captured 20 s apart with the phone
+stationary (accelerometer 9.74/1.14 then 9.74/1.17).
+
+### Measured
+
+    flat-region noise, per CFA plane (codes)
+      G   0.948 -> 0.482   ratio 0.508
+      B   0.942 -> 0.447   ratio 0.475
+      R   0.940 -> 0.423   ratio 0.450
+      G2  0.946 -> 0.481   ratio 0.508
+    mean ratio 0.485  ->  2.06x noise reduction
+
+    framesCaptured 8, framesMerged 8, meanContribution 0.988
+    capture 1716 ms, merge 4907 ms, write 199 ms
+
+2.06x against a theoretical 2.83x for eight frames. The shortfall is expected
+here: single-frame noise is only 0.95 codes, essentially at the quantisation
+floor, and sensor fixed-pattern noise is identical in every frame so averaging
+cannot remove it.
+
+### Two measurements I got wrong first
+
+Recorded because both produced confident, wrong numbers.
+
+**Strip offsets.** The first extraction reported 4.25x improvement and noise
+sigmas above 600 codes in a 10-bit file. `StripOffsets` in these DNGs is an
+array of 3072 entries (`RowsPerStrip` = 1), not a single value; the tag holds a
+pointer to the offset table. Reading from that pointer parses the table itself
+as pixels. Tells were a same-scene correlation of 0.54 and a merged blue plane
+that came out almost perfectly flat.
+
+**Texture counted as noise.** The corrected extraction then reported only 1.22x.
+That metric takes the residual against neighbouring pixels, which captures scene
+detail as well as noise, and merging correctly preserves detail. Restricting the
+measurement to the flattest 20% of blocks gives the real figure of 2.06x.
+
+### Sequential capture is not a hardware burst
+
+CameraX cannot stream RAW_SENSOR through ImageAnalysis, so frames are requested
+one at a time. Measured arrival times span 5.6 seconds at roughly 870 ms apart:
+
+    54.335  54.755  55.620  56.481  57.349  58.219  59.081  59.970
+
+A real burst is tens of milliseconds apart. Frame agreement stayed high here
+(contribution 0.988) so nothing was rejected, but this window is far too long
+for moving subjects and rules out zero shutter lag for raw. Closing it means a
+parallel Camera2 session with ImageReader(RAW_SENSOR) and captureBurst.
+
+Also note RAW_JPEG delivers two images per capture through separate callbacks,
+with the JPEG usually arriving first. Resuming on the first one crashed with
+"Already resumed"; the raw is the second.
