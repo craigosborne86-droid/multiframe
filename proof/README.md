@@ -422,3 +422,31 @@ scene. The two agree, so the native path is faster without changing the result.
 Develop, at 1903 ms, is now the largest single stage and is still Kotlin. It
 also still copies the merged result into a 25 MB ShortArray, which is the
 obvious next thing to move native.
+
+## Native develop
+
+Develop was the largest remaining stage at 1903 ms, and still copied the merged
+result into a 25 MB ShortArray. It now runs in C++ and writes straight into the
+Bitmap's pixel store through `AndroidBitmap_lockPixels`, so both ends are
+native and the developed image never passes through a Java array.
+
+    develop   1903 ms -> 544 ms      3.5x faster
+    full shot capture 1649, merge 1884, develop 544, write 240 ms
+
+Colour verified rather than assumed: native RGBA_8888 is byte order R,G,B,A in
+memory, which differs from Java's packed ARGB int, so a mistake would show as
+swapped red and blue. `p8_native_develop.png` renders correctly, with warm
+brickwork, green foliage and a teal curtain.
+
+Auto exposure moved native too, logging the gain it measured
+(`native develop gain=14.16` on this scene). The Kotlin developer stays as a
+fallback and remains the implementation the unit tests cover.
+
+### Whole-pipeline progress
+
+    stage       original   now
+    capture         1716   1649
+    merge           4245   1884
+    develop         1903    544
+    write            199    240
+    total          ~8060   ~4317 ms

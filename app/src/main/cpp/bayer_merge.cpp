@@ -323,3 +323,175 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nFramesMerged(JNIEnv*, jobject, 
 }
 
 }  // extern "C"
+
+// ---------------------------------------------------------------------------
+// Develop: merged CFA -> sRGB, written directly into a Bitmap's pixels.
+//
+// Keeps the whole path off the Java heap. The merged data is already in a
+// native buffer and the destination is the Bitmap's own pixel store, so no
+// intermediate array exists at any point.
+// ---------------------------------------------------------------------------
+
+#include <android/bitmap.h>
+
+namespace {
+
+constexpr int kGammaLutSize = 4096;
+float gGammaLut[kGammaLutSize];
+bool gGammaReady = false;
+
+void ensureGammaLut() {
+    if (gGammaReady) return;
+    for (int i = 0; i < kGammaLutSize; ++i) {
+        float v = static_cast<float>(i) / (kGammaLutSize - 1);
+        float e = (v <= 0.0031308f) ? v * 12.92f
+                                    : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+        gGammaLut[i] = e;
+    }
+    gGammaReady = true;
+}
+
+inline uint8_t encodeSrgb(float v) {
+    v = std::clamp(v, 0.0f, 1.0f);
+    float e = gGammaLut[static_cast<int>(v * (kGammaLutSize - 1))];
+    return static_cast<uint8_t>(std::clamp(e * 255.0f + 0.5f, 0.0f, 255.0f));
+}
+
+inline float shoulderCurve(float x, float knee) {
+    if (x <= 0.0f) return 0.0f;
+    if (x <= knee) return x;
+    float headroom = 1.0f - knee;
+    return knee + headroom * (1.0f - std::exp(-(x - knee) / headroom));
+}
+
+}  // namespace
+
+extern "C" {
+
+/**
+ * Measures a global exposure multiplier from the green sites of the merged
+ * frame. One number for the whole image: no local tone mapping.
+ */
+JNIEXPORT jfloat JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nAutoExposure(
+        JNIEnv* env, jobject, jobject merged, jint width, jint height,
+        jintArray jcfa, jintArray jblack, jint white,
+        jfloatArray jgains, jfloat percentile, jfloat target) {
+    auto* src = static_cast<const uint16_t*>(env->GetDirectBufferAddress(merged));
+    if (src == nullptr) return 1.0f;
+
+    int cfa[4], black[4];
+    float gains[4];
+    env->GetIntArrayRegion(jcfa, 0, 4, cfa);
+    env->GetIntArrayRegion(jblack, 0, 4, black);
+    env->GetFloatArrayRegion(jgains, 0, 4, gains);
+
+    int lo = std::min(std::min(black[0], black[1]), std::min(black[2], black[3]));
+    float range = static_cast<float>(std::max(1, white - lo));
+
+    std::vector<float> samples;
+    samples.reserve(8192);
+    int stepY = std::max(1, height / 400);
+    int stepX = std::max(1, width / 400);
+    for (int y = 0; y < height; y += stepY) {
+        for (int x = 0; x < width; x += stepX) {
+            if (cfa[(y & 1) * 2 + (x & 1)] != 1) continue;
+            float lin = (static_cast<float>(src[static_cast<size_t>(y) * width + x]) -
+                         black[(y & 1) * 2 + (x & 1)]) / range;
+            float g = (y & 1) == 0 ? gains[1] : gains[2];
+            samples.push_back(std::max(lin, 0.0f) * g);
+        }
+    }
+    if (samples.size() < 32) return 1.0f;
+
+    std::sort(samples.begin(), samples.end());
+    float bright = samples[static_cast<size_t>((samples.size() - 1) * percentile)];
+    if (bright <= 1e-5f) return 64.0f;
+    return std::clamp(target / bright, 0.25f, 64.0f);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
+        JNIEnv* env, jobject, jobject merged, jobject bitmap,
+        jint width, jint height,
+        jintArray jcfa, jintArray jblack, jint white,
+        jfloatArray jgains, jfloatArray jmatrix,
+        jfloat exposureGain, jfloat knee) {
+    ensureGammaLut();
+
+    auto* src = static_cast<const uint16_t*>(env->GetDirectBufferAddress(merged));
+    if (src == nullptr) return JNI_FALSE;
+
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
+        return JNI_FALSE;
+    }
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
+
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS) {
+        return JNI_FALSE;
+    }
+
+    int cfa[4], black[4];
+    float gains[4], m[9];
+    env->GetIntArrayRegion(jcfa, 0, 4, cfa);
+    env->GetIntArrayRegion(jblack, 0, 4, black);
+    env->GetFloatArrayRegion(jgains, 0, 4, gains);
+    env->GetFloatArrayRegion(jmatrix, 0, 9, m);
+
+    int lo = std::min(std::min(black[0], black[1]), std::min(black[2], black[3]));
+    const float range = static_cast<float>(std::max(1, white - lo));
+    auto* dstBase = static_cast<uint8_t*>(pixels);
+    const int stride = static_cast<int>(info.stride);
+
+    parallelBands(height, [&](int y0, int y1) {
+        float acc[3];
+        int cnt[3];
+        for (int y = y0; y < y1; ++y) {
+            uint8_t* row = dstBase + static_cast<size_t>(y) * stride;
+            for (int x = 0; x < width; ++x) {
+                acc[0] = acc[1] = acc[2] = 0.0f;
+                cnt[0] = cnt[1] = cnt[2] = 0;
+
+                // A 3x3 window around any Bayer pixel contains all three
+                // colours, whatever the arrangement.
+                for (int dy = -1; dy <= 1; ++dy) {
+                    int sy = y + dy;
+                    if (sy < 0 || sy >= height) continue;
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int sx = x + dx;
+                        if (sx < 0 || sx >= width) continue;
+                        int c = cfa[(sy & 1) * 2 + (sx & 1)];
+                        float lin = (static_cast<float>(src[static_cast<size_t>(sy) * width + sx]) -
+                                     black[(sy & 1) * 2 + (sx & 1)]) / range;
+                        float g = (c == 0) ? gains[0] : (c == 2) ? gains[3]
+                                                                 : ((sy & 1) == 0 ? gains[1] : gains[2]);
+                        acc[c] += std::max(lin, 0.0f) * g;
+                        cnt[c]++;
+                    }
+                }
+
+                float r0 = cnt[0] ? acc[0] / cnt[0] : 0.0f;
+                float g0 = cnt[1] ? acc[1] / cnt[1] : 0.0f;
+                float b0 = cnt[2] ? acc[2] / cnt[2] : 0.0f;
+
+                float r = m[0] * r0 + m[1] * g0 + m[2] * b0;
+                float g = m[3] * r0 + m[4] * g0 + m[5] * b0;
+                float b = m[6] * r0 + m[7] * g0 + m[8] * b0;
+
+                uint8_t* p = row + static_cast<size_t>(x) * 4;
+                // RGBA_8888 is byte order R,G,B,A in memory.
+                p[0] = encodeSrgb(shoulderCurve(r * exposureGain, knee));
+                p[1] = encodeSrgb(shoulderCurve(g * exposureGain, knee));
+                p[2] = encodeSrgb(shoulderCurve(b * exposureGain, knee));
+                p[3] = 255;
+            }
+        }
+    });
+
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return JNI_TRUE;
+}
+
+}  // extern "C"

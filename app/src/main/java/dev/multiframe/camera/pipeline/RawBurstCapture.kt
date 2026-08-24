@@ -136,7 +136,7 @@ object RawBurstCapture {
             mergeMillis += System.currentTimeMillis() - t1
 
             return finishOutputs(
-                context, mergedBuffer, m.width, m.height, profile,
+                context, m, mergedBuffer, m.width, m.height, profile,
                 characteristics, captureResult, rotationDegrees,
                 frameCount, captured, stats, captureMillis, mergeMillis,
             )
@@ -149,6 +149,7 @@ object RawBurstCapture {
 
     private fun finishOutputs(
         context: Context,
+        merger: NativeMerge,
         mergedBuffer: java.nio.ByteBuffer,
         width: Int,
         height: Int,
@@ -177,14 +178,16 @@ object RawBurstCapture {
 
         val t3 = System.currentTimeMillis()
         val color = ColorProfile.from(captureResult)
-        // The developer still wants a Kotlin-side frame. At 25 MB that is
-        // affordable now the 100 MB of accumulators live natively; the copy is
-        // one pass and could be removed by moving develop into native too.
-        val shorts = ShortArray(width * height)
-        mergedBuffer.rewind()
-        mergedBuffer.asShortBuffer().get(shorts)
-        val merged = BayerFrame(width, height, shorts)
-        var bitmap = RawDeveloper.developIntoBitmap(merged, profile, color)
+        // Native develop writes into the Bitmap's own pixels, so nothing here
+        // touches the Java heap. Falls back to the Kotlin developer, which is
+        // the implementation the unit tests cover, if native declines.
+        var bitmap = merger.develop(mergedBuffer, color) ?: run {
+            Log.w(TAG, "falling back to Kotlin develop")
+            val shorts = ShortArray(width * height)
+            mergedBuffer.rewind()
+            mergedBuffer.asShortBuffer().get(shorts)
+            RawDeveloper.developIntoBitmap(BayerFrame(width, height, shorts), profile, color)
+        }
         bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
         val jpegName = "MF_${stamp}_merged_${captured}f.jpg"
         val jpegOk = ImageSaver.saveJpeg(context, bitmap, jpegName) != null

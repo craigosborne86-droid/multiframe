@@ -12,4 +12,7 @@ target_compile_options(multiframe PRIVATE
 )
 
 find_library(log-lib log)
-target_link_libraries(multiframe ${log-lib})
+# jnigraphics lets native write straight into a Bitmap's pixel store, so the
+# developed image never passes through a Java array.
+find_library(jnigraphics-lib jnigraphics)
+target_link_libraries(multiframe ${log-lib} ${jnigraphics-lib})

@@ -1,5 +1,6 @@
 package dev.multiframe.camera.pipeline
 
+import android.graphics.Bitmap
 import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -60,6 +61,42 @@ class NativeMerge private constructor(
         )
     }
 
+    /**
+     * Develops merged CFA data straight into a Bitmap's pixel store.
+     *
+     * Both ends are native: the merged buffer is a direct ByteBuffer and the
+     * destination is the Bitmap's own pixels, so the developed image never
+     * passes through a Java array.
+     */
+    fun develop(
+        merged: ByteBuffer,
+        color: ColorProfile,
+        params: DevelopParams = DevelopParams(),
+    ): Bitmap? {
+        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        val gain = if (params.exposureGain > 0f) {
+            params.exposureGain
+        } else {
+            nAutoExposure(
+                merged, width, height, profile.cfaPattern, black, profile.whiteLevel,
+                color.gains, params.highlightPercentile, params.highlightTarget,
+            )
+        }
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val ok = nDevelop(
+            merged, bitmap, width, height,
+            profile.cfaPattern, black, profile.whiteLevel,
+            color.gains, color.matrix, gain, params.shoulderKnee,
+        )
+        if (!ok) {
+            Log.w(TAG, "native develop failed, caller should fall back")
+            bitmap.recycle()
+            return null
+        }
+        Log.i(TAG, "native develop gain=%.2f".format(gain))
+        return bitmap
+    }
+
     override fun close() {
         if (closed) return
         closed = true
@@ -74,6 +111,17 @@ class NativeMerge private constructor(
         dx: IntArray, dy: IntArray, tilesX: Int, tilesY: Int,
     )
     private external fun nFinish(h: Long, out: ByteBuffer): Float
+    private external fun nAutoExposure(
+        merged: ByteBuffer, width: Int, height: Int,
+        cfa: IntArray, black: IntArray, white: Int,
+        gains: FloatArray, percentile: Float, target: Float,
+    ): Float
+    private external fun nDevelop(
+        merged: ByteBuffer, bitmap: Bitmap, width: Int, height: Int,
+        cfa: IntArray, black: IntArray, white: Int,
+        gains: FloatArray, matrix: FloatArray,
+        exposureGain: Float, knee: Float,
+    ): Boolean
     private external fun nFramesMerged(h: Long): Int
     private external fun nDestroy(h: Long)
     private external fun nCreate(
