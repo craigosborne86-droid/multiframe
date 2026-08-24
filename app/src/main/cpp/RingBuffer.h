@@ -122,6 +122,20 @@ public:
     /** Frames available to a snapshot right now. */
     int readyCount() const;
 
+    /**
+     * Histograms the newest ready frame without consuming it.
+     *
+     * Needed because highlight protection has to run *while* streaming: by the
+     * time the shutter is pressed the frames already exist, so an exposure
+     * decision taken then is a decision about the next photograph rather than
+     * this one. Taking a snapshot to measure would consume frames the shutter
+     * is meant to use, so this reads in place under the lock instead.
+     *
+     * Returns false when the ring holds nothing yet.
+     */
+    bool HistogramNewest(int* bins, int binCount, int stride,
+                         const int* black, int white, const int* cfa) const;
+
     RingStats stats() const;
     void ResetStats();
 

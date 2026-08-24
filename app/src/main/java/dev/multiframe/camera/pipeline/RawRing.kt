@@ -138,6 +138,24 @@ class RawRing private constructor(
     /** Frames a shutter press could take right now. */
     fun readyCount(): Int = if (closed) 0 else nReadyCount(handle)
 
+    /**
+     * Histograms the newest frame without consuming it.
+     *
+     * Highlight protection has to run while streaming: by the time the shutter
+     * is pressed the frames already exist, so an exposure decision taken then
+     * would be about the next photograph. Taking a snapshot to measure would
+     * consume frames the shutter is meant to use, so this reads in place.
+     */
+    fun histogramNewest(
+        bins: IntArray,
+        profile: SensorProfile,
+        stride: Int = 8,
+    ): Boolean {
+        if (closed) return false
+        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        return nHistogramNewest(handle, bins, stride, black, profile.whiteLevel, profile.cfaPattern)
+    }
+
     fun stats(): RingStats {
         if (closed) return RingStats(0, 0, 0, 0, 0, 0, 0, 0, 0)
         nStats(handle, statsScratch)
@@ -185,6 +203,10 @@ class RawRing private constructor(
     private external fun nResetStats(h: Long)
     private external fun nLockedCount(h: Long): Int
     private external fun nReadyCount(h: Long): Int
+    private external fun nHistogramNewest(
+        h: Long, outBins: IntArray, stride: Int,
+        black: IntArray, white: Int, cfa: IntArray,
+    ): Boolean
 
     companion object {
         /**

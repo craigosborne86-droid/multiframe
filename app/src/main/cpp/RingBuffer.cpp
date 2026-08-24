@@ -273,6 +273,46 @@ int RawRing::readyCount() const {
     return n;
 }
 
+bool RawRing::HistogramNewest(int* bins, int binCount, int stride,
+                              const int* black, int white, const int* cfa) const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (base_ == nullptr || bins == nullptr || binCount <= 0) return false;
+
+    int newest = -1;
+    int64_t newestSequence = -1;
+    for (int i = 0; i < capacity_; ++i) {
+        const Slot& s = slots_[static_cast<size_t>(i)];
+        if (s.state != SlotState::kReady) continue;
+        if (s.sequence > newestSequence) {
+            newestSequence = s.sequence;
+            newest = i;
+        }
+    }
+    if (newest < 0) return false;
+
+    const auto* src = reinterpret_cast<const uint16_t*>(
+        base_ + static_cast<size_t>(newest) * slotBytes_);
+    int lo = std::min(std::min(black[0], black[1]), std::min(black[2], black[3]));
+    const float range = static_cast<float>(std::max(1, white - lo));
+    const int step = std::max(1, stride);
+
+    std::fill(bins, bins + binCount, 0);
+    for (int y = 0; y < height_; y += step) {
+        for (int x = 0; x < width_; x += step) {
+            // Green sites only: half the sensor, and where the luminance is.
+            if (cfa[(y & 1) * 2 + (x & 1)] != 1) continue;
+            const float lin =
+                (static_cast<float>(src[static_cast<size_t>(y) * width_ + x]) -
+                 black[(y & 1) * 2 + (x & 1)]) / range;
+            const int bin = std::clamp(
+                static_cast<int>(std::clamp(lin, 0.0f, 1.0f) * (binCount - 1)),
+                0, binCount - 1);
+            bins[bin]++;
+        }
+    }
+    return true;
+}
+
 RingStats RawRing::stats() const {
     std::lock_guard<std::mutex> guard(mutex_);
     return stats_;
@@ -434,6 +474,28 @@ JNIEXPORT jint JNICALL
 Java_dev_multiframe_camera_pipeline_RawRing_nReadyCount(JNIEnv*, jobject, jlong handle) {
     RawRing* ring = ringOf(handle);
     return ring == nullptr ? 0 : ring->readyCount();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_multiframe_camera_pipeline_RawRing_nHistogramNewest(
+        JNIEnv* env, jobject, jlong handle, jintArray outBins, jint stride,
+        jintArray jblack, jint white, jintArray jcfa) {
+    RawRing* ring = ringOf(handle);
+    if (ring == nullptr) return JNI_FALSE;
+
+    const jsize binCount = env->GetArrayLength(outBins);
+    if (binCount <= 0) return JNI_FALSE;
+
+    int black[4], cfa[4];
+    env->GetIntArrayRegion(jblack, 0, 4, black);
+    env->GetIntArrayRegion(jcfa, 0, 4, cfa);
+
+    std::vector<int> bins(static_cast<size_t>(binCount));
+    if (!ring->HistogramNewest(bins.data(), binCount, stride, black, white, cfa)) {
+        return JNI_FALSE;
+    }
+    env->SetIntArrayRegion(outBins, 0, binCount, bins.data());
+    return JNI_TRUE;
 }
 
 }  // extern "C"

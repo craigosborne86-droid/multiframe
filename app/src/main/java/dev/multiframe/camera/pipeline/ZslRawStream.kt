@@ -99,6 +99,23 @@ class ZslRawStream private constructor(
     @Volatile
     private var closed = false
 
+    /**
+     * Exposure compensation the highlight guard has asked for, overriding what
+     * the user's settings would otherwise request.
+     */
+    @Volatile
+    private var evOverride: Int? = null
+
+    /** Stops of exposure currently being given up to protect highlights. */
+    @Volatile
+    var pullStops: Float = 0f
+        private set
+
+    private val sensorProfile by lazy { SensorProfile.from(characteristics) }
+    private val histogramBins = IntArray(64)
+    private var lastSettings: ManualSettings? = null
+    private var lastCaps: CameraCapabilities? = null
+
     val ringCapacity: Int get() = ring.capacity
     val ringReservedBytes: Long get() = ring.reservedBytes
 
@@ -137,9 +154,56 @@ class ZslRawStream private constructor(
         return ZslBurst(frames, results)
     }
 
+    /**
+     * Re-reads the scene and protects the highlights if it needs to.
+     *
+     * Has to run while streaming rather than at the shutter. In a
+     * zero-shutter-lag camera the frames already exist when the button is
+     * pressed, so an exposure decision taken then applies to the *next*
+     * photograph. Continuously is the only moment that affects this one.
+     *
+     * Returns what it saw, or null when it declined to act -- no frames yet, or
+     * the user has taken manual control of exposure, in which case second
+     * guessing them would be wrong.
+     */
+    fun protectHighlights(
+        frameCount: Int,
+        caps: CameraCapabilities,
+        settings: ManualSettings,
+    ): SceneAnalysis? {
+        if (closed) return null
+        if (settings.manualExposureActive(caps)) return null
+        if (!ring.histogramNewest(histogramBins, sensorProfile)) return null
+
+        val analysis = ExposureStrategy.analyse(histogramBins)
+        val index = ExposureStrategy.recommendedEvIndex(analysis, frameCount, caps)
+        if (index != evOverride) {
+            evOverride = index
+            pullStops = index * caps.evStep
+            Log.i(
+                TAG,
+                "highlight guard: clipped %.3f, pulling %.2f stops (EV index %d)".format(
+                    analysis.clippedFraction, pullStops, index,
+                ),
+            )
+            applySettings(settings, caps)
+        }
+        return analysis
+    }
+
+    /** Releases the guard's hold on exposure, back to what the user asked for. */
+    fun clearHighlightProtection(caps: CameraCapabilities, settings: ManualSettings) {
+        if (closed || evOverride == null) return
+        evOverride = null
+        pullStops = 0f
+        applySettings(settings, caps)
+    }
+
     /** Applies manual settings by rebuilding the repeating request. */
     fun applySettings(settings: ManualSettings, caps: CameraCapabilities) {
         if (closed) return
+        lastSettings = settings
+        lastCaps = caps
         try {
             session.setRepeatingRequest(
                 buildRequest(settings, caps), captureCallback, Handler(cameraThread.looper),
@@ -255,9 +319,12 @@ class ZslRawStream private constructor(
                 android.hardware.camera2.CameraMetadata.CONTROL_AE_MODE_ON,
             )
             if (caps.supportsExposureCompensation) {
+                // The guard's decision wins over the user's baseline
+                // compensation while it is engaged, because it is a measured
+                // response to this scene rather than a standing preference.
                 template.set(
                     CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
-                    settings.effectiveEvIndex(caps),
+                    evOverride ?: settings.effectiveEvIndex(caps),
                 )
             }
         }

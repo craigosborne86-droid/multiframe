@@ -527,6 +527,69 @@ class RawRingTest {
         }
     }
 
+    /**
+     * The histogram the highlight guard reads.
+     *
+     * Must not consume frames: it runs continuously while streaming, and a
+     * measurement that ate a frame would compete with the shutter for the very
+     * buffer the shutter exists to use.
+     */
+    @Test
+    fun histogrammingTheNewestFrameConsumesNothing() {
+        val pool = RawRing.create(smallWidth, smallHeight, 8, frameIntervalNs)!!
+        ring = pool
+        val profile = SensorProfile.DEFAULT
+
+        var stamp = 1_000_000_000L
+        repeat(6) {
+            pool.push(sourceFrame(smallWidth, smallHeight, 700), smallWidth * 2, stamp, it.toLong())
+            stamp += frameIntervalNs
+        }
+        val readyBefore = pool.readyCount()
+
+        val bins = IntArray(64)
+        assertThat(pool.histogramNewest(bins, profile, stride = 2)).isTrue()
+
+        assertThat(pool.readyCount()).isEqualTo(readyBefore)
+        assertThat(bins.sum()).isGreaterThan(0)
+        assertThat(pool.stats().droppedNoSlot).isEqualTo(0)
+    }
+
+    @Test
+    fun theHistogramTracksActualBrightness() {
+        val pool = RawRing.create(smallWidth, smallHeight, 6, frameIntervalNs)!!
+        ring = pool
+        val profile = SensorProfile.DEFAULT
+
+        fun binOf(level: Int): Int {
+            pool.push(sourceFrame(smallWidth, smallHeight, level), smallWidth * 2,
+                System.nanoTime(), 0L)
+            val bins = IntArray(64)
+            assertThat(pool.histogramNewest(bins, profile, stride = 2)).isTrue()
+            return bins.indices.maxBy { bins[it] }
+        }
+
+        val dark = binOf(120)
+        val mid = binOf(500)
+        val bright = binOf(1023)
+        Log.i(TAG, "histogram peak bins: dark=$dark mid=$mid bright=$bright")
+
+        assertThat(mid).isGreaterThan(dark)
+        assertThat(bright).isGreaterThan(mid)
+        // A frame at the white level must land in the top bin, which is what
+        // the exposure strategy reads as clipping.
+        assertThat(bright).isEqualTo(63)
+    }
+
+    @Test
+    fun anEmptyRingReportsNoHistogramRatherThanZeroes() {
+        // Zeroes would read as a pitch-black scene and pull exposure down.
+        val pool = RawRing.create(smallWidth, smallHeight, 4, frameIntervalNs)!!
+        ring = pool
+
+        assertThat(pool.histogramNewest(IntArray(64), SensorProfile.DEFAULT)).isFalse()
+    }
+
     private companion object {
         const val TRIGGERS = 100
         const val HANDOVER_BUDGET_MICROS = 10_000L

@@ -48,6 +48,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -139,6 +140,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // level, colour filter arrangement and calibration are all per lens.
     var lenses by remember { mutableStateOf<List<Lens>>(emptyList()) }
     var lens by remember { mutableStateOf<Lens?>(null) }
+
+    // Expose for the highlights and let the merge pay for the shadows. On by
+    // default: it is the whole reason for capturing a burst, and it costs
+    // nothing on a scene that does not need it.
+    var highlightGuard by remember { mutableStateOf(true) }
+    var guardPull by remember { mutableFloatStateOf(0f) }
     // The surface the running stream was built against. A SurfaceView is
     // recreated when its fixed size is applied, so "a surface exists" is not
     // the same question as "the session is targeting the live one".
@@ -462,6 +469,28 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }.onFailure { Log.w(TAG, "zoom for lens selection failed", it) }
     }
 
+    // The guard has to run continuously. In a zero-shutter-lag camera the
+    // frames already exist when the shutter is pressed, so an exposure decision
+    // taken then would apply to the next photograph rather than this one.
+    LaunchedEffect(zslStream, highlightGuard, burstFrames, caps) {
+        val stream = zslStream ?: return@LaunchedEffect
+        val c = caps ?: return@LaunchedEffect
+        if (!highlightGuard) {
+            stream.clearHighlightProtection(c, settings)
+            guardPull = 0f
+            return@LaunchedEffect
+        }
+        while (true) {
+            withContext(Dispatchers.Default) {
+                stream.protectHighlights(burstFrames, c, settings)
+            }
+            guardPull = stream.pullStops
+            // Slower than the frame rate on purpose: auto-exposure needs time
+            // to settle after a change, and chasing it faster oscillates.
+            kotlinx.coroutines.delay(700)
+        }
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
         if (zslWanted) {
             // SurfaceView, not TextureView. Camera2 tags preview buffers with
@@ -524,6 +553,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     }
                 }
                 Chip("PRO", showControls) { showControls = !showControls }
+                if (zslStream != null) {
+                    Chip(
+                        if (guardPull < -0.05f) "GUARD %.1f".format(guardPull) else "GUARD",
+                        highlightGuard,
+                    ) {
+                        if (!busy) highlightGuard = !highlightGuard
+                    }
+                }
                 // Only offered where the hardware said yes. On a camera that
                 // stalls on raw the chip never appears and nothing changes.
                 if (zslDecision is ZslDecision.Stream) {
