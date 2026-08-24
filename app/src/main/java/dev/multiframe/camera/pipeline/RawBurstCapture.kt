@@ -17,12 +17,11 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.max
 
 private const val TAG = "Multiframe"
 
@@ -69,46 +68,100 @@ object RawBurstCapture {
         val profile = SensorProfile.from(characteristics)
         Log.i(TAG, "raw burst: profile=$profile")
 
-        var accumulator: BayerAccumulator? = null
-        var captured = 0
-        val captureStart = System.currentTimeMillis()
-        var mergeMillis = 0L
-
-        for (i in 0 until frameCount) {
-            onProgress("raw ${i + 1}/$frameCount")
-            val frame = try {
-                takeOne(context, imageCapture)
-            } catch (e: Exception) {
-                Log.e(TAG, "raw frame ${i + 1} failed", e)
-                break
-            } ?: break
-
-            val t0 = System.currentTimeMillis()
-            if (accumulator == null) {
-                accumulator = BayerAccumulator(frame.width, frame.height, profile)
-                accumulator.setReference(frame)
-            } else {
-                accumulator.add(frame)
-            }
-            mergeMillis += System.currentTimeMillis() - t0
-            captured++
-        }
-        val captureMillis = System.currentTimeMillis() - captureStart - mergeMillis
-
-        if (accumulator == null || captured == 0) {
+        if (!NativeMerge.isAvailable()) {
             return RawBurstResult(
-                frameCount, 0, null, captureMillis, mergeMillis, 0, 0, null, null,
-                "raw burst failed: no frames",
+                frameCount, 0, null, 0, 0, 0, 0, null, null,
+                "native merge unavailable on this device",
             )
         }
 
-        val t1 = System.currentTimeMillis()
-        val (merged, stats) = accumulator.finish()
-        // 100 MB of accumulation buffers are dead once the merge is done, and
-        // must go before the render buffers are allocated or the heap runs out.
-        accumulator.release()
-        mergeMillis += System.currentTimeMillis() - t1
+        var merger: NativeMerge? = null
+        var refPyramid: List<Plane>? = null
+        var tilesX = 0
+        var tilesY = 0
+        var captured = 0
+        var mergeMillis = 0L
+        val captureStart = System.currentTimeMillis()
 
+        try {
+            for (i in 0 until frameCount) {
+                onProgress("raw ${i + 1}/$frameCount")
+                val ok = try {
+                    withRawImage(context, imageCapture) { image ->
+                        val t0 = System.currentTimeMillis()
+                        val plane = image.planes[0]
+                        val buffer = plane.buffer
+                        val stride = plane.rowStride
+
+                        var m = merger
+                        if (m == null) {
+                            m = NativeMerge.create(image.width, image.height, profile)
+                                ?: error("native accumulator allocation failed")
+                            merger = m
+                            tilesX = max(1, m.proxyWidth / TILE_TARGET)
+                            tilesY = max(1, m.proxyHeight / TILE_TARGET)
+                            m.setReference(buffer, stride)
+                            refPyramid = Aligner.buildPyramid(m.lumaProxy(buffer, stride))
+                        } else {
+                            // Alignment runs on the small luma proxy in Kotlin,
+                            // reusing the aligner that is already under test.
+                            val field = Aligner.align(
+                                refPyramid!!,
+                                Aligner.buildPyramid(m.lumaProxy(buffer, stride)),
+                                tilesX, tilesY,
+                            )
+                            m.addFrame(buffer, stride, field)
+                        }
+                        mergeMillis += System.currentTimeMillis() - t0
+                        captured++
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "raw frame ${i + 1} failed", e)
+                    false
+                }
+                if (!ok) break
+            }
+
+            val captureMillis = System.currentTimeMillis() - captureStart - mergeMillis
+            val m = merger
+            if (m == null || captured == 0) {
+                return RawBurstResult(
+                    frameCount, 0, null, captureMillis, mergeMillis, 0, 0, null, null,
+                    "raw burst failed: no frames",
+                )
+            }
+
+            val t1 = System.currentTimeMillis()
+            val (mergedBuffer, stats) = m.finish()
+            mergeMillis += System.currentTimeMillis() - t1
+
+            return finishOutputs(
+                context, mergedBuffer, m.width, m.height, profile,
+                characteristics, captureResult, rotationDegrees,
+                frameCount, captured, stats, captureMillis, mergeMillis,
+            )
+        } finally {
+            merger?.close()
+        }
+    }
+
+    private const val TILE_TARGET = 32
+
+    private fun finishOutputs(
+        context: Context,
+        mergedBuffer: java.nio.ByteBuffer,
+        width: Int,
+        height: Int,
+        profile: SensorProfile,
+        characteristics: CameraCharacteristics,
+        captureResult: TotalCaptureResult?,
+        rotationDegrees: Int,
+        frameCount: Int,
+        captured: Int,
+        stats: BayerMergeStats,
+        captureMillis: Long,
+        mergeMillis: Long,
+    ): RawBurstResult {
         val stamp = stamp()
 
         // One merged raw image feeds both outputs, so the DNG and the JPEG
@@ -117,12 +170,20 @@ object RawBurstCapture {
         // from that same data.
         val t2 = System.currentTimeMillis()
         val dngName = "MF_${stamp}_merged_${captured}f.dng"
+        // Written straight from the native buffer: no Java copy for the DNG.
         val dngOk = captureResult != null &&
-            writeDng(context, merged, characteristics, captureResult, dngName)
+            writeDng(context, mergedBuffer, width, height, characteristics, captureResult, dngName)
         val writeMillis = System.currentTimeMillis() - t2
 
         val t3 = System.currentTimeMillis()
         val color = ColorProfile.from(captureResult)
+        // The developer still wants a Kotlin-side frame. At 25 MB that is
+        // affordable now the 100 MB of accumulators live natively; the copy is
+        // one pass and could be removed by moving develop into native too.
+        val shorts = ShortArray(width * height)
+        mergedBuffer.rewind()
+        mergedBuffer.asShortBuffer().get(shorts)
+        val merged = BayerFrame(width, height, shorts)
         var bitmap = RawDeveloper.developIntoBitmap(merged, profile, color)
         bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
         val jpegName = "MF_${stamp}_merged_${captured}f.jpg"
@@ -145,17 +206,20 @@ object RawBurstCapture {
     }
 
     /**
-     * One in-memory raw frame.
+     * Runs [consume] while the raw image is still open, then closes it.
+     *
+     * The image is not copied. Its plane buffer is a direct buffer owned by the
+     * camera, so native code reads the sensor data in place; copying it would
+     * put 25 MB per frame on the Java heap for no reason.
      *
      * With OUTPUT_FORMAT_RAW_JPEG the callback fires twice, once per image, and
-     * the JPEG usually arrives first. Only the RAW_SENSOR image is wanted; the
-     * companion is closed and ignored. The continuation is guarded because
-     * resuming twice is fatal.
+     * the JPEG usually arrives first. Only the RAW_SENSOR image is wanted.
      */
-    private suspend fun takeOne(
+    private suspend fun withRawImage(
         context: Context,
         imageCapture: ImageCapture,
-    ): BayerFrame? = withTimeoutOrNull(RAW_FRAME_TIMEOUT_MS) {
+        consume: (ImageProxy) -> Unit,
+    ): Boolean = withTimeoutOrNull(RAW_FRAME_TIMEOUT_MS) {
         suspendCancellableCoroutine { cont ->
             val settled = AtomicBoolean(false)
             var seen = 0
@@ -167,14 +231,13 @@ object RawBurstCapture {
                         try {
                             seen++
                             if (image.format == ImageFormat.RAW_SENSOR) {
-                                val frame = BayerFrame.copyFrom(image)
-                                if (settled.compareAndSet(false, true)) cont.resume(frame)
+                                if (settled.compareAndSet(false, true)) {
+                                    consume(image)
+                                    cont.resume(true)
+                                }
                             } else if (seen >= EXPECTED_IMAGES && !settled.get()) {
-                                // Both images arrived and neither was raw. If the
-                                // raw already resumed this branch is not a failure,
-                                // hence the settled check before warning.
                                 Log.w(TAG, "no RAW_SENSOR image in this capture")
-                                if (settled.compareAndSet(false, true)) cont.resume(null)
+                                if (settled.compareAndSet(false, true)) cont.resume(false)
                             }
                         } catch (e: Exception) {
                             if (settled.compareAndSet(false, true)) {
@@ -193,11 +256,17 @@ object RawBurstCapture {
                 },
             )
         }
-    }
+    } ?: false
 
+    /**
+     * Writes the merged CFA straight from the native buffer. DngCreator takes a
+     * ByteBuffer, so the raw payload never needs a Java-side copy.
+     */
     private fun writeDng(
         context: Context,
-        frame: BayerFrame,
+        merged: java.nio.ByteBuffer,
+        width: Int,
+        height: Int,
         characteristics: CameraCharacteristics,
         result: TotalCaptureResult,
         displayName: String,
@@ -215,15 +284,10 @@ object RawBurstCapture {
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: error("MediaStore insert returned null")
 
-        val buffer = ByteBuffer
-            .allocateDirect(frame.data.size * 2)
-            .order(ByteOrder.LITTLE_ENDIAN)
-        buffer.asShortBuffer().put(frame.data)
-        buffer.rewind()
-
+        merged.rewind()
         DngCreator(characteristics, result).use { dng ->
             resolver.openOutputStream(uri)?.use { out ->
-                dng.writeByteBuffer(out, Size(frame.width, frame.height), buffer, 0)
+                dng.writeByteBuffer(out, Size(width, height), merged, 0)
             } ?: error("openOutputStream returned null")
         }
 

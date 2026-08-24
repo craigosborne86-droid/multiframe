@@ -23,7 +23,32 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+
+        externalNativeBuild {
+            cmake {
+                // The merge is the only native code; no STL container sharing
+                // across the JNI boundary, so the static runtime is enough.
+                arguments += listOf("-DANDROID_STL=c++_static")
+                cppFlags += "-std=c++17"
+            }
+        }
+
+        // arm64 only for now. The prototype targets 64-bit devices and every
+        // Android 13+ phone we care about is arm64; adding armeabi-v7a would
+        // double native build time for hardware we are not testing on.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.1"
+        }
+    }
+
+    ndkVersion = "28.2.13676358"
 
     signingConfigs {
         create("release") {

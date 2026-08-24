@@ -375,3 +375,50 @@ a full-resolution IntArray.
 
 Process after a raw burst: Dalvik heap 42 MB of a 256 MB limit, native heap
 16 MB, graphics 89 MB, total PSS 249 MB.
+
+## Native merge (NDK)
+
+The merge now runs in C++ with all heavy buffers allocated natively. The reason
+is the heap ceiling: 256 MB of Java heap on a 15.2 GB device, against 25 MB per
+raw frame.
+
+    created 4080x3072 accumulator, 119.5 MB native
+
+That 119.5 MB previously had to fit in the 256 MB managed heap alongside
+everything else, which is what caused the earlier OutOfMemoryError.
+
+Three things changed:
+
+1. Accumulators are `std::vector` in native memory, outside the Dalvik heap.
+2. Camera frames are read in place via `GetDirectBufferAddress` on the
+   ImageProxy plane buffer. The 25 MB per frame Java copy is gone entirely.
+3. The DNG is written straight from the native buffer through
+   `DngCreator.writeByteBuffer`, so the raw payload never touches Java.
+
+Alignment stayed in Kotlin, running on the half-resolution luma proxy. It is
+small enough not to matter and reuses the aligner already covered by tests.
+
+### Measured on device
+
+    merge time    4245 ms -> 1826 ms      2.3x faster
+    full shot     capture 1561, merge 1826, develop 1903, write 167 ms
+
+### Correctness
+
+The point of the rewrite was speed and memory, not a different picture. Single
+raw vs 8-frame native merge, same scene, phone stationary
+(9.80/0.03 then 9.77/-0.15), correlation 0.99519:
+
+    plane   single  merged  ratio
+    G        0.951   0.448  0.471
+    B        0.945   0.465  0.492
+    R        0.939   0.462  0.492
+    G2       0.951   0.451  0.475
+    mean ratio 0.482  ->  2.07x
+
+Against 2.06x measured for the Kotlin implementation on the same kind of
+scene. The two agree, so the native path is faster without changing the result.
+
+Develop, at 1903 ms, is now the largest single stage and is still Kotlin. It
+also still copies the merged result into a 25 MB ShortArray, which is the
+obvious next thing to move native.
