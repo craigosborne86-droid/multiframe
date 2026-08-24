@@ -4,6 +4,7 @@ project(multiframe LANGUAGES CXX)
 add_library(multiframe SHARED
     bayer_merge.cpp
     RingBuffer.cpp
+    Mosaic.cpp
 )
 
 target_compile_options(multiframe PRIVATE
