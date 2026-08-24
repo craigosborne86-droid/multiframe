@@ -1,23 +1,22 @@
 package dev.multiframe.camera
 
-import android.hardware.camera2.CameraMetadata
-import android.hardware.camera2.CaptureRequest
 import android.util.Log
 import android.util.Size
-import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.compose.CameraXViewfinder
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.compose.CameraXViewfinder
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -27,10 +26,12 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -51,20 +52,21 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.multiframe.camera.pipeline.BurstBuffer
+import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.ImageSaver
+import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.Merger
+import dev.multiframe.camera.pipeline.OrientationTracker
+import dev.multiframe.camera.ui.ControlsPanel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private const val TAG = "Multiframe"
-
-/** Upper bound on the ring buffer; the burst control selects how many are used. */
 private const val RING_CAPACITY = 12
-
-/** Analysis resolution. Deliberately below sensor resolution for the prototype. */
 private val ANALYSIS_TARGET = Size(2048, 1536)
 
 @OptIn(ExperimentalCamera2Interop::class)
@@ -77,83 +79,96 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var surfaceRequest by remember { mutableStateOf<SurfaceRequest?>(null) }
     var status by remember { mutableStateOf("") }
     var mergeEnabled by remember { mutableStateOf(true) }
+    var abMode by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(false) }
     var burstFrames by remember { mutableIntStateOf(8) }
     var busy by remember { mutableStateOf(false) }
-    var abMode by remember { mutableStateOf(false) }
-    var exposureNote by remember { mutableStateOf("") }
+
+    var camera by remember { mutableStateOf<Camera?>(null) }
+    var caps by remember { mutableStateOf<CameraCapabilities?>(null) }
+    var settings by remember { mutableStateOf(ManualSettings()) }
 
     val buffer = remember { BurstBuffer(RING_CAPACITY) }
-    val analysisExecutor = remember { ContextCompat.getMainExecutor(context) }
+    val orientation = remember { OrientationTracker(context) }
+
+    DisposableEffect(Unit) {
+        orientation.enable()
+        onDispose { orientation.disable() }
+    }
 
     LaunchedEffect(lifecycleOwner) {
         val preview = Preview.Builder().build().apply {
             setSurfaceProvider { request -> surfaceRequest = request }
         }
 
-        val resolutionSelector = ResolutionSelector.Builder()
-            .setResolutionStrategy(
-                ResolutionStrategy(
-                    ANALYSIS_TARGET,
-                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
-                )
+        val analysis = ImageAnalysis.Builder()
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            ANALYSIS_TARGET,
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                        )
+                    )
+                    .build()
             )
-            .build()
-
-        val analysisBuilder = ImageAnalysis.Builder()
-            .setResolutionSelector(resolutionSelector)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-
-        // Suppress the ISP's cosmetic processing so the merge operates on data
-        // that has not already been denoised and sharpened. These are advisory:
-        // hardware that does not support the mode simply ignores the request.
-        Camera2Interop.Extender(analysisBuilder)
-            .setCaptureRequestOption(
-                CaptureRequest.NOISE_REDUCTION_MODE,
-                CameraMetadata.NOISE_REDUCTION_MODE_OFF,
-            )
-            .setCaptureRequestOption(
-                CaptureRequest.EDGE_MODE,
-                CameraMetadata.EDGE_MODE_OFF,
-            )
-
-        val analysis = analysisBuilder.build().apply {
-            setAnalyzer(analysisExecutor) { image ->
-                try {
-                    buffer.offer(image)
-                } finally {
-                    image.close()
+            .build()
+            .apply {
+                setAnalyzer(ContextCompat.getMainExecutor(context)) { image ->
+                    try {
+                        buffer.offer(image)
+                    } finally {
+                        image.close()
+                    }
                 }
             }
-        }
 
         try {
             val provider = ProcessCameraProvider.getInstance(context)
                 .await(ContextCompat.getMainExecutor(context))
             provider.unbindAll()
-            val camera = provider.bindToLifecycle(
+            val bound = provider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 preview,
                 analysis,
             )
+            camera = bound
 
-            // Underexpose to keep highlights off the clip point; the merge and
-            // tone curve recover the shadows afterwards.
-            val exposureState = camera.cameraInfo.exposureState
-            if (exposureState.isExposureCompensationSupported) {
-                val step = exposureState.exposureCompensationStep.toFloat()
-                val range = exposureState.exposureCompensationRange
-                val desired = if (step > 0f) (-1.0f / step).toInt() else 0
-                val index = desired.coerceIn(range.lower, range.upper)
-                camera.cameraControl.setExposureCompensationIndex(index)
-                exposureNote = "EV %.1f".format(index * step)
-            } else {
-                exposureNote = "EV n/a"
+            val capabilities = CameraCapabilities.from(bound.cameraInfo)
+            caps = capabilities
+            Log.i(TAG, "Capabilities: ${capabilities.summary()}")
+
+            // Start about a stop under, so highlights stay off the clip point.
+            if (capabilities.evStep > 0f) {
+                val index = (-1.0f / capabilities.evStep).roundToInt()
+                    .coerceIn(capabilities.evRange.lower, capabilities.evRange.upper)
+                settings = settings.copy(evIndex = index)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Camera bind failed", e)
             status = "Camera unavailable: ${e.message}"
+        }
+    }
+
+    // Push manual settings whenever they change. Camera2Interop.Extender only
+    // applies at use-case build time, so live updates go through
+    // Camera2CameraControl instead.
+    LaunchedEffect(settings, camera, caps) {
+        val cam = camera ?: return@LaunchedEffect
+        val c = caps ?: return@LaunchedEffect
+        try {
+            Camera2CameraControl.from(cam.cameraControl)
+                .setCaptureRequestOptions(settings.toCaptureRequestOptions(c))
+            if (settings.evActive && c.evStep > 0f) {
+                cam.cameraControl.setExposureCompensationIndex(
+                    settings.evIndex.coerceIn(c.evRange.lower, c.evRange.upper)
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Applying manual settings failed", e)
         }
     }
 
@@ -176,27 +191,22 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 .padding(top = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Row(horizontalArrangement = Arrangement.Center) {
-                Chip(
-                    label = if (mergeEnabled) "MERGE ON" else "MERGE OFF",
-                    active = mergeEnabled,
-                ) { if (!busy) mergeEnabled = !mergeEnabled }
-
-                Chip(label = "A/B", active = abMode) {
-                    if (!busy) abMode = !abMode
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp),
+            ) {
+                Chip(if (mergeEnabled) "MERGE ON" else "MERGE OFF", mergeEnabled) {
+                    if (!busy) mergeEnabled = !mergeEnabled
                 }
-
-                Chip(label = "$burstFrames FRAMES", active = false) {
-                    if (!busy) {
-                        burstFrames = when (burstFrames) {
-                            1 -> 2; 2 -> 4; 4 -> 8; 8 -> 12; else -> 1
-                        }
+                Chip("A/B", abMode) { if (!busy) abMode = !abMode }
+                Chip("$burstFrames FRAMES", false) {
+                    if (!busy) burstFrames = when (burstFrames) {
+                        1 -> 2; 2 -> 4; 4 -> 8; 8 -> 12; else -> 1
                     }
                 }
-
-                if (exposureNote.isNotEmpty()) {
-                    Chip(label = exposureNote, active = false) {}
-                }
+                Chip("PRO", showControls) { showControls = !showControls }
             }
 
             if (status.isNotEmpty()) {
@@ -213,70 +223,77 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             }
         }
 
-        ShutterButton(
-            busy = busy,
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = 40.dp),
-            onClick = {
-                if (busy) return@ShutterButton
-                busy = true
-                status = if (abMode) "A/B capture, $burstFrames frames…"
+                .navigationBarsPadding(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            if (showControls) {
+                ControlsPanel(
+                    settings = settings,
+                    caps = caps,
+                    onChange = { settings = it },
+                )
+            }
+
+            ShutterButton(
+                busy = busy,
+                modifier = Modifier.padding(vertical = 28.dp),
+                onClick = {
+                    if (busy) return@ShutterButton
+                    busy = true
+                    status = if (abMode) "A/B capture, $burstFrames frames…"
                     else "Capturing $burstFrames frames…"
 
-                scope.launch {
-                    val label = if (abMode) "ab" else if (mergeEnabled) "merged" else "single"
-                    val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
-                        .format(System.currentTimeMillis())
+                    val rotation = caps?.let { orientation.captureRotation(it.sensorOrientation) } ?: 0
 
-                    val result = withContext(Dispatchers.Default) {
-                        // One snapshot drives every output, so an A/B pair is
-                        // guaranteed to be the same scene at the same instant.
-                        val frames = buffer.snapshot(
-                            if (mergeEnabled || abMode) burstFrames else 1
-                        )
-                        if (frames.isEmpty()) return@withContext null
+                    scope.launch {
+                        val label = if (abMode) "ab" else if (mergeEnabled) "merged" else "single"
+                        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+                            .format(System.currentTimeMillis())
 
-                        if (abMode) {
-                            // Reference frame alone, then the merge of that same
-                            // burst. Identical tone curve, so the only difference
-                            // is the merge itself.
-                            val single = Merger.process(frames, mergeEnabled = false)
-                            ImageSaver.saveJpeg(
-                                context, single.bitmap, "MF_${stamp}_ab_single.jpg",
+                        val result = withContext(Dispatchers.Default) {
+                            // One snapshot drives every output, so an A/B pair is
+                            // guaranteed to be the same scene at the same instant.
+                            val frames = buffer.snapshot(
+                                if (mergeEnabled || abMode) burstFrames else 1
                             )
-                            single.bitmap.recycle()
+                            if (frames.isEmpty()) return@withContext null
 
-                            val both = Merger.process(frames, mergeEnabled = true)
-                            val uri = ImageSaver.saveJpeg(
-                                context, both.bitmap, "MF_${stamp}_ab_merged.jpg",
-                            )
-                            both.bitmap.recycle()
-                            both.stats to uri
-                        } else {
-                            val merged = Merger.process(frames, mergeEnabled)
-                            val uri = ImageSaver.saveJpeg(
-                                context, merged.bitmap, "MF_${stamp}_$label.jpg",
-                            )
-                            merged.bitmap.recycle()
-                            merged.stats to uri
+                            fun save(mergeIt: Boolean, suffix: String): Pair<Any?, Any?> {
+                                val out = Merger.process(frames, mergeIt)
+                                val bmp = OrientationTracker.rotate(out.bitmap, rotation)
+                                val uri = ImageSaver.saveJpeg(
+                                    context, bmp, "MF_${stamp}_$suffix.jpg",
+                                )
+                                bmp.recycle()
+                                return out.stats to uri
+                            }
+
+                            if (abMode) {
+                                save(false, "ab_single")
+                                save(true, "ab_merged")
+                            } else {
+                                save(mergeEnabled, label)
+                            }
                         }
-                    }
 
-                    status = if (result == null) {
-                        "No frames buffered yet"
-                    } else {
-                        val (stats, uri) = result
-                        Log.i(TAG, "Saved $uri  $stats")
-                        "%s  %d frames  align %dms  merge %dms".format(
-                            label, stats.framesUsed, stats.alignMillis, stats.mergeMillis,
-                        )
+                        status = if (result == null) {
+                            "No frames buffered yet"
+                        } else {
+                            val stats = result.first as dev.multiframe.camera.pipeline.MergeStats
+                            Log.i(TAG, "Saved ${result.second}  $stats  rot=$rotation")
+                            "%s  %d frames  align %dms  merge %dms  rot %d".format(
+                                label, stats.framesUsed, stats.alignMillis,
+                                stats.mergeMillis, rotation,
+                            )
+                        }
+                        busy = false
                     }
-                    busy = false
-                }
-            },
-        )
+                },
+            )
+        }
     }
 }
 

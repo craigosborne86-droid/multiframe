@@ -48,3 +48,50 @@ An earlier A/B attempt (12:00 and 12:01) compared two separately triggered
 shots. The phone was moved between them, so the two frames showed different
 scenes and the resulting noise figures were meaningless. Those files were
 deleted and the A/B mode was added specifically to remove that confound.
+
+## Phase 3 — manual controls
+
+Capabilities read from the device at runtime (nothing hard-coded):
+
+    manual  ISO 22-11277  26us-16000ms  focus 0-9.5D  RAW
+
+| File | Shows |
+|---|---|
+| `p3_pro_panel.png` | PRO panel: capability line, AE/AF/ISP toggles, EV slider, WB row |
+| `p3_iso_high.png` | Manual exposure engaged, ISO 6712 at 1/28705 |
+| `MF_20260824_121825_ab_*.jpg` | High-ISO A/B pair |
+
+### Manual controls verified by measured hardware response
+
+Shutter slider swept, viewfinder mean luminance:
+
+    fastest   92.63
+    mid      251.21
+    slow     252.26
+
+ISO swept with shutter pinned fast:
+
+    low       85.61
+    mid      151.26
+    high     174.42
+
+Both reach the hardware. Screenshots alone would not have proved this.
+
+### Orientation fix verified
+
+Saved files are 1536x2048 (portrait) with `rot=90` logged, computed from
+`SENSOR_ORIENTATION` plus `OrientationEventListener`, so captures come out
+upright regardless of the system rotation lock.
+
+### Known defect found by these controls
+
+At ISO 6712 the merge is much less effective than at low ISO:
+
+    low ISO   shadow noise 3.588 -> 1.982   1.81x   mean contribution 0.993
+    ISO 6712  hf noise    11.278 -> 8.636   1.31x   mean contribution 0.740
+
+`MergeParams.robustnessSigma` is a fixed constant, but sensor noise is
+signal-dependent. At high ISO the weighting reads noise as subject motion and
+rejects frames that should have been merged. The fix is to scale sigma with
+local signal level (shot noise grows as the square root of signal) rather than
+holding it constant.
