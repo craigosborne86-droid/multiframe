@@ -75,6 +75,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.multiframe.camera.pipeline.BurstBuffer
+import dev.multiframe.camera.pipeline.AppSettings
+import dev.multiframe.camera.pipeline.AppSettings.Companion.reconcile
 import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.Lens
 import dev.multiframe.camera.pipeline.LensCatalog
@@ -117,9 +119,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
+    // Restored before any state that depends on it, so the first composition
+    // already shows what the user left the app in rather than the defaults.
+    val restored = remember { AppSettings.load(context) }
+
     var surfaceRequest by remember { mutableStateOf<SurfaceRequest?>(null) }
     var status by remember { mutableStateOf("") }
-    var mergeEnabled by remember { mutableStateOf(true) }
+    var mergeEnabled by remember { mutableStateOf(restored.mergeEnabled) }
     var abMode by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
@@ -128,12 +134,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // DngCreator needs the capture metadata that produced the frame, which
     // CameraX does not surface directly.
     val lastCaptureResult = remember { AtomicReference<TotalCaptureResult?>(null) }
-    var burstFrames by remember { mutableIntStateOf(8) }
+    var burstFrames by remember { mutableIntStateOf(restored.burstFrames) }
     var busy by remember { mutableStateOf(false) }
 
     var camera by remember { mutableStateOf<Camera?>(null) }
     var caps by remember { mutableStateOf<CameraCapabilities?>(null) }
-    var settings by remember { mutableStateOf(ManualSettings()) }
+
+    var settings by remember { mutableStateOf(restored.manual) }
 
     // Zero-shutter-lag raw streaming. The decision is taken from what the
     // hardware reports, not from what this device happens to do, so a camera
@@ -141,7 +148,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var provider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
     var cameraId by remember { mutableStateOf<String?>(null) }
     var zslDecision by remember { mutableStateOf<ZslDecision?>(null) }
-    var zslWanted by remember { mutableStateOf(false) }
+    var zslWanted by remember { mutableStateOf(restored.zslEnabled) }
     var zslSurface by remember { mutableStateOf<Surface?>(null) }
     var zslStream by remember { mutableStateOf<ZslRawStream?>(null) }
 
@@ -154,7 +161,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // Expose for the highlights and let the merge pay for the shadows. On by
     // default: it is the whole reason for capturing a burst, and it costs
     // nothing on a scene that does not need it.
-    var highlightGuard by remember { mutableStateOf(true) }
+    var highlightGuard by remember { mutableStateOf(restored.highlightGuard) }
     var guardPull by remember { mutableFloatStateOf(0f) }
 
     // Tap to focus and pinch to zoom. Table stakes for a camera: without them
@@ -309,7 +316,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     context.getSystemService(CameraManager::class.java)
                 )
                 lenses = catalog
-                if (lens == null) lens = LensCatalog.default(catalog)
+                if (lens == null) {
+                    // A stored lens can name hardware this device does not
+                    // have, so it is checked against the catalog rather than
+                    // trusted.
+                    lens = restored.lensId?.let { id ->
+                        catalog.firstOrNull { it.cameraId == id }
+                    } ?: LensCatalog.default(catalog)
+                }
                 Log.i(TAG, "lenses: " + LensCatalog.rear(catalog).joinToString {
                     "${it.label}/${it.zoomLabel}"
                 })
@@ -324,8 +338,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 zslDecision = ZslDecision.Fallback("raw capabilities unreadable")
             }
 
+            // Anything restored has to be checked against this camera: a
+            // setting the hardware cannot honour has the whole capture request
+            // rejected, taking every other setting with it.
+            settings = restored.copy(manual = settings)
+                .reconcile(capabilities, lenses)
+                .manual
+
             // Start about a stop under, so highlights stay off the clip point.
-            if (capabilities.supportsExposureCompensation) {
+            if (restored.manual == ManualSettings() && capabilities.supportsExposureCompensation) {
                 val index = (-1.0f / capabilities.evStep).roundToInt()
                     .coerceIn(capabilities.evMin, capabilities.evMax)
                 settings = settings.copy(evIndex = index)
@@ -506,6 +527,22 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // to settle after a change, and chasing it faster oscillates.
             kotlinx.coroutines.delay(700)
         }
+    }
+
+    // Written whenever anything worth remembering changes. Cheap: a dozen
+    // short strings, and only on an actual change rather than per frame.
+    LaunchedEffect(settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted) {
+        AppSettings.save(
+            context,
+            AppSettings(
+                manual = settings,
+                burstFrames = burstFrames,
+                lensId = lens?.cameraId,
+                mergeEnabled = mergeEnabled,
+                highlightGuard = highlightGuard,
+                zslEnabled = zslWanted,
+            ),
+        )
     }
 
     Box(
