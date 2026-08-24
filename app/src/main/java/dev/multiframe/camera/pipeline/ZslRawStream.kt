@@ -112,6 +112,30 @@ class ZslRawStream private constructor(
         private set
 
     private val sensorProfile by lazy { SensorProfile.from(characteristics) }
+
+    /** The sensor's full readout rectangle, which metering coordinates are in. */
+    private val activeArray: SensorRect by lazy {
+        characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            ?.let { SensorRect.from(it) }
+            ?: SensorRect(0, 0, config.width, config.height)
+    }
+
+    /**
+     * Whether the device takes a zoom ratio directly.
+     *
+     * Preferred over cropping the sensor by hand: the camera can then use the
+     * whole multi-camera system to satisfy the request, and metering
+     * coordinates stay in one system instead of moving with the crop.
+     */
+    private val zoomRange by lazy {
+        characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+    }
+
+    @Volatile
+    private var focusRegion: SensorRect? = null
+
+    @Volatile
+    private var zoomRatio: Float = 1f
     private val histogramBins = IntArray(64)
     private var lastSettings: ManualSettings? = null
     private var lastCaps: CameraCapabilities? = null
@@ -190,6 +214,62 @@ class ZslRawStream private constructor(
         }
         return analysis
     }
+
+    /**
+     * Focuses and meters on a point, given as a fraction of the displayed image.
+     *
+     * Sends a one-shot autofocus trigger as well as updating the repeating
+     * request. Without the trigger the region changes but nothing re-focuses
+     * until the scene happens to move, which reads as the tap having done
+     * nothing.
+     */
+    fun focusAt(
+        normalisedX: Float,
+        normalisedY: Float,
+        settings: ManualSettings,
+        caps: CameraCapabilities,
+    ) {
+        if (closed) return
+        val orientation = caps.sensorOrientation
+        focusRegion = TouchFocus.regionAt(normalisedX, normalisedY, orientation, activeArray)
+        applySettings(settings, caps)
+
+        runCatching {
+            val trigger = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(previewSurface)
+                focusRegion?.let {
+                    val rect = arrayOf(TouchFocus.meteringRectangle(it))
+                    set(CaptureRequest.CONTROL_AF_REGIONS, rect)
+                    set(CaptureRequest.CONTROL_AE_REGIONS, rect)
+                }
+                set(
+                    CaptureRequest.CONTROL_AF_TRIGGER,
+                    android.hardware.camera2.CameraMetadata.CONTROL_AF_TRIGGER_START,
+                )
+            }.build()
+            session.capture(trigger, null, Handler(cameraThread.looper))
+        }.onFailure { Log.w(TAG, "focus trigger failed", it) }
+    }
+
+    /** Clears any tapped focus point, returning to whole-frame metering. */
+    fun clearFocusPoint(settings: ManualSettings, caps: CameraCapabilities) {
+        if (closed || focusRegion == null) return
+        focusRegion = null
+        applySettings(settings, caps)
+    }
+
+    /** Digital zoom on top of whichever lens is selected. */
+    fun setZoom(ratio: Float, settings: ManualSettings, caps: CameraCapabilities) {
+        if (closed) return
+        val max = zoomRange?.upper ?: MAX_FALLBACK_ZOOM
+        val clamped = ratio.coerceIn(1f, max)
+        if (kotlin.math.abs(clamped - zoomRatio) < 0.01f) return
+        zoomRatio = clamped
+        applySettings(settings, caps)
+    }
+
+    val zoom: Float get() = zoomRatio
+    val maxZoom: Float get() = zoomRange?.upper ?: MAX_FALLBACK_ZOOM
 
     /** Releases the guard's hold on exposure, back to what the user asked for. */
     fun clearHighlightProtection(caps: CameraCapabilities, settings: ManualSettings) {
@@ -349,6 +429,28 @@ class ZslRawStream private constructor(
             CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
             android.hardware.camera2.CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON,
         )
+
+        focusRegion?.let {
+            val rect = arrayOf(TouchFocus.meteringRectangle(it))
+            template.set(CaptureRequest.CONTROL_AF_REGIONS, rect)
+            template.set(CaptureRequest.CONTROL_AE_REGIONS, rect)
+        }
+
+        if (zoomRatio > 1.001f) {
+            val range = zoomRange
+            if (range != null) {
+                template.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
+            } else {
+                // Older path: crop the sensor by hand. Kept because zoom ratio
+                // is optional in the spec and a device without it should still
+                // zoom rather than silently ignoring the gesture.
+                template.set(
+                    CaptureRequest.SCALER_CROP_REGION,
+                    TouchFocus.cropForZoom(activeArray, zoomRatio, MAX_FALLBACK_ZOOM).toRect(),
+                )
+            }
+        }
+
         return template.build()
     }
 
@@ -406,6 +508,9 @@ class ZslRawStream private constructor(
 
         private const val OPEN_ATTEMPTS = 4
         private const val OPEN_RETRY_MS = 250L
+
+        /** Used only when the device reports no zoom ratio range of its own. */
+        private const val MAX_FALLBACK_ZOOM = 8f
 
         /**
          * Opens the camera, allocates the ring and starts streaming.

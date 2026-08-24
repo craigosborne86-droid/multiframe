@@ -27,6 +27,8 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.AndroidExternalSurface
 import androidx.compose.foundation.AndroidExternalSurfaceZOrder
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -38,6 +40,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -49,6 +52,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,6 +60,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -99,6 +106,9 @@ import kotlin.math.roundToInt
 private const val TAG = "Multiframe"
 /** Frames requested per shutter press; the ring shrinks this if the heap cannot hold it. */
 private const val DESIRED_BURST = 12
+
+/** Side of the focus reticle, in pixels. */
+private const val RETICLE_PX = 180f
 
 @OptIn(ExperimentalCamera2Interop::class)
 @Composable
@@ -146,6 +156,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // nothing on a scene that does not need it.
     var highlightGuard by remember { mutableStateOf(true) }
     var guardPull by remember { mutableFloatStateOf(0f) }
+
+    // Tap to focus and pinch to zoom. Table stakes for a camera: without them
+    // the app cannot be pointed at a subject that is not in the middle.
+    var viewSize by remember { mutableStateOf(IntSize.Zero) }
+    var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    var focusAtMillis by remember { mutableLongStateOf(0L) }
+    var digitalZoom by remember { mutableFloatStateOf(1f) }
     // The surface the running stream was built against. A SurfaceView is
     // recreated when its fixed size is applied, so "a surface exists" is not
     // the same question as "the session is targeting the live one".
@@ -491,7 +508,60 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    Box(modifier = modifier.fillMaxSize()) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .onSizeChanged { viewSize = it }
+            .pointerInput(zslStream, camera, caps) {
+                detectTapGestures { offset ->
+                    val c = caps ?: return@detectTapGestures
+                    if (viewSize.width == 0 || viewSize.height == 0) return@detectTapGestures
+                    val nx = offset.x / viewSize.width
+                    val ny = offset.y / viewSize.height
+                    focusPoint = offset
+                    focusAtMillis = System.currentTimeMillis()
+
+                    val stream = zslStream
+                    if (stream != null) {
+                        stream.focusAt(nx, ny, settings, c)
+                    } else {
+                        // CameraX exposes metering through its own point
+                        // factory, which already knows the preview geometry.
+                        camera?.let { cam ->
+                            runCatching {
+                                val factory = androidx.camera.core.SurfaceOrientedMeteringPointFactory(
+                                    viewSize.width.toFloat(), viewSize.height.toFloat(),
+                                )
+                                cam.cameraControl.startFocusAndMetering(
+                                    androidx.camera.core.FocusMeteringAction.Builder(
+                                        factory.createPoint(offset.x, offset.y)
+                                    ).build()
+                                )
+                            }.onFailure { Log.w(TAG, "focus tap failed", it) }
+                        }
+                    }
+                }
+            }
+            .pointerInput(zslStream, camera, caps) {
+                detectTransformGestures { _, _, gestureZoom, _ ->
+                    if (gestureZoom == 1f) return@detectTransformGestures
+                    val c = caps ?: return@detectTransformGestures
+                    val stream = zslStream
+                    if (stream != null) {
+                        digitalZoom = (digitalZoom * gestureZoom)
+                            .coerceIn(1f, stream.maxZoom)
+                        stream.setZoom(digitalZoom, settings, c)
+                    } else {
+                        camera?.let { cam ->
+                            val state = cam.cameraInfo.zoomState.value ?: return@let
+                            digitalZoom = (digitalZoom * gestureZoom)
+                                .coerceIn(state.minZoomRatio, state.maxZoomRatio)
+                            runCatching { cam.cameraControl.setZoomRatio(digitalZoom) }
+                        }
+                    }
+                }
+            }
+    ) {
         if (zslWanted) {
             // SurfaceView, not TextureView. Camera2 tags preview buffers with
             // the sensor-to-display rotation and SurfaceFlinger honours that
@@ -756,6 +826,42 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         busy = false
                     }
                 },
+            )
+        }
+
+        focusPoint?.let { point ->
+            var visible by remember(focusAtMillis) { mutableStateOf(true) }
+            LaunchedEffect(focusAtMillis) {
+                kotlinx.coroutines.delay(1400)
+                visible = false
+            }
+            if (visible) {
+                with(androidx.compose.ui.platform.LocalDensity.current) {
+                    Box(
+                        modifier = Modifier
+                            .offset(
+                                x = (point.x - RETICLE_PX / 2).toDp(),
+                                y = (point.y - RETICLE_PX / 2).toDp(),
+                            )
+                            .size(RETICLE_PX.toDp())
+                            .border(1.5.dp, Color(0xFFFFCC33), RoundedCornerShape(4.dp))
+                            .semantics { contentDescription = "Focus point" },
+                    )
+                }
+            }
+        }
+
+        if (digitalZoom > 1.02f) {
+            Text(
+                text = "%.1fx".format(digitalZoom),
+                color = Color.White,
+                fontSize = 13.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 16.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
             )
         }
 
