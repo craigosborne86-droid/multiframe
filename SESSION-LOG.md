@@ -9,8 +9,8 @@ Indigo demonstrates on iPhone; original code, name, icon and UI throughout.
 
 - Package: `dev.multiframe.camera` (final — cannot change after publication)
 - Target device for development: Pixel 9 Pro XL (`komodo`), Android 17 / API 37
-- ~7,500 lines across 36 Kotlin files and 3 native files
-- 65 JVM unit tests and 13 on-device instrumentation tests passing
+- ~11,000 lines across 45 Kotlin files and 6 native files
+- 172 JVM unit tests and 32 on-device instrumentation tests passing
 
 ---
 
@@ -396,16 +396,200 @@ of 11 instead of 9.
   path for noise reduction, which is the measurement that shows whether a
   233 ms window actually agrees better than a 5.6 s one.
 
+---
+
+## Phases 7-9 — the picture itself
+
+Phase 6 fixed how frames are *captured*. This block is about what happens to
+them afterwards, and it started with a correction from the brief: **not** a
+zero-processed look. Adobe's own position is that users still want a natural
+tone curve, and they are right. What is worth avoiding is the *phone* look, not
+processing as such.
+
+### The demosaic was throwing away most of the detail
+
+The old demosaic averaged every sample of a colour in a 3x3 neighbourhood,
+*including the pixel's own*. A green site sits at the centre of five greens, so
+the green the sensor actually measured there was blurred with four others before
+it reached the image. Half the pixels on a Bayer sensor are green. Most of the
+luminance detail in every photograph was being destroyed at the last step, after
+a burst merge had gone to considerable trouble to capture it cleanly.
+
+Replaced with Malvar-He-Cutler gradient-corrected interpolation. Measured
+against the full-colour image the CFA was sampled from:
+
+```
+RMSE vs ground truth        0.03351 -> 0.02294   1.46x better
+colour error on a grey edge 0.2403  -> 0.1126    2.1x less fringing
+two-pixel detail retained   0.2854  -> 0.5271    1.85x more contrast
+```
+
+The last number is the one that matters: against a true modulation of 0.50, the
+old gather was destroying **43% of fine detail**.
+
+### There was no rendering curve at all
+
+The render was linear to 0.70 then an exponential shoulder. No toe, no midtone
+contrast, no highlight behaviour beyond compression. That is not neutrality, it
+is a choice, and it is the wrong one — it produces a technically faithful image
+with no shadow density, no midtone separation, and highlights that go grey
+rather than glowing.
+
+Now three stages, in the order a photographic process applies them: a
+hue-preserving roll-off in linear light, highlight desaturation driven by the
+**scene-linear** peak, and an S-curve after the gamma encode.
+
+The middle one took two attempts and is the interesting one. Driving
+desaturation from the compressed value cannot work: the roll-off pushes
+everything bright asymptotically toward 1, so afterwards a blue sky and the sun
+are indistinguishable. Measured before compression, a sky just under white keeps
+its blue and a specular several stops over goes white.
+
+Everything is global. No pixel's rendering depends on its neighbours, which is
+structurally why this cannot halo — the difference from local tone mapping.
+
+### All five lenses
+
+The app could only use the main camera. Finding the others took two passes: the
+camera id list reports two cameras on this phone, because the ultra-wide and
+both telephotos are *physical sub-cameras* of one logical camera, reachable only
+through `getPhysicalCameraIds` and openable only by opening the parent and
+tagging each `OutputConfiguration` with the physical id.
+
+That found ten entries, with the main camera advertised three times at focal
+lengths a millimetre apart. Clustering by ratio rather than equality collapses
+them — two entries within 12% are the same glass, and real optics are separated
+by factors of two:
+
+```
+12mm 0.5x, 24mm 1x, 49mm 2x, 110mm 4.6x, 220mm 9.2x    all RAW-capable
+```
+
+Labelled in **millimetres first**. "24mm" and "110mm" describe what the frame
+will look like; "1x" and "5x" only describe a ratio between two parts of this
+particular phone.
+
+### Expose for the highlights, let the merge pay for the shadows
+
+A clipped highlight is gone — the sensor recorded its maximum for every
+brightness above the limit. A noisy shadow still contains its detail, merely
+buried, and averaging digs it out.
+
+A burst camera can exploit that asymmetry by a precisely knowable amount:
+averaging N frames improves SNR by sqrt(N), which is `0.5 * log2(N)` stops of
+exposure that can be given up while arriving at the same shadow noise. **Eight
+frames buys 1.5 stops of highlight headroom for nothing; thirty-two buys 2.5.**
+That is the entire argument for burst capture as one number, which is why frame
+count now feeds the exposure decision.
+
+It runs continuously rather than at the shutter, because in a zero-shutter-lag
+camera the frames already exist when the button is pressed. That needed a way to
+measure without consuming, so the ring can now histogram its newest frame in
+place under its own lock.
+
+### Lens shading
+
+Raw is *defined* as uncorrected, so the raw-first pipeline had inherited a stop
+and a half of corner falloff that the camera's own JPEG path removes — and it is
+not neutral, so corners were a different colour as well as darker. Now corrected
+from the map the camera reports per capture, bilinearly interpolated because the
+grid is 240 pixels per cell and sampling it flat would step across a clear sky.
+
+One piece of wiring that is silent when wrong: the map is only reported if the
+request asks for it.
+
+### Tap to focus, pinch to zoom
+
+Absent, and more conspicuous than any of the computational work. The coordinate
+mapping is the careful part, because getting it wrong does not crash — it
+focuses somewhere else, which reads as unreliable autofocus.
+
+Made pure Kotlin on a `SensorRect` rather than `android.graphics.Rect`, which is
+what makes it testable at all: the framework Rect is a stub in unit tests whose
+every method returns zero, so tests written against it compare zeroes and pass
+while proving nothing. Two tests failed exactly that way and were the reason for
+the refactor.
+
+---
+
+## Super-resolution by telephoto mosaic
+
+The differentiating feature, and the only one on the roadmap that produces a
+result a phone camera cannot rather than a better version of one it can. Full
+design in [SUPERRES.md](SUPERRES.md).
+
+Sweeping the 110mm across the 24mm framing gives that framing at **263 MP** from
+7x7 tiles — twenty times the main camera's pixel count, with no invented detail.
+
+It rests on a fact that is exact rather than approximate: for a camera rotating
+about its optical centre, the mapping between two views is a homography with no
+residual, *whatever the scene geometry*. The burst aligner cannot do this — it
+estimates translation, and rotation makes parallel lines converge.
+
+**Built and tested:** projective registration with Hartley normalisation, RANSAC
+(one wild match drags a least-squares fit 41 px; RANSAC is exact on the same
+data), Shi-Tomasi corner detection and matching that survives an exposure change
+mid-sweep, Brown-Lowe match verification, capture planning, and a native
+compositing canvas whose feathered seam measures a 1/255 step across a
+deliberate 40-code brightness difference.
+
+**Not built:** guided capture UI, locking exposure across the sweep, tiled output
+for very large canvases.
+
+**The limitation, which is honest and not fixable:** hand-held panning rotates
+about the wrist rather than the lens, translating the camera a few centimetres.
+Distant subjects do not care; near ones do, and no homography can fix it because
+objects at different distances moving differently is depth information. Works
+for landscape, architecture and flat subjects; does not work for close subjects
+with depth.
+
+---
+
+## Mistakes made and corrected, second block
+
+**A verification rule that punished good scenes.** Match verification used a
+fixed inlier ratio, which is the intuitive choice and is wrong: it gets *harder*
+to satisfy the more features a scene offers. A detailed frame produced 182
+candidate matches of which 61 agreed on the correct transform — overwhelming
+evidence that a 45% ratio test rejected as "a third".
+
+**Fractional weights in an integer field.** The mosaic blend weight is 0..1 and
+was stored in a `uint16`, so every partial contribution truncated to zero and
+the entire feathered border of every tile rendered as uncovered. The composite
+had a 36-pixel transparent gap down the middle of the overlap. Only the seam
+test found it.
+
+**A parallel copy that made things worse.** Splitting the ring's 25 MB frame copy
+across four threads improved the mean from 8.2 ms to 7.1 ms and the *worst case*
+from 18.1 ms to 30.7 ms, because creating threads on a path that wakes 30 times
+a second pays scheduler latency every time. Dropped frames are decided by the
+worst case. Reverted.
+
+**A test that measured the wrong thing.** The native tone curve check measured
+absolute slope from sensor code to output byte, which is dominated by the sRGB
+encode being steepest near black by construction. It reported shadow slope 1.9
+against midtone 1.3 and looked like a broken S-curve. Comparing against the same
+render with contrast disabled isolates the actual curve.
+
+**Claiming a tangent ratio differs from a focal ratio.** A mosaic test asserted
+the canvas gain was *not* the focal length ratio. It is exactly that, since
+tan(hfov/2) is 18/f by construction. The real naive error is using the ratio of
+*angles*, which undersizes by 14%.
+
 ## Next step
 
-**Phase 7: Vulkan compute Bayer merge.** The merge is now the bottleneck at
-1884 ms, and the ring already holds frames in a form a GPU can consume. This is
-where `AHardwareBuffer` earns its place over mmap: it imports into Vulkan
+**Finish the mosaic.** Registration, planning and compositing are done and
+tested; what remains is orchestration rather than algorithm — guided capture
+with a coverage grid, locking exposure and white balance across the sweep, and
+tiled output for canvases too large to render in one piece.
+
+**Then Vulkan.** The merge is the bottleneck at 1884 ms, and this is where
+`AHardwareBuffer` finally earns its place over mmap: it imports into Vulkan
 without a copy, which mmap'd pages cannot.
 
-Before that, two things this phase left open: run the live stream on hardware,
-and measure whether frames 33 ms apart merge measurably better than frames
-870 ms apart.
+Still outstanding from Phase 6: the shutter has never been pressed on a live ZSL
+stream, so the handover, merge and DNG output from ring frames are untested on
+hardware.
 
 ## Outstanding for release
 
