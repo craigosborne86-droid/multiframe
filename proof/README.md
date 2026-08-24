@@ -170,3 +170,56 @@ the ring can only afford 8 frames on this heap. See `p4_frame_cycle.png`.
 - 30 unit tests pass, but the non-Pixel hardware profiles are simulated
   `CameraCapabilities` values, not real devices. They prove the app degrades as
   intended given those inputs; they do not prove the inputs match real hardware.
+
+## Phase 5 — Play Store readiness
+
+### Target API level, confirmed live 2026-08-24
+
+Play Console Help states new apps and updates must target **Android 16
+(API 36)** or higher from **31 August 2026** — seven days from this check. An
+extension to 1 November 2026 can be requested.
+
+`targetSdk` is 36, so the app complies. `compileSdk` is 37 only because
+AndroidX 1.19.x demands it; that is independent of the target level. Raising
+`targetSdk` to 37 would opt into untested Android 17 behaviour changes and is
+not required.
+
+### Release build
+
+| Artefact | Size |
+|---|---|
+| `app-debug.apk` | 64 MB |
+| `app-release.apk` | 2.5 MB |
+| `app-release.aab` | 3.4 MB |
+
+R8 and resource shrinking are enabled. Signature verified with `apksigner`:
+APK Signature Scheme v2, single signer.
+
+Signing reads `keystore.properties`, which is gitignored along with `*.jks`.
+A template is committed. If the file is absent the release build stays unsigned
+rather than failing, so a fresh clone still compiles.
+
+The release build was installed and exercised on device — minification does not
+break the pipeline:
+
+    MergeStats(framesUsed=8, meanContribution=0.958, alignMillis=3002, mergeMillis=525)
+
+Merge time dropped from ~1500 ms in debug to 525 ms in release.
+
+### Permissions
+
+The shipped manifest declares exactly one permission, `CAMERA`, confirmed by
+`aapt2 dump badging` on the release APK. No `INTERNET`, so the privacy claim is
+enforced by the manifest rather than merely asserted. No `READ_MEDIA_IMAGES`,
+so Play's Photo and Video Permissions policy does not apply.
+
+### Privacy policy
+
+`store/PRIVACY.md`, still containing bracketed placeholders. Play requires a
+live HTTPS URL, not a PDF, in the Console *and* inside the app. The in-app half
+is met by the About screen (`p5_about.png`), reachable from the `i` control.
+
+### Icon
+
+Original adaptive icon, three offset frames converging on a point, verified
+rendering at launcher size (`p5_icon.png`).

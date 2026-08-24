@@ -14,3 +14,6 @@ captures/
 # Keystores (never commit signing material)
 *.jks
 *.keystore
+
+# Signing material
+keystore.properties

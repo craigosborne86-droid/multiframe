@@ -58,6 +58,7 @@ import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.MemoryBudget
 import dev.multiframe.camera.pipeline.Merger
 import dev.multiframe.camera.pipeline.OrientationTracker
+import dev.multiframe.camera.ui.AboutSheet
 import dev.multiframe.camera.ui.ControlsPanel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -82,6 +83,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var mergeEnabled by remember { mutableStateOf(true) }
     var abMode by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(false) }
+    var showAbout by remember { mutableStateOf(false) }
     var burstFrames by remember { mutableIntStateOf(8) }
     var busy by remember { mutableStateOf(false) }
 
@@ -232,6 +234,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     }
                 }
                 Chip("PRO", showControls) { showControls = !showControls }
+                Chip("i", showAbout) { showAbout = true }
             }
 
             if (status.isNotEmpty()) {
@@ -320,6 +323,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     }
                 },
             )
+        }
+
+        if (showAbout) {
+            AboutSheet(onDismiss = { showAbout = false })
         }
     }
 }
