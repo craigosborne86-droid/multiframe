@@ -95,3 +95,29 @@ signal-dependent. At high ISO the weighting reads noise as subject motion and
 rejects frames that should have been merged. The fix is to scale sigma with
 local signal level (shot noise grows as the square root of signal) rather than
 holding it constant.
+
+## Robustness fix
+
+`MergeParams.robustnessSigma` (a fixed constant) was replaced with a noise
+model estimated from the burst itself: frame-to-frame differences in a static
+scene *are* noise, so taking a median of those differences per brightness bin
+gives a signal-dependent sigma with no ISO or exposure metadata needed. Weight
+is now 1.0 inside the expected noise envelope and falls off as the variance
+ratio beyond it, rather than penalising every difference.
+
+Same ISO 6712 settings, same scene, same-burst A/B both times:
+
+| | noise reduction | mean frame contribution |
+|---|---|---|
+| before | 1.31x (ratio 0.766) | 0.740 |
+| after  | 1.89x (ratio 0.529) | 0.919 |
+
+Contrast preserved (global std ratio 0.987). `p4_highiso_fixed.png` shows the
+crop. Single-frame noise differs between the two runs because the light
+changed, so the *ratios* are the comparable figure, not the absolute sigmas.
+
+Unit tests also improved, and a ghosting test was added to confirm the looser
+threshold did not reintroduce smearing:
+
+    robust merge, default params   0.595 -> 0.365   (ideal 1/sqrt(8) = 0.354)
+    worst ghost deviation          0.072            (plain averaging ~0.5)

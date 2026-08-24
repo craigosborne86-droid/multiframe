@@ -35,7 +35,7 @@ class MergerTest {
 
         // A large robustness sigma effectively disables rejection, so this
         // measures the averaging itself.
-        val ideal = MergeParams(exposureGain = 1f, robustnessSigma = 100f)
+        val ideal = MergeParams(exposureGain = 1f, noiseTolerance = 1000f)
 
         val single = Merger.mergePlanes(frames, mergeEnabled = false, params = ideal)
         val merged = Merger.mergePlanes(frames, mergeEnabled = true, params = ideal)
@@ -63,13 +63,17 @@ class MergerTest {
         val mergedRms = rmsAgainst(clean, merged.luma)
         println("robust: single=$singleRms merged=$mergedRms ratio=${mergedRms / singleRms}")
 
-        assertThat(mergedRms).isLessThan(singleRms * 0.85f)
+        // With the signal-dependent noise model, pure sensor noise now stays
+        // inside the expected envelope and keeps full weight, so the default
+        // settings should land near the ideal 1/sqrt(8) = 0.354 rather than
+        // rejecting frames that never moved.
+        assertThat(mergedRms).isLessThan(singleRms * 0.55f)
     }
 
     @Test
     fun `noise reduction improves as frames are added`() {
         val clean = TestImages.texture(width, height)
-        val params = MergeParams(exposureGain = 1f, robustnessSigma = 100f)
+        val params = MergeParams(exposureGain = 1f, noiseTolerance = 1000f)
 
         val rms = listOf(2, 4, 8).map { n ->
             val merged = Merger.mergePlanes(noisyBurst(clean, n, 6f), true, params)
@@ -79,6 +83,42 @@ class MergerTest {
 
         assertThat(rms[1]).isLessThan(rms[0])
         assertThat(rms[2]).isLessThan(rms[1])
+    }
+
+    @Test
+    fun `a moving object is rejected instead of ghosting`() {
+        val clean = TestImages.texture(width, height)
+
+        // Four frames of a static scene, except frames 1..3 have a bright block
+        // in a different place each time - the classic ghosting case.
+        val frames = (0 until 4).map { i ->
+            val f = TestImages.addNoise(clean, 4f, seed = 300 + i)
+            if (i > 0) {
+                val ox = 60 + i * 18
+                for (y in 70 until 110) for (x in ox until ox + 40) {
+                    f[y * width + x] = 250.toByte()
+                }
+            }
+            TestImages.frame(f, width, height)
+        }
+
+        val merged = Merger.mergePlanes(frames, mergeEnabled = true, params = MergeParams(exposureGain = 1f))
+        val reference = frames.first()
+
+        // Inside the region the blocks sweep through, the merge must stay close
+        // to the reference rather than averaging in the intruders.
+        var worst = 0f
+        for (y in 70 until 110) for (x in 60 until 60 + 3 * 18 + 40) {
+            val i = y * width + x
+            val refLin = Merger.linearOf(reference.y[i].toInt() and 0xFF)
+            val d = kotlin.math.abs(merged.luma[i] - refLin)
+            if (d > worst) worst = d
+        }
+        println("worst ghost deviation = $worst")
+
+        // A plain average of 4 frames with 3 bright intruders would shift a
+        // pixel by roughly 0.5 in linear light. Anything near that is ghosting.
+        assertThat(worst).isLessThan(0.12f)
     }
 
     @Test
@@ -106,7 +146,7 @@ class MergerTest {
             val shifted = TestImages.shift(clean, width, height, sx, sy)
             TestImages.frame(TestImages.addNoise(shifted, 6f, seed = 200 + i), width, height)
         }
-        val params = MergeParams(exposureGain = 1f, robustnessSigma = 100f)
+        val params = MergeParams(exposureGain = 1f, noiseTolerance = 1000f)
 
         val single = Merger.mergePlanes(frames, mergeEnabled = false, params = params)
         val merged = Merger.mergePlanes(frames, mergeEnabled = true, params = params)

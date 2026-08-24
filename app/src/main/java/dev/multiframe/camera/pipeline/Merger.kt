@@ -19,7 +19,14 @@ import kotlin.math.pow
 data class MergeParams(
     val exposureGain: Float = 2.0f,
     val shoulderKnee: Float = 0.70f,
-    val robustnessSigma: Float = 0.045f,
+    /**
+     * How many estimated noise sigma a frame may differ from the reference
+     * before it starts losing weight. Larger keeps more frames (better noise
+     * reduction), smaller rejects motion more aggressively (less ghosting).
+     */
+    val noiseTolerance: Float = 3.0f,
+    /** Floor on estimated noise, so a near-noiseless burst cannot divide by zero. */
+    val minNoiseSigma: Float = 0.002f,
 )
 
 data class MergeStats(
@@ -100,6 +107,7 @@ object Merger {
         val alignMillis = System.currentTimeMillis() - alignStart
 
         val mergeStart = System.currentTimeMillis()
+        val noiseVar = estimateNoiseVariance(ref, frames, fields, w, h, params)
         val lumaAcc = FloatArray(w * h)
         val weightAcc = FloatArray(w * h)
         val contribution = FloatArray(threads)
@@ -151,10 +159,16 @@ object Merger {
                         val altLin = toLinear[sampled]
                         val refLin = toLinear[ref.y[rowBase + x].toInt() and 0xFF]
 
-                        // Robustness: a frame stops contributing where it disagrees
-                        // with the reference, which is what suppresses ghosting.
-                        val d = (altLin - refLin) / params.robustnessSigma
-                        val weight = exp(-d * d)
+                        // Robustness against a signal-dependent noise model.
+                        // Shot noise grows with signal, so a fixed threshold reads
+                        // high-ISO noise as subject motion and throws away frames
+                        // that should have merged. Differences inside the expected
+                        // noise envelope keep full weight; past it the weight falls
+                        // off as the variance ratio, which is what kills ghosts.
+                        val diff = altLin - refLin
+                        val d2 = diff * diff
+                        val n2 = noiseVar[binOf(refLin)]
+                        val weight = if (d2 <= n2) 1f else n2 / d2
 
                         lumaAcc[rowBase + x] += altLin * weight
                         weightAcc[rowBase + x] += weight
@@ -228,6 +242,92 @@ object Merger {
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
         return bitmap
+    }
+
+    private const val NOISE_BINS = 16
+    private const val NOISE_SAMPLE_STRIDE = 8
+    private const val MAD_TO_SIGMA = 1.4826f
+
+    fun binOf(linear: Float): Int =
+        (linear * NOISE_BINS).toInt().coerceIn(0, NOISE_BINS - 1)
+
+    /**
+     * Estimates noise as a function of signal level directly from the burst,
+     * so no ISO or exposure metadata is needed and the model adapts to whatever
+     * the sensor is actually doing.
+     *
+     * Frame-to-frame differences in a static scene are noise. Taking a median
+     * per brightness bin makes the estimate robust to the minority of pixels
+     * that genuinely moved. Returns the squared tolerance per bin.
+     */
+    private fun estimateNoiseVariance(
+        ref: YuvFrame,
+        frames: List<YuvFrame>,
+        fields: List<AlignmentField>,
+        w: Int,
+        h: Int,
+        params: MergeParams,
+    ): FloatArray {
+        val floorVar = (params.noiseTolerance * params.minNoiseSigma).let { it * it }
+        if (fields.isEmpty()) return FloatArray(NOISE_BINS) { floorVar }
+
+        val samples = Array(NOISE_BINS) { ArrayList<Float>(512) }
+
+        for (f in fields.indices) {
+            val alt = frames[f + 1]
+            val field = fields[f]
+            val tileW = w.toFloat() / field.tilesX
+            val tileH = h.toFloat() / field.tilesY
+
+            var y = NOISE_SAMPLE_STRIDE
+            while (y < h - NOISE_SAMPLE_STRIDE) {
+                val ty = (y / tileH).toInt().coerceIn(0, field.tilesY - 1)
+                var x = NOISE_SAMPLE_STRIDE
+                while (x < w - NOISE_SAMPLE_STRIDE) {
+                    val tx = (x / tileW).toInt().coerceIn(0, field.tilesX - 1)
+                    val idx = ty * field.tilesX + tx
+                    val sampled = sampleBilinear(
+                        alt.y, w, h,
+                        (x + field.dx[idx]).toFloat(),
+                        (y + field.dy[idx]).toFloat(),
+                    )
+                    val refLin = toLinear[ref.y[y * w + x].toInt() and 0xFF]
+                    val bin = binOf(refLin)
+                    if (samples[bin].size < 4000) {
+                        samples[bin].add(kotlin.math.abs(toLinear[sampled] - refLin))
+                    }
+                    x += NOISE_SAMPLE_STRIDE
+                }
+                y += NOISE_SAMPLE_STRIDE
+            }
+        }
+
+        val out = FloatArray(NOISE_BINS)
+        for (b in 0 until NOISE_BINS) {
+            val list = samples[b]
+            val sigma = if (list.size < 16) {
+                params.minNoiseSigma
+            } else {
+                list.sort()
+                val median = list[list.size / 2]
+                // Difference of two noisy samples, so divide out the sqrt(2).
+                (median * MAD_TO_SIGMA / 1.4142f).coerceAtLeast(params.minNoiseSigma)
+            }
+            val tol = params.noiseTolerance * sigma
+            out[b] = tol * tol
+        }
+
+        // Fill bins that saw too few samples from their nearest populated neighbour.
+        for (b in 0 until NOISE_BINS) {
+            if (samples[b].size >= 16) continue
+            var best = -1
+            for (o in 1 until NOISE_BINS) {
+                if (b - o >= 0 && samples[b - o].size >= 16) { best = b - o; break }
+                if (b + o < NOISE_BINS && samples[b + o].size >= 16) { best = b + o; break }
+            }
+            if (best >= 0) out[b] = out[best]
+        }
+        return out
     }
 
     /** Exposed for tests: linear-light value of an 8-bit code. */
