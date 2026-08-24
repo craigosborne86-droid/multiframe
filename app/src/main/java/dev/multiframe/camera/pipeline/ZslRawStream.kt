@@ -136,6 +136,19 @@ class ZslRawStream private constructor(
 
     @Volatile
     private var zoomRatio: Float = 1f
+
+    /**
+     * Whether exposure and white balance are pinned.
+     *
+     * A mosaic needs this. Auto-exposure drifting between tiles leaves each one
+     * a slightly different brightness, and no amount of feathering hides a
+     * brightness difference that runs the whole length of a seam -- the blend
+     * turns a hard line into a soft gradient, which is if anything more visible
+     * across a clear sky. Auto white balance drifting is worse, because it
+     * shifts colour rather than level.
+     */
+    @Volatile
+    private var locked = false
     private val histogramBins = IntArray(64)
     private var lastSettings: ManualSettings? = null
     private var lastCaps: CameraCapabilities? = null
@@ -258,6 +271,28 @@ class ZslRawStream private constructor(
         applySettings(settings, caps)
     }
 
+    /**
+     * Pins exposure, white balance and focus for the duration of a sweep.
+     *
+     * Focus too: a mosaic of a distant scene should stay at one focus distance,
+     * and refocusing between tiles changes magnification slightly as well as
+     * sharpness, which registration then has to absorb.
+     */
+    fun lockForSweep(settings: ManualSettings, caps: CameraCapabilities) {
+        if (closed || locked) return
+        locked = true
+        Log.i(TAG, "locking exposure, white balance and focus for a sweep")
+        applySettings(settings, caps)
+    }
+
+    fun unlock(settings: ManualSettings, caps: CameraCapabilities) {
+        if (closed || !locked) return
+        locked = false
+        applySettings(settings, caps)
+    }
+
+    val isLocked: Boolean get() = locked
+
     /** Digital zoom on top of whichever lens is selected. */
     fun setZoom(ratio: Float, settings: ManualSettings, caps: CameraCapabilities) {
         if (closed) return
@@ -378,6 +413,15 @@ class ZslRawStream private constructor(
                     android.hardware.camera2.CameraMetadata.EDGE_MODE_OFF,
                 )
             }
+        }
+
+        if (locked) {
+            // Pinned rather than switched off: the values auto-exposure already
+            // converged on are the right ones for this scene, and the lock
+            // simply stops them moving. Turning AE off entirely would jump to
+            // whatever the manual settings happen to say.
+            template.set(CaptureRequest.CONTROL_AE_LOCK, true)
+            template.set(CaptureRequest.CONTROL_AWB_LOCK, true)
         }
 
         if (settings.manualExposureActive(caps)) {

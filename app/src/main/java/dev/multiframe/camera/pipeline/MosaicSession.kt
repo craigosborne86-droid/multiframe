@@ -75,32 +75,49 @@ class MosaicSession private constructor(
      * composited. Both describe the same capture.
      */
     fun offer(tile: Bitmap, proxy: Plane, proxyScale: Float): OfferResult {
+        val decision = evaluate(proxy, proxyScale)
+        if (decision is OfferResult.Placed && !composite(tile, decision.placement)) {
+            return OfferResult.Rejected(RejectionReason.OUT_OF_BOUNDS)
+        }
+        return decision
+    }
+
+    /**
+     * Decides where a frame belongs without drawing it.
+     *
+     * Separate from compositing because developing a full-resolution tile costs
+     * around half a second, and most frames a sweep produces are rejected.
+     * Paying that price before finding out would make a sweep unusable.
+     */
+    fun evaluate(proxy: Plane, proxyScale: Float): OfferResult {
         if (closed) return OfferResult.Rejected(RejectionReason.OUT_OF_BOUNDS)
 
         val result = assembler.offer(proxy, proxyScale)
-        when (result) {
-            is OfferResult.Placed -> {
-                val touched = canvas.addTile(tile, result.placement.transform, feather = FEATHER)
-                if (touched == 0L) {
-                    // The assembler thought it landed on the canvas and the
-                    // canvas disagreed. Reported rather than silently counted
-                    // as placed, since coverage would then overstate itself.
-                    rejected++
-                    lastReason = RejectionReason.OUT_OF_BOUNDS
-                    return OfferResult.Rejected(RejectionReason.OUT_OF_BOUNDS)
-                }
-                Log.i(
-                    TAG,
-                    "mosaic tile ${result.placement.index}: ${result.placement.inliers} inliers, " +
-                        "coverage %.2f".format(assembler.coverage),
-                )
-            }
-            is OfferResult.Rejected -> {
-                rejected++
-                lastReason = result.reason
-            }
+        if (result is OfferResult.Rejected) {
+            rejected++
+            lastReason = result.reason
         }
         return result
+    }
+
+    /** Draws an accepted tile onto the canvas. */
+    fun composite(tile: Bitmap, placement: Placement): Boolean {
+        if (closed) return false
+        val touched = canvas.addTile(tile, placement.transform, feather = FEATHER)
+        if (touched == 0L) {
+            // The assembler thought it landed on the canvas and the canvas
+            // disagreed. Reported rather than silently counted as placed, since
+            // coverage would then overstate itself.
+            rejected++
+            lastReason = RejectionReason.OUT_OF_BOUNDS
+            return false
+        }
+        Log.i(
+            TAG,
+            "mosaic tile ${placement.index}: ${placement.inliers} inliers, " +
+                "coverage %.2f".format(assembler.coverage),
+        )
+        return true
     }
 
     /**

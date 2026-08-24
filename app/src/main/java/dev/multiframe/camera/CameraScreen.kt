@@ -80,6 +80,10 @@ import dev.multiframe.camera.pipeline.AppSettings.Companion.reconcile
 import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.Lens
 import dev.multiframe.camera.pipeline.LensCatalog
+import dev.multiframe.camera.pipeline.MosaicCapture
+import dev.multiframe.camera.pipeline.MosaicPlanner
+import dev.multiframe.camera.pipeline.MosaicProgress
+import dev.multiframe.camera.pipeline.MosaicSession
 import dev.multiframe.camera.pipeline.ImageSaver
 import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.MemoryBudget
@@ -170,6 +174,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var focusAtMillis by remember { mutableLongStateOf(0L) }
     var digitalZoom by remember { mutableFloatStateOf(1f) }
+
+    // Telephoto mosaic: cover this framing with a longer lens's detail.
+    var sweepRequested by remember { mutableStateOf(false) }
+    var sweepProgress by remember { mutableStateOf<MosaicProgress?>(null) }
+    var sweepTargetLens by remember { mutableStateOf<Lens?>(null) }
     // The surface the running stream was built against. A SurfaceView is
     // recreated when its fixed size is applied, so "a surface exists" is not
     // the same question as "the session is targeting the live one".
@@ -529,6 +538,63 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // The sweep. Waits for the stream to actually be running on the capture
+    // lens before starting, because switching lens tears the session down and
+    // builds a new one, and a mosaic assembled across that boundary would mix
+    // two focal lengths.
+    LaunchedEffect(sweepRequested, zslStream, lens) {
+        if (!sweepRequested) return@LaunchedEffect
+        val stream = zslStream ?: return@LaunchedEffect
+        val c = caps ?: return@LaunchedEffect
+        val target = sweepTargetLens ?: return@LaunchedEffect
+        if (stream.lensId != lens?.cameraId) return@LaunchedEffect
+
+        val plan = MosaicPlanner.plan(
+            target = target,
+            capture = stream.lens,
+            tileWidth = stream.config.width,
+            tileHeight = stream.config.height,
+        )
+        if (plan == null) {
+            status = "no useful mosaic for this pair of lenses"
+            sweepRequested = false
+            return@LaunchedEffect
+        }
+
+        val session = MosaicSession.start(plan, stream.config.width, stream.config.height)
+        if (session == null) {
+            status = "not enough memory for a %.0f MP canvas".format(plan.megapixels)
+            sweepRequested = false
+            return@LaunchedEffect
+        }
+
+        busy = true
+        status = "sweep: pan slowly across the scene"
+        val result = withContext(Dispatchers.Default) {
+            session.use {
+                MosaicCapture.run(
+                    context = context,
+                    stream = stream,
+                    session = it,
+                    settings = settings,
+                    caps = c,
+                    onProgress = { p -> sweepProgress = p },
+                    shouldContinue = { sweepRequested },
+                )
+            }
+        }
+        Log.i(TAG, "mosaic result: $result")
+        status = "%s  %.0f MP  %.1fs".format(
+            result.message, result.megapixels, result.elapsedMillis / 1000.0,
+        )
+        sweepProgress = null
+        sweepRequested = false
+        // Back to the framing the user was composing with.
+        lens = target
+        sweepTargetLens = null
+        busy = false
+    }
+
     // Written whenever anything worth remembering changes. Cheap: a dozen
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted) {
@@ -666,6 +732,27 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         highlightGuard,
                     ) {
                         if (!busy) highlightGuard = !highlightGuard
+                    }
+                }
+                // Only where a longer lens exists to sweep with.
+                val sweepPlan = remember(lenses, lens, zslStream) {
+                    val here = lens
+                    val stream = zslStream
+                    if (here == null || stream == null) null
+                    else MosaicPlanner.bestPairing(
+                        lenses, here, stream.config.width, stream.config.height,
+                    )
+                }
+                if (sweepPlan != null || sweepRequested) {
+                    Chip(if (sweepRequested) "STOP SWEEP" else "SUPER RES", sweepRequested) {
+                        if (sweepRequested) {
+                            sweepRequested = false
+                        } else if (!busy && sweepPlan != null) {
+                            sweepTargetLens = lens
+                            lens = sweepPlan.captureLens
+                            sweepRequested = true
+                            status = "switching to ${sweepPlan.captureLens.label}…"
+                        }
                     }
                 }
                 // Only offered where the hardware said yes. On a camera that
@@ -900,6 +987,36 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     .background(Color(0xCC000000), RoundedCornerShape(6.dp))
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
+        }
+
+        sweepProgress?.let { progress ->
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color(0xAA000000), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = "${progress.placed} tiles",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Text(
+                    text = "%.0f%% covered".format(progress.coverage * 100),
+                    color = Color(0xFF4A9EFF),
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Text(
+                    text = "pan slowly",
+                    color = Color(0x99FFFFFF),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
         }
 
         if (showAbout) {

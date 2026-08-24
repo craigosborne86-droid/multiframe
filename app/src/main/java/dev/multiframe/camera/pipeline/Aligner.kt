@@ -40,8 +40,17 @@ object Aligner {
         return pyramid
     }
 
-    /** 2x2 box downsample. */
-    private fun downsampleByTwo(src: Plane): Plane {
+    /**
+     * 2x2 box downsample.
+     *
+     * Public because registration for a mosaic needs a much smaller proxy than
+     * the merge does. Corner detection scans every pixel, so running it on a
+     * half-resolution proxy of a twelve-megapixel frame would cost seconds per
+     * frame; a further three halvings brings that to tens of milliseconds
+     * without costing accuracy, since a homography is fitted to dozens of
+     * correspondences rather than read off one pixel.
+     */
+    fun downsampleByTwo(src: Plane): Plane {
         val w = src.width / 2
         val h = src.height / 2
         val out = ByteArray(w * h)
