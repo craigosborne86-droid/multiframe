@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Multiframe</string>
+    <string name="shutter">Shutter</string>
+    <string name="grant_camera">Grant camera access</string>
+    <string name="permission_rationale">Multiframe needs the camera to capture and merge photo bursts.</string>
+</resources>

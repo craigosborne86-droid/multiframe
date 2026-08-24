@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original mark: three offset frames converging on a single point,
+     representing a burst of exposures merged into one image. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Rear frame -->
+    <path
+        android:pathData="M37,26 H63 A11,11 0 0 1 74,37 V63 A11,11 0 0 1 63,74 H37 A11,11 0 0 1 26,63 V37 A11,11 0 0 1 37,26 Z"
+        android:strokeColor="#4A9EFF"
+        android:strokeWidth="3"
+        android:strokeAlpha="0.35"
+        android:fillColor="@android:color/transparent" />
+
+    <!-- Middle frame -->
+    <path
+        android:pathData="M43,32 H69 A11,11 0 0 1 80,43 V69 A11,11 0 0 1 69,80 H43 A11,11 0 0 1 32,69 V43 A11,11 0 0 1 43,32 Z"
+        android:strokeColor="#4A9EFF"
+        android:strokeWidth="3"
+        android:strokeAlpha="0.6"
+        android:fillColor="@android:color/transparent" />
+
+    <!-- Front frame -->
+    <path
+        android:pathData="M49,38 H75 A11,11 0 0 1 86,49 V75 A11,11 0 0 1 75,86 H49 A11,11 0 0 1 38,75 V49 A11,11 0 0 1 49,38 Z"
+        android:strokeColor="#E8F1FA"
+        android:strokeWidth="3.5"
+        android:fillColor="@android:color/transparent" />
+
+    <!-- Merged point -->
+    <path
+        android:pathData="M56,56 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0"
+        android:fillColor="#E8F1FA" />
+</vector>

@@ -1,0 +1,16 @@
+# macOS / exFAT AppleDouble sidecars
+.DS_Store
+._*
+
+# Gradle / Android
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.cxx/
+
+# Keystores (never commit signing material)
+*.jks
+*.keystore
