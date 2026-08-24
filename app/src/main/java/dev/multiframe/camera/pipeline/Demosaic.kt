@@ -61,12 +61,18 @@ object Demosaic {
         color: ColorProfile,
         x: Int,
         y: Int,
+        shading: ShadingMap? = null,
     ): Float {
         val cx = x.coerceIn(0, frame.width - 1)
         val cy = y.coerceIn(0, frame.height - 1)
         val raw = frame.data[cy * frame.width + cx].toInt() and 0xFFFF
         val lin = (raw - sensor.blackAt(cx, cy)).toFloat() / sensor.range.toFloat()
-        return lin.coerceAtLeast(0f) * color.gainFor(colourAt(sensor, cx, cy), cy)
+        // Shading is a property of the sensor and lens, so it is corrected on
+        // the raw value before anything else looks at it.
+        val corrected = if (shading == null) lin else {
+            lin * shading.gainAt(cx, cy, frame.width, frame.height, shading.channelFor(cx, cy))
+        }
+        return corrected.coerceAtLeast(0f) * color.gainFor(colourAt(sensor, cx, cy), cy)
     }
 
     /**
@@ -83,13 +89,14 @@ object Demosaic {
         x: Int,
         y: Int,
         out: FloatArray,
+        shading: ShadingMap? = null,
     ) {
         if (x < 2 || y < 2 || x >= frame.width - 2 || y >= frame.height - 2) {
-            simpleGather(frame, sensor, color, x, y, out)
+            simpleGather(frame, sensor, color, x, y, out, shading)
             return
         }
 
-        fun s(dx: Int, dy: Int) = sample(frame, sensor, color, x + dx, y + dy)
+        fun s(dx: Int, dy: Int) = sample(frame, sensor, color, x + dx, y + dy, shading)
 
         val c = s(0, 0)
         val n = s(0, -1); val e = s(1, 0); val w = s(-1, 0); val so = s(0, 1)
@@ -146,6 +153,7 @@ object Demosaic {
         x: Int,
         y: Int,
         out: FloatArray,
+        shading: ShadingMap? = null,
     ) {
         var r = 0f; var g = 0f; var b = 0f
         var rn = 0; var gn = 0; var bn = 0
@@ -155,7 +163,7 @@ object Demosaic {
             for (dx in -1..1) {
                 val sx = x + dx
                 if (sx < 0 || sx >= frame.width) continue
-                val v = sample(frame, sensor, color, sx, sy)
+                val v = sample(frame, sensor, color, sx, sy, shading)
                 when (colourAt(sensor, sx, sy)) {
                     0 -> { r += v; rn++ }
                     1 -> { g += v; gn++ }

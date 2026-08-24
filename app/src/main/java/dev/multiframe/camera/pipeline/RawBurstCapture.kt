@@ -188,15 +188,23 @@ object RawBurstCapture {
 
         val t3 = System.currentTimeMillis()
         val color = ColorProfile.from(captureResult)
+        // Raw is uncorrected by definition, so the falloff the camera measured
+        // for this capture has to be applied here or the corners stay dingy.
+        val shading = ShadingMap.from(captureResult)
+        if (shading != null) {
+            Log.i(TAG, "lens shading: %.2f stops of falloff".format(shading.falloffStops))
+        }
         // Native develop writes into the Bitmap's own pixels, so nothing here
         // touches the Java heap. Falls back to the Kotlin developer, which is
         // the implementation the unit tests cover, if native declines.
-        var bitmap = merger.develop(mergedBuffer, color) ?: run {
+        var bitmap = merger.develop(mergedBuffer, color, shading = shading) ?: run {
             Log.w(TAG, "falling back to Kotlin develop")
             val shorts = ShortArray(width * height)
             mergedBuffer.rewind()
             mergedBuffer.asShortBuffer().get(shorts)
-            RawDeveloper.developIntoBitmap(BayerFrame(width, height, shorts), profile, color)
+            RawDeveloper.developIntoBitmap(
+                BayerFrame(width, height, shorts), profile, color, shading = shading,
+            )
         }
         bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
         val jpegName = "MF_${stamp}_${tag}_${captured}f.jpg"

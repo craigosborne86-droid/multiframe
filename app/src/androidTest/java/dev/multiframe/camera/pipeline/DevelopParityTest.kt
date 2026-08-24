@@ -114,6 +114,110 @@ class DevelopParityTest {
         assertThat(mean).isLessThan(0.25)
     }
 
+    @Test
+    fun nativeAndKotlinAgreeWithLensShadingApplied() {
+        // Shading is applied to the raw sample before white balance and
+        // demosaic, in two separate implementations. A disagreement here would
+        // show as corners that differ between the native path and the fallback.
+        val frame = scene()
+        val color = ColorProfile(
+            gains = floatArrayOf(1.8f, 1f, 1f, 1.5f),
+            matrix = ColorProfile.NEUTRAL.matrix,
+        )
+
+        val columns = 5
+        val rows = 5
+        val gains = FloatArray(columns * rows * 4)
+        val cx = (columns - 1) / 2f
+        val cy = (rows - 1) / 2f
+        for (r in 0 until rows) {
+            for (c in 0 until columns) {
+                val dx = c - cx
+                val dy = r - cy
+                val t = kotlin.math.sqrt((dx * dx + dy * dy).toDouble()).toFloat() /
+                    kotlin.math.sqrt((cx * cx + cy * cy).toDouble()).toFloat()
+                for (channel in 0 until 4) {
+                    // Channel-dependent, as real falloff is: corners are a
+                    // different colour as well as darker.
+                    gains[(r * columns + c) * 4 + channel] =
+                        1f + (0.9f + 0.2f * channel) * t * t
+                }
+            }
+        }
+        val shading = ShadingMap(columns, rows, gains)
+
+        val expected = RawDeveloper.develop(frame, profile, color, fixedGain, shading)
+        val merger = NativeMerge.create(width, height, profile)!!
+        val bitmap = merger.use {
+            it.develop(directBufferOf(frame), color, fixedGain, shading)
+        }!!
+
+        var worst = 0
+        for (y in 3 until height - 3) {
+            for (x in 3 until width - 3) {
+                val a = expected[y * width + x]
+                val b = bitmap.getPixel(x, y)
+                worst = maxOf(
+                    worst,
+                    abs(((a shr 16) and 0xFF) - Color.red(b)),
+                    abs(((a shr 8) and 0xFF) - Color.green(b)),
+                    abs((a and 0xFF) - Color.blue(b)),
+                )
+            }
+        }
+        bitmap.recycle()
+        Log.i(TAG, "native vs Kotlin with shading: worst $worst/255")
+
+        assertThat(worst).isAtMost(2)
+    }
+
+    @Test
+    fun shadingActuallyBrightensTheCorners() {
+        // Guards the wiring rather than the maths: if the map were dropped on
+        // the way to native, the parity test above would still pass.
+        // Deliberately dim, so the correction has somewhere to go. At normal
+        // exposure the corner is already near clipping and a doubled gain only
+        // moves it a few codes, which would demonstrate nothing.
+        val frame = BayerFrame(width, height, ShortArray(width * height) { 200.toShort() })
+        val dim = DevelopParams(exposureGain = 0.5f)
+        val columns = 3
+        val rows = 3
+        val gains = FloatArray(columns * rows * 4) { 1f }
+        for (channel in 0 until 4) {
+            // Only the bottom-right cell is boosted.
+            gains[(2 * columns + 2) * 4 + channel] = 2.0f
+        }
+        val shading = ShadingMap(columns, rows, gains)
+
+        val merger = NativeMerge.create(width, height, profile)!!
+        val plain = merger.use {
+            it.develop(directBufferOf(frame), ColorProfile.NEUTRAL, dim)
+        }!!
+        val merger2 = NativeMerge.create(width, height, profile)!!
+        val corrected = merger2.use {
+            it.develop(directBufferOf(frame), ColorProfile.NEUTRAL, dim, shading)
+        }!!
+
+        val plainCorner = Color.green(plain.getPixel(width - 5, height - 5))
+        val correctedCorner = Color.green(corrected.getPixel(width - 5, height - 5))
+        val plainCentre = Color.green(plain.getPixel(width / 2, height / 2))
+        val correctedCentre = Color.green(corrected.getPixel(width / 2, height / 2))
+        Log.i(
+            TAG,
+            "shading: corner $plainCorner -> $correctedCorner, " +
+                "centre $plainCentre -> $correctedCentre",
+        )
+        plain.recycle()
+        corrected.recycle()
+
+        // A doubled linear gain is a full stop, which is not a doubled output
+        // code: the gamma encode and the S-curve both compress it. Asserted as
+        // a proportion so the threshold means something rather than being a
+        // number that happened to pass.
+        assertThat(correctedCorner.toFloat()).isGreaterThan(plainCorner * 1.25f)
+        assertThat(correctedCentre).isEqualTo(plainCentre)
+    }
+
     /**
      * The rendering curve, measured on the binary that actually runs.
      *

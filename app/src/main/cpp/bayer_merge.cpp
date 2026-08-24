@@ -406,6 +406,36 @@ inline void renderLinear(float& r, float& g, float& b, const ToneParams& t) {
     }
 }
 
+/**
+ * Bilinearly interpolated lens shading gain.
+ *
+ * The grid is coarse -- around 17 by 13 cells across 4080 pixels, so each cell
+ * covers 240 -- and sampling it as nearest neighbour would put a visible
+ * brightness step across the sky every 240 pixels. Mirrors ShadingMap.kt.
+ */
+inline float shadingGain(const float* gains, int columns, int rows,
+                         int x, int y, int width, int height, int channel) {
+    if (gains == nullptr || columns <= 0 || rows <= 0 || width <= 1 || height <= 1) {
+        return 1.0f;
+    }
+    const float fx = (static_cast<float>(x) / (width - 1)) * (columns - 1);
+    const float fy = (static_cast<float>(y) / (height - 1)) * (rows - 1);
+
+    const int x0 = std::clamp(static_cast<int>(fx), 0, columns - 1);
+    const int y0 = std::clamp(static_cast<int>(fy), 0, rows - 1);
+    const int x1 = std::min(x0 + 1, columns - 1);
+    const int y1 = std::min(y0 + 1, rows - 1);
+    const float tx = std::clamp(fx - x0, 0.0f, 1.0f);
+    const float ty = std::clamp(fy - y0, 0.0f, 1.0f);
+
+    auto cell = [&](int c, int r) {
+        return gains[(static_cast<size_t>(r) * columns + c) * 4 + channel];
+    };
+    const float top = cell(x0, y0) * (1.0f - tx) + cell(x1, y0) * tx;
+    const float bottom = cell(x0, y1) * (1.0f - tx) + cell(x1, y1) * tx;
+    return top * (1.0f - ty) + bottom * ty;
+}
+
 /** Smootherstep blended with identity: monotonic for any amount in 0..1. */
 inline float sCurve(float x, float amount) {
     if (amount <= 0.0f) return x;
@@ -476,8 +506,23 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         jintArray jcfa, jintArray jblack, jint white,
         jfloatArray jgains, jfloatArray jmatrix,
         jfloat exposureGain, jfloat knee,
-        jfloat contrast, jfloat desatStrength, jfloat desatStart, jfloat blackPoint) {
+        jfloat contrast, jfloat desatStrength, jfloat desatStart, jfloat blackPoint,
+        jfloatArray jshading, jint shadingColumns, jint shadingRows) {
     ensureGammaLut();
+
+    // Lens shading, when the camera reported a map for this capture. Raw is
+    // defined as uncorrected, so without this every frame carries a stop and a
+    // half of corner falloff that the camera's own JPEG path removes.
+    std::vector<float> shading;
+    const float* shadingPtr = nullptr;
+    if (jshading != nullptr && shadingColumns > 0 && shadingRows > 0) {
+        const jsize count = env->GetArrayLength(jshading);
+        if (count == shadingColumns * shadingRows * 4) {
+            shading.resize(static_cast<size_t>(count));
+            env->GetFloatArrayRegion(jshading, 0, count, shading.data());
+            shadingPtr = shading.data();
+        }
+    }
 
     ToneParams tone;
     tone.exposureGain = exposureGain;
@@ -526,6 +571,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
                     int c = cfa[(sy & 1) * 2 + (sx & 1)];
                     float lin = (static_cast<float>(src[static_cast<size_t>(sy) * width + sx]) -
                                  black[(sy & 1) * 2 + (sx & 1)]) / range;
+                    // Shading first: it is a property of the sensor and lens,
+                    // corrected before anything else looks at the value.
+                    lin *= shadingGain(shadingPtr, shadingColumns, shadingRows,
+                                       sx, sy, width, height, (sy & 1) * 2 + (sx & 1));
                     float g = (c == 0) ? gains[0] : (c == 2) ? gains[3]
                                                              : ((sy & 1) == 0 ? gains[1] : gains[2]);
                     return std::max(lin, 0.0f) * g;

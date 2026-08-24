@@ -72,6 +72,7 @@ class NativeMerge private constructor(
         merged: ByteBuffer,
         color: ColorProfile,
         params: DevelopParams = DevelopParams(),
+        shading: ShadingMap? = null,
     ): Bitmap? {
         val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
         val gain = if (params.exposureGain > 0f) {
@@ -89,6 +90,7 @@ class NativeMerge private constructor(
             color.gains, color.matrix, gain, params.shoulderKnee,
             params.contrast, params.highlightDesaturation,
             params.desaturationStart, params.blackPoint,
+            shading?.gains, shading?.columns ?: 0, shading?.rows ?: 0,
         )
         if (!ok) {
             Log.w(TAG, "native develop failed, caller should fall back")
@@ -124,6 +126,7 @@ class NativeMerge private constructor(
         gains: FloatArray, matrix: FloatArray,
         exposureGain: Float, knee: Float,
         contrast: Float, desatStrength: Float, desatStart: Float, blackPoint: Float,
+        shading: FloatArray?, shadingColumns: Int, shadingRows: Int,
     ): Boolean
     private external fun nFramesMerged(h: Long): Int
     private external fun nDestroy(h: Long)

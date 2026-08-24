@@ -82,6 +82,14 @@ data class ManualSettings(
 
         b.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, effectiveAwbMode(caps))
 
+        // The lens shading map is only reported when it is asked for, and raw
+        // is uncorrected by definition, so without this every frame keeps its
+        // corner falloff and nothing downstream can put it right.
+        b.setCaptureRequestOption(
+            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
+            CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON,
+        )
+
         return b.build()
     }
 

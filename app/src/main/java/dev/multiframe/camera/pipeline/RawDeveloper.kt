@@ -142,6 +142,7 @@ object RawDeveloper {
         color: ColorProfile,
         params: DevelopParams = DevelopParams(),
         bandRows: Int = 128,
+        shading: ShadingMap? = null,
     ): android.graphics.Bitmap {
         val w = frame.width
         val h = frame.height
@@ -154,7 +155,7 @@ object RawDeveloper {
         var y = 0
         while (y < h) {
             val rows = min(bandRows, h - y)
-            developBand(frame, sensor, color, resolved, y, rows, band)
+            developBand(frame, sensor, color, resolved, y, rows, band, shading)
             bitmap.setPixels(band, 0, w, 0, y, w, rows)
             y += rows
         }
@@ -169,11 +170,12 @@ object RawDeveloper {
         yOffset: Int,
         rows: Int,
         out: IntArray,
+        shading: ShadingMap?,
     ) {
         val w = frame.width
         val h = frame.height
         parallelRows(rows) { rStart, rEnd ->
-            renderRows(frame, sensor, color, params, w, h, yOffset + rStart, yOffset + rEnd, out, yOffset)
+            renderRows(frame, sensor, color, params, w, h, yOffset + rStart, yOffset + rEnd, out, yOffset, shading)
         }
     }
 
@@ -186,13 +188,14 @@ object RawDeveloper {
         sensor: SensorProfile,
         color: ColorProfile,
         params: DevelopParams = DevelopParams(),
+        shading: ShadingMap? = null,
     ): IntArray {
         val w = frame.width
         val h = frame.height
         val out = IntArray(w * h)
         val resolved = params.copy(exposureGain = resolveGain(frame, sensor, color, params))
         parallelRows(h) { yStart, yEnd ->
-            renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0)
+            renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading)
         }
         return out
     }
@@ -209,6 +212,7 @@ object RawDeveloper {
         yEnd: Int,
         out: IntArray,
         rowBase: Int,
+        shading: ShadingMap?,
     ) {
         val m = color.matrix
         val rgb = FloatArray(3)
@@ -218,7 +222,7 @@ object RawDeveloper {
                 // Gradient-corrected demosaic: the sample the sensor actually
                 // measured at this site is kept exactly, and only the two
                 // missing colours are interpolated.
-                Demosaic.pixel(frame, sensor, color, x, y, rgb)
+                Demosaic.pixel(frame, sensor, color, x, y, rgb, shading)
                 val r0 = rgb[0]
                 val g0 = rgb[1]
                 val b0 = rgb[2]

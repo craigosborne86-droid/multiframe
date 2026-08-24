@@ -343,6 +343,12 @@ class ZslRawStream private constructor(
         }
 
         template.set(CaptureRequest.CONTROL_AWB_MODE, settings.effectiveAwbMode(caps))
+
+        // Reported only when requested, and raw is uncorrected by definition.
+        template.set(
+            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
+            android.hardware.camera2.CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON,
+        )
         return template.build()
     }
 
