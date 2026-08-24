@@ -1,5 +1,9 @@
 package dev.multiframe.camera.pipeline
 
+import android.hardware.camera2.CameraCharacteristics
+import androidx.camera.core.ImageProxy
+import java.nio.ByteOrder
+
 /**
  * One raw sensor frame: a single-channel colour filter array image.
  *
@@ -20,6 +24,34 @@ class BayerFrame(
     companion object {
         fun allocate(width: Int, height: Int) =
             BayerFrame(width, height, ShortArray(width * height))
+
+        /**
+         * Extracts 16-bit CFA samples from a RAW_SENSOR image, honouring row
+         * stride. The buffer is little-endian on every Android device we can
+         * target, but the order is set explicitly rather than assumed.
+         */
+        fun copyFrom(image: ImageProxy): BayerFrame {
+            val w = image.width
+            val h = image.height
+            val plane = image.planes[0]
+            val buffer = plane.buffer.order(ByteOrder.LITTLE_ENDIAN)
+            val rowStride = plane.rowStride
+            val out = ShortArray(w * h)
+
+            if (rowStride == w * 2) {
+                buffer.asShortBuffer().get(out, 0, minOf(out.size, buffer.remaining() / 2))
+            } else {
+                val row = ShortArray(rowStride / 2)
+                for (y in 0 until h) {
+                    if (buffer.remaining() < rowStride) break
+                    buffer.position(y * rowStride)
+                    val slice = buffer.slice().order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                    slice.get(row, 0, minOf(row.size, slice.remaining()))
+                    System.arraycopy(row, 0, out, y * w, minOf(w, row.size))
+                }
+            }
+            return BayerFrame(w, h, out, image.imageInfo.timestamp)
+        }
     }
 }
 
@@ -53,6 +85,39 @@ data class SensorProfile(
         blackLevel.contentHashCode() * 31 + whiteLevel * 31 + cfaPattern.contentHashCode()
 
     companion object {
+        /**
+         * Reads the real sensor profile. Black level is per-CFA-position and
+         * white level bounds the usable range; both are needed for a correct
+         * merge and a valid DNG.
+         */
+        fun from(characteristics: CameraCharacteristics): SensorProfile {
+            val pattern = characteristics.get(
+                CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT
+            )
+            val cfa = when (pattern) {
+                CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB ->
+                    intArrayOf(0, 1, 1, 2)
+                CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_GRBG ->
+                    intArrayOf(1, 0, 2, 1)
+                CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_GBRG ->
+                    intArrayOf(1, 2, 0, 1)
+                CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_BGGR ->
+                    intArrayOf(2, 1, 1, 0)
+                else -> DEFAULT.cfaPattern
+            }
+            val white = characteristics.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL)
+                ?: DEFAULT.whiteLevel
+            val blackPattern = characteristics.get(
+                CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN
+            )
+            val black = if (blackPattern != null) {
+                IntArray(4).also { blackPattern.copyTo(it, 0) }
+            } else {
+                DEFAULT.blackLevel
+            }
+            return SensorProfile(black, white, cfa)
+        }
+
         /** Matches the Pixel 9 Pro XL: GBRG, 10-bit. Used as a fallback only. */
         val DEFAULT = SensorProfile(
             blackLevel = intArrayOf(64, 64, 64, 64),

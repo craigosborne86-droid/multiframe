@@ -1,8 +1,15 @@
 package dev.multiframe.camera
 
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest as Camera2Request
+import android.hardware.camera2.TotalCaptureResult
 import android.util.Log
 import android.util.Size
 import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.compose.CameraXViewfinder
 import androidx.camera.core.Camera
@@ -58,6 +65,7 @@ import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.ImageSaver
 import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.MemoryBudget
+import dev.multiframe.camera.pipeline.RawBurstCapture
 import dev.multiframe.camera.pipeline.RawCapture
 import dev.multiframe.camera.pipeline.Merger
 import dev.multiframe.camera.pipeline.OrientationTracker
@@ -68,6 +76,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
 private const val TAG = "Multiframe"
@@ -88,6 +97,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var showControls by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var rawCapture by remember { mutableStateOf<ImageCapture?>(null) }
+    var characteristics by remember { mutableStateOf<CameraCharacteristics?>(null) }
+    // DngCreator needs the capture metadata that produced the frame, which
+    // CameraX does not surface directly.
+    val lastCaptureResult = remember { AtomicReference<TotalCaptureResult?>(null) }
     var burstFrames by remember { mutableIntStateOf(8) }
     var busy by remember { mutableStateOf(false) }
 
@@ -159,9 +172,20 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // alongside preview and analysis. Try it, and fall back rather than
             // losing the camera entirely.
             val dngCapture = runCatching {
-                ImageCapture.Builder()
+                val b = ImageCapture.Builder()
                     .setOutputFormat(ImageCapture.OUTPUT_FORMAT_RAW_JPEG)
-                    .build()
+                Camera2Interop.Extender(b).setSessionCaptureCallback(
+                    object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureCompleted(
+                            session: CameraCaptureSession,
+                            request: Camera2Request,
+                            result: TotalCaptureResult,
+                        ) {
+                            lastCaptureResult.set(result)
+                        }
+                    }
+                )
+                b.build()
             }.getOrNull()
 
             val bound = runCatching {
@@ -188,6 +212,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     "dng=${capabilities.supportsDng}, rawStream=${rawCapture != null}",
             )
             if (!capabilities.supportsDng) rawCapture = null
+
+            characteristics = runCatching {
+                val id = Camera2CameraInfo.from(bound.cameraInfo).cameraId
+                context.getSystemService(CameraManager::class.java)
+                    .getCameraCharacteristics(id)
+            }.getOrNull()
 
             // Start about a stop under, so highlights stay off the clip point.
             if (capabilities.supportsExposureCompensation) {
@@ -256,6 +286,31 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     }
                 }
                 Chip("PRO", showControls) { showControls = !showControls }
+                if (rawCapture != null && characteristics != null) {
+                    Chip("RAW x$burstFrames", false) {
+                        if (!busy) {
+                            busy = true
+                            status = "raw burst…"
+                            scope.launch {
+                                val r = withContext(Dispatchers.Default) {
+                                    RawBurstCapture.captureAndMerge(
+                                        context = context,
+                                        imageCapture = rawCapture!!,
+                                        characteristics = characteristics!!,
+                                        captureResult = lastCaptureResult.get(),
+                                        frameCount = burstFrames,
+                                        onProgress = { },
+                                    )
+                                }
+                                Log.i(TAG, "raw burst result: $r")
+                                status = "%s  capture %dms  merge %dms  write %dms".format(
+                                    r.message, r.captureMillis, r.mergeMillis, r.writeMillis,
+                                )
+                                busy = false
+                            }
+                        }
+                    }
+                }
                 if (rawCapture != null) {
                     Chip("DNG", false) {
                         if (!busy) {
