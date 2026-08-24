@@ -30,3 +30,14 @@ Sources still accumulate `._*` files. Clean before building:
     ./gradlew :app:assembleDebug
 
 APK lands in `~/Library/Caches/MultiframeBuild/app/outputs/apk/debug/`.
+
+## Tests
+
+    ./gradlew :app:testDebugUnitTest          # 65 tests, no device needed
+    ./gradlew :app:connectedDebugAndroidTest  # 13 tests, needs a device
+
+The instrumentation tests exercise the native raw ring buffer -- its rotation,
+locking and whether a 25 MB frame copy keeps up with 30 fps. They use synthetic
+frames, so they need no camera permission and no scene, but the timings they
+assert are only meaningful on real hardware. Reports land in
+`~/Library/Caches/MultiframeBuild/app/reports/`.

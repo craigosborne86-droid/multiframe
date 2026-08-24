@@ -36,6 +36,12 @@ data class RawBurstResult(
     val savedDng: String?,
     val savedJpeg: String?,
     val message: String,
+    /** Shutter press to frames in hand. The ZSL path's headline number. */
+    val handoverMicros: Long = 0,
+    /** Oldest to newest frame in the burst: how tight the capture window was. */
+    val burstSpanMillis: Long = 0,
+    /** Streaming health at the moment of capture, when the ring supplied it. */
+    val streamStats: String? = null,
 )
 
 /**
@@ -147,7 +153,7 @@ object RawBurstCapture {
 
     private const val TILE_TARGET = 32
 
-    private fun finishOutputs(
+    internal fun finishOutputs(
         context: Context,
         merger: NativeMerge,
         mergedBuffer: java.nio.ByteBuffer,
@@ -162,6 +168,10 @@ object RawBurstCapture {
         stats: BayerMergeStats,
         captureMillis: Long,
         mergeMillis: Long,
+        tag: String = "merged",
+        handoverMicros: Long = 0,
+        burstSpanMillis: Long = 0,
+        streamStats: String? = null,
     ): RawBurstResult {
         val stamp = stamp()
 
@@ -170,7 +180,7 @@ object RawBurstCapture {
         // pipelines. The DNG gets the raw data untouched; the JPEG is developed
         // from that same data.
         val t2 = System.currentTimeMillis()
-        val dngName = "MF_${stamp}_merged_${captured}f.dng"
+        val dngName = "MF_${stamp}_${tag}_${captured}f.dng"
         // Written straight from the native buffer: no Java copy for the DNG.
         val dngOk = captureResult != null &&
             writeDng(context, mergedBuffer, width, height, characteristics, captureResult, dngName)
@@ -189,7 +199,7 @@ object RawBurstCapture {
             RawDeveloper.developIntoBitmap(BayerFrame(width, height, shorts), profile, color)
         }
         bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
-        val jpegName = "MF_${stamp}_merged_${captured}f.jpg"
+        val jpegName = "MF_${stamp}_${tag}_${captured}f.jpg"
         val jpegOk = ImageSaver.saveJpeg(context, bitmap, jpegName) != null
         bitmap.recycle()
         val developMillis = System.currentTimeMillis() - t3
@@ -205,6 +215,7 @@ object RawBurstCapture {
             if (jpegOk) jpegName else null,
             if (parts.isEmpty()) "merge ok but nothing could be written"
             else "raw merge -> ${parts.joinToString(" + ")}, $captured frames",
+            handoverMicros, burstSpanMillis, streamStats,
         )
     }
 
@@ -304,6 +315,6 @@ object RawBurstCapture {
         false
     }
 
-    private fun stamp(): String =
+    internal fun stamp(): String =
         SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
 }

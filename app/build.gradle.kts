@@ -23,13 +23,16 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        // Instrumentation tests run the real native ring on real hardware;
+        // the pool is mmap'd memory and its timing is what is under test.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         externalNativeBuild {
             cmake {
                 // The merge is the only native code; no STL container sharing
                 // across the JNI boundary, so the static runtime is enough.
                 arguments += listOf("-DANDROID_STL=c++_static")
-                cppFlags += "-std=c++17"
+                cppFlags += "-std=c++20"
             }
         }
 
@@ -117,4 +120,9 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.truth)
+
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.truth)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }
