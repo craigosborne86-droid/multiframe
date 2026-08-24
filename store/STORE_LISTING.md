@@ -69,12 +69,66 @@ control on the camera screen.
 
 Draft policy: `store/PRIVACY.md`. It still contains bracketed placeholders.
 
+## Name and identity — settled
+
+The app is **Multiframe**. `applicationId` is `dev.multiframe.camera` and is
+final; it cannot be changed after first publication.
+
+Checked on Play 2026-08-24: no app is named "Multiframe". The nearest matches
+are *MultiFrames* (plural, G Solutions Kuwait, unrelated category) and a
+developer account called *Multiframes*. Neither is an impersonation concern,
+but the similarity may cost some search discoverability.
+
+Note the name is descriptive rather than arbitrary, which makes it weak as a
+trademark: it is unlikely to be defensible against others using the same word
+for a multi-frame camera. That is a commercial trade-off, not a blocker, and a
+formal trademark search is still recommended before any brand investment.
+
+## Store assets
+
+| Asset | File | Spec |
+|---|---|---|
+| App icon | `store/assets/play_icon_512.png` | 512x512 32-bit PNG |
+| Feature graphic | `store/assets/play_feature_1024x500.png` | 1024x500 |
+
+Both are generated from the same geometry as the in-app adaptive icon
+(`ic_launcher_foreground.xml`). The store icon is scaled to fill more of the
+square, because it is shown standalone rather than through an adaptive mask.
+
+## Listing copy
+
+**Short description** (80 char limit):
+
+> Every shot is many shots: multi-frame capture for cleaner low-light photos.
+
+**Full description:**
+
+> Multiframe is a camera that takes a burst of photographs every time you press
+> the shutter, instead of a single one.
+>
+> It aligns those frames to cancel out the small movements of your hand, then
+> merges them into one image. Because sensor noise is random and the scene is
+> not, combining frames cancels the noise while keeping the detail. The effect
+> is strongest exactly where phone cameras usually struggle: shadows, interiors
+> and low light.
+>
+> Multiframe deliberately exposes a little darker than most cameras, so bright
+> areas keep their detail instead of clipping to white, and recovers the
+> shadows during merging. Tone mapping is kept restrained. The goal is a
+> photograph that looks like the scene, rather than one that has been sharpened
+> and saturated until it looks processed.
+>
+> Manual controls are available for ISO, shutter speed, focus distance, white
+> balance and exposure compensation, along with control over how many frames go
+> into each shot. Controls the hardware does not support are simply not shown.
+>
+> Everything happens on your device. Multiframe has no internet permission, so
+> it cannot send your photographs anywhere. There are no accounts, no adverts,
+> no analytics and no tracking.
+
 ## Still outstanding before submission
 
-- [ ] Decide the final app name and change `applicationId` accordingly. The
-      current `dev.multiframe.camera` is a placeholder and **cannot be changed
-      after first publication**.
-- [ ] Fill in the privacy policy placeholders and host it.
+- [ ] Fill in the privacy policy date, developer name and contact, then host it.
 - [ ] Create a release keystore and back it up. Losing it means never being able
       to update the listing again.
 - [ ] Complete the Data safety form.

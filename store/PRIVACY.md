@@ -1,17 +1,17 @@
 # Privacy Policy
 
 **Effective date:** [DATE]
-**Application:** [APP NAME]
+**Application:** Multiframe
 **Developer:** [DEVELOPER / COMPANY NAME]
 **Contact:** [SUPPORT EMAIL]
 
-> Stub for review. The bracketed fields must be filled in and the document
-> published at a public HTTPS URL before submission. Google Play does not accept
-> a PDF; it must be a live web page.
+> The remaining bracketed fields (date, developer, contact) must be filled in
+> and the document published at a public HTTPS URL before submission. Google
+> Play does not accept a PDF; it must be a live web page.
 
 ## Summary
 
-[APP NAME] does not collect, transmit, or share any personal data. Everything
+Multiframe does not collect, transmit, or share any personal data. Everything
 the app does happens on your device.
 
 ## What the app accesses

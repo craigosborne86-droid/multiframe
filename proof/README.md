@@ -215,7 +215,7 @@ so Play's Photo and Video Permissions policy does not apply.
 
 ### Privacy policy
 
-`store/PRIVACY.md`, still containing bracketed placeholders. Play requires a
+`store/PRIVACY.md`. Play requires a
 live HTTPS URL, not a PDF, in the Console *and* inside the app. The in-app half
 is met by the About screen (`p5_about.png`), reachable from the `i` control.
 
@@ -223,3 +223,20 @@ is met by the About screen (`p5_about.png`), reachable from the `i` control.
 
 Original adaptive icon, three offset frames converging on a point, verified
 rendering at launcher size (`p5_icon.png`).
+
+### Name and icon, settled 2026-08-24
+
+The app is **Multiframe**; `applicationId` `dev.multiframe.camera` is final.
+Checked on Play: no app of that name exists. Nearest matches are *MultiFrames*
+(plural, unrelated category) and a developer account *Multiframes* — a
+discoverability nuisance, not an impersonation risk. The name is descriptive
+rather than arbitrary, so it is weak as a trademark; noted as a commercial
+trade-off, not a blocker.
+
+Store assets generated from the same geometry as the in-app adaptive icon:
+
+    store/assets/play_icon_512.png          512x512
+    store/assets/play_feature_1024x500.png  1024x500
+
+The store icon is scaled to fill more of the square than the adaptive icon,
+which needs to stay inside the safe zone for launcher masking.
