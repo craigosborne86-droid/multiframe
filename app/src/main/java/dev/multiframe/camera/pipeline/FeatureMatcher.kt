@@ -46,8 +46,18 @@ data class Corner(val x: Int, val y: Int, val strength: Float)
  */
 object FeatureMatcher {
 
-    /** Half-width of the descriptor patch. */
-    private const val PATCH = 4
+    /**
+     * Half-width of the descriptor patch.
+     *
+     * Large enough to reach past the feature onto its surroundings. A patch
+     * that contains only the feature cannot distinguish one window of a
+     * building from the next, or one leaf from another: every candidate
+     * correlates almost perfectly and the match is decided by noise. Measured
+     * on a scene of many similar blobs, a 9x9 patch matched 159 points of which
+     * 7 agreed on a transform, while a 15x15 patch on the same pair agreed
+     * almost unanimously. Context is what makes a feature identifiable.
+     */
+    private const val PATCH = 7
     private const val PATCH_SPAN = PATCH * 2 + 1
     private const val PATCH_AREA = PATCH_SPAN * PATCH_SPAN
 
@@ -59,6 +69,9 @@ object FeatureMatcher {
      * original threshold for this test was 0.8, and the value transfers.
      */
     private const val RATIO_TEST = 0.8f
+
+    /** Below this, the runner-up is as good as the winner and neither is trusted. */
+    private const val AMBIGUITY_EPSILON = 1e-4f
 
     private fun at(p: Plane, x: Int, y: Int): Int =
         p.data[y.coerceIn(0, p.height - 1) * p.width + x.coerceIn(0, p.width - 1)].toInt() and 0xFF
@@ -107,16 +120,22 @@ object FeatureMatcher {
                 val y1 = min(y0 + cellH, p.height - margin)
                 if (x1 <= x0 || y1 <= y0) continue
 
-                val cell = ArrayList<Corner>(32)
-                var y = y0
-                while (y < y1) {
-                    var x = x0
-                    while (x < x1) {
+                // Every pixel, not every second one. Scanning on a stride
+                // quantises corner positions to even coordinates, so any
+                // displacement with an odd component puts the detected corner a
+                // pixel away from the real one in one frame and not the other.
+                // The descriptor is then sampled off-centre and correlates
+                // worse with its true partner than with some unrelated
+                // look-alike. Measured on a scene of similar features, a
+                // ten-by-five pixel shift matched 145 points of which 8 agreed;
+                // scanning every pixel fixed it. Real displacements are
+                // arbitrary, so this was never going to show up only in tests.
+                val cell = ArrayList<Corner>(64)
+                for (y in y0 until y1) {
+                    for (x in x0 until x1) {
                         val s = cornerStrength(p, x, y)
                         if (s > 1f) cell.add(Corner(x, y, s))
-                        x += 2
                     }
-                    y += 2
                 }
                 cell.sortByDescending { it.strength }
 
@@ -222,13 +241,21 @@ object FeatureMatcher {
 
             val winner = bestCorner ?: continue
             if (best < minCorrelation) continue
+
             // The ratio test. An ambiguous match is worse than no match: it is
             // confident, wrong, and indistinguishable from a good one later.
-            if (second > 0f && best > 0f) {
-                val distanceBest = 1f - best
-                val distanceSecond = 1f - second
-                if (distanceSecond > 0f && distanceBest / distanceSecond > RATIO_TEST) continue
-            }
+            val distanceBest = 1f - best
+            val distanceSecond = 1f - second
+            // A runner-up as good as the winner means the feature is not
+            // identifiable at all -- one window of a building among many, one
+            // period of a fence. This case has to be *rejected*, and getting
+            // the degenerate branch backwards is easy: guarding the ratio with
+            // "only test when the runner-up is imperfect" quietly keeps exactly
+            // the matches that are least trustworthy. A perfectly repeating
+            // pattern then resolves to a confident transform that is not even a
+            // multiple of its own period.
+            if (distanceSecond <= AMBIGUITY_EPSILON) continue
+            if (distanceBest / distanceSecond > RATIO_TEST) continue
 
             matches.add(
                 Match(

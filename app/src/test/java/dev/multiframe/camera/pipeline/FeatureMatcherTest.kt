@@ -196,6 +196,29 @@ class FeatureMatcherTest {
     // ------------------------------------------------------------------
 
     @Test
+    fun `a displacement with an odd component registers as well as an even one`() {
+        // Corner detection used to scan every second pixel, which quantised
+        // detected positions to even coordinates. Any odd displacement then put
+        // the corner a pixel off in one frame and not the other, the descriptor
+        // sampled off-centre, and matching collapsed: a ten-by-five shift
+        // matched 145 points of which 8 agreed on a transform. Real
+        // displacements are arbitrary, so this was never a test-only problem.
+        val a = scene()
+
+        for (shift in listOf(2 to 1, 10 to 5, 7 to 3)) {
+            val truth = Homography.translation(shift.first.toDouble(), shift.second.toDouble())
+            val b = warp(a, truth)
+
+            val fit = FeatureMatcher.register(a, b)
+
+            assertThat(fit).isNotNull()
+            val moved = fit!!.homography.apply(120f, 90f)
+            assertThat(moved[0]).isWithin(1.5f).of(120f + shift.first)
+            assertThat(moved[1]).isWithin(1.5f).of(90f + shift.second)
+        }
+    }
+
+    @Test
     fun `unrelated frames are refused rather than stitched`() {
         // The failure that matters. A confident wrong transform tears the
         // mosaic; an honest refusal can be reported to the user.
