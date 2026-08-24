@@ -40,6 +40,7 @@ class PortabilityTest {
         evMin: Int = -24,
         evMax: Int = 24,
         evStep: Float = 1f / 6f,
+        outputFormats: Set<Int> = setOf(0, 2),
     ) = CameraCapabilities(
         hasManualSensor = manualSensor,
         isoMin = isoMin, isoMax = isoMax,
@@ -52,6 +53,7 @@ class PortabilityTest {
         evMin = evMin, evMax = evMax, evStep = evStep,
         sensorOrientation = 90,
         supportsRaw = true,
+        supportedOutputFormats = outputFormats,
     )
 
     @Test

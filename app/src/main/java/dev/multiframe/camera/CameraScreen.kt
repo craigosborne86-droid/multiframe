@@ -8,6 +8,8 @@ import androidx.camera.compose.CameraXViewfinder
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
 import androidx.camera.core.resolutionselector.ResolutionSelector
@@ -56,6 +58,7 @@ import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.ImageSaver
 import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.MemoryBudget
+import dev.multiframe.camera.pipeline.RawCapture
 import dev.multiframe.camera.pipeline.Merger
 import dev.multiframe.camera.pipeline.OrientationTracker
 import dev.multiframe.camera.ui.AboutSheet
@@ -84,6 +87,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var abMode by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
+    var rawCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var burstFrames by remember { mutableIntStateOf(8) }
     var busy by remember { mutableStateOf(false) }
 
@@ -150,12 +154,27 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             }
 
             provider.unbindAll()
-            val bound = provider.bindToLifecycle(
-                lifecycleOwner,
-                selector,
-                preview,
-                analysis,
-            )
+
+            // RAW+JPEG adds a third stream, which not every camera can run
+            // alongside preview and analysis. Try it, and fall back rather than
+            // losing the camera entirely.
+            val dngCapture = runCatching {
+                ImageCapture.Builder()
+                    .setOutputFormat(ImageCapture.OUTPUT_FORMAT_RAW_JPEG)
+                    .build()
+            }.getOrNull()
+
+            val bound = runCatching {
+                requireNotNull(dngCapture)
+                provider.bindToLifecycle(
+                    lifecycleOwner, selector, preview, analysis, dngCapture,
+                ).also { rawCapture = dngCapture }
+            }.getOrElse { e ->
+                Log.w(TAG, "RAW+JPEG stream unavailable, continuing without it", e)
+                rawCapture = null
+                provider.unbindAll()
+                provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+            }
             camera = bound
 
             val capabilities = CameraCapabilities.from(bound.cameraInfo)
@@ -164,8 +183,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             Log.i(
                 TAG,
                 "Heap max ${Runtime.getRuntime().maxMemory() / (1024 * 1024)}MB, " +
-                    "analysis ${analysisSize.width}x${analysisSize.height}",
+                    "analysis ${analysisSize.width}x${analysisSize.height}, " +
+                    "outputFormats=${capabilities.supportedOutputFormats}, " +
+                    "dng=${capabilities.supportsDng}, rawStream=${rawCapture != null}",
             )
+            if (!capabilities.supportsDng) rawCapture = null
 
             // Start about a stop under, so highlights stay off the clip point.
             if (capabilities.supportsExposureCompensation) {
@@ -234,6 +256,21 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     }
                 }
                 Chip("PRO", showControls) { showControls = !showControls }
+                if (rawCapture != null) {
+                    Chip("DNG", false) {
+                        if (!busy) {
+                            busy = true
+                            status = "DNG + JPEG…"
+                            RawCapture.capture(
+                                imageCapture = rawCapture!!,
+                                context = context,
+                            ) { message ->
+                                status = message
+                                busy = false
+                            }
+                        }
+                    }
+                }
                 Chip("i", showAbout) { showAbout = true }
             }
 

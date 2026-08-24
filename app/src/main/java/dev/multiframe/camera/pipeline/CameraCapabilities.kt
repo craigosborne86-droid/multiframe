@@ -5,6 +5,7 @@ import android.hardware.camera2.CameraMetadata
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraInfo
+import androidx.camera.core.ImageCapture
 
 /**
  * What the attached camera can actually do, read at runtime.
@@ -30,7 +31,17 @@ data class CameraCapabilities(
     val evStep: Float,
     val sensorOrientation: Int,
     val supportsRaw: Boolean,
+    /** Output formats CameraX can actually deliver on this camera. */
+    val supportedOutputFormats: Set<Int>,
 ) {
+
+    /**
+     * DNG needs both a RAW-capable sensor and CameraX support for the combined
+     * RAW+JPEG output on this specific camera.
+     */
+    val supportsDng: Boolean
+        get() = supportsRaw &&
+            supportedOutputFormats.contains(ImageCapture.OUTPUT_FORMAT_RAW_JPEG)
     /** A fixed-focus lens reports a minimum focus distance of zero dioptres. */
     val hasManualFocus: Boolean
         get() = minFocusDiopters > 0f && afModes.contains(CameraMetadata.CONTROL_AF_MODE_OFF)
@@ -69,7 +80,7 @@ data class CameraCapabilities(
         }
         if (hasManualFocus) append("  focus 0-%.1fD".format(minFocusDiopters))
         if (!canDisableNoiseReduction()) append("  NR:fixed")
-        if (supportsRaw) append("  RAW")
+        if (supportsDng) append("  DNG") else if (supportsRaw) append("  RAW(no DNG)")
     }
 
     companion object {
@@ -123,6 +134,10 @@ data class CameraCapabilities(
                 supportsRaw = caps.contains(
                     CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW
                 ),
+                supportedOutputFormats = runCatching {
+                    ImageCapture.getImageCaptureCapabilities(cameraInfo)
+                        .supportedOutputFormats
+                }.getOrDefault(emptySet()),
             )
         }
     }
