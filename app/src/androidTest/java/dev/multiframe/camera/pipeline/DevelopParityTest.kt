@@ -114,6 +114,55 @@ class DevelopParityTest {
         assertThat(mean).isLessThan(0.25)
     }
 
+    /**
+     * The merge reports the noise it actually measured.
+     *
+     * This was reading zero, which is worse than useless: it looked like a
+     * measurement and was a placeholder, so every claim about merge quality
+     * rested on nothing.
+     */
+    @Test
+    fun theMergeReportsTheNoiseItMeasured() {
+        // Large and flat at mid grey on purpose. The estimator samples every
+        // eighth pixel and bins by brightness, so a small frame spread across
+        // sixteen bins has too few samples in any one of them and falls back to
+        // its floor -- which is what a 64x48 frame did, reporting the same
+        // figure for a quiet burst and a violently noisy one.
+        val w = 256
+        val h = 192
+        val profile = SensorProfile.DEFAULT
+        val flat = BayerFrame(w, h, ShortArray(w * h) { 512.toShort() })
+
+        fun sigmaOver(amplitude: Int): Float {
+            val merger = NativeMerge.create(w, h, profile)!!
+            return merger.use { m ->
+                m.setReference(directBufferOf(flat), w * 2)
+                val rnd = kotlin.random.Random(5)
+                repeat(2) {
+                    val noisy = ShortArray(w * h) {
+                        (512 + rnd.nextInt(-amplitude, amplitude + 1))
+                            .coerceIn(0, 1023).toShort()
+                    }
+                    m.addFrame(
+                        directBufferOf(BayerFrame(w, h, noisy)),
+                        w * 2,
+                        AlignmentField(1, 1, IntArray(1), IntArray(1)),
+                    )
+                }
+                m.finish().second.estimatedSigmaAtMid
+            }
+        }
+
+        val quiet = sigmaOver(4)
+        val loud = sigmaOver(40)
+        Log.i(TAG, "measured sigma: quiet burst %.2f, noisy burst %.2f".format(quiet, loud))
+
+        assertThat(quiet).isGreaterThan(0f)
+        // Ten times the noise has to read as substantially noisier, or the
+        // number is not measuring anything.
+        assertThat(loud).isGreaterThan(quiet * 3f)
+    }
+
     @Test
     fun nativeAndKotlinAgreeWithLensShadingApplied() {
         // Shading is applied to the raw sample before white balance and

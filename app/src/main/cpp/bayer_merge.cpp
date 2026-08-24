@@ -322,6 +322,28 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nFramesMerged(JNIEnv*, jobject, 
     return reinterpret_cast<Accumulator*>(handle)->merged;
 }
 
+/**
+ * Noise sigma the merge measured at mid brightness, in sensor codes.
+ *
+ * The merge already estimates this per brightness bin, from frame-to-frame
+ * differences in the burst, and uses it to decide how much to trust each pixel.
+ * Reporting it turns an internal quantity into the one number that says how
+ * noisy the scene actually was, which is what makes the merge's own claims
+ * about improvement checkable rather than asserted.
+ *
+ * The stored value is the squared rejection threshold, tolerance * sigma, so
+ * the tolerance has to be divided back out.
+ */
+JNIEXPORT jfloat JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nEstimatedSigma(
+        JNIEnv*, jobject, jlong handle) {
+    auto* acc = reinterpret_cast<Accumulator*>(handle);
+    if (acc == nullptr || !acc->noiseReady || acc->noiseTolerance <= 0.0f) return 0.0f;
+    const float variance = acc->noiseVar[kNoiseBins / 2];
+    if (variance <= 0.0f) return 0.0f;
+    return std::sqrt(variance) / acc->noiseTolerance;
+}
+
 }  // extern "C"
 
 // ---------------------------------------------------------------------------

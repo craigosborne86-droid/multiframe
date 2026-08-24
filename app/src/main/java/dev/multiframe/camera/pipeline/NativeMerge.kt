@@ -57,7 +57,10 @@ class NativeMerge private constructor(
         return out to BayerMergeStats(
             framesMerged = nFramesMerged(handle),
             meanContribution = contribution,
-            estimatedSigmaAtMid = 0f,
+            // Measured from the burst itself rather than assumed: how much the
+            // frames disagreed at mid brightness is what the merge had to work
+            // with, and reporting it makes its improvement checkable.
+            estimatedSigmaAtMid = nEstimatedSigma(handle),
         )
     }
 
@@ -129,6 +132,7 @@ class NativeMerge private constructor(
         shading: FloatArray?, shadingColumns: Int, shadingRows: Int,
     ): Boolean
     private external fun nFramesMerged(h: Long): Int
+    private external fun nEstimatedSigma(h: Long): Float
     private external fun nDestroy(h: Long)
     private external fun nCreate(
         width: Int, height: Int, cfa: IntArray, black: IntArray, white: Int,

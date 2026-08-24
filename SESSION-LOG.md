@@ -214,7 +214,6 @@ which proved raw *was* being delivered, the opposite of my first reading.
   BT.601 range and sRGB gamma.
 - **Portability is tested against simulated capability profiles**, not real
   Samsung or Oppo hardware. That needs a second physical device.
-- **`estimatedSigmaAtMid` is not computed** in the native merge (reports 0).
 
 ---
 
