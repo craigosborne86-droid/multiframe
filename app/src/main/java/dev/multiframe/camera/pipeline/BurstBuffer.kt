@@ -10,13 +10,23 @@ import androidx.camera.core.ImageProxy
  * after it. Buffers are preallocated and reused, because allocating a
  * multi-megabyte frame per callback at preview frame rate churns the heap.
  */
-class BurstBuffer(private val capacity: Int) {
+class BurstBuffer(
+    private val desiredCapacity: Int,
+    private val maxHeapBytes: Long = Runtime.getRuntime().maxMemory(),
+) {
 
     private val lock = Any()
     private var pool: Array<YuvFrame>? = null
-    private var stamps: LongArray = LongArray(capacity)
+    private var stamps: LongArray = LongArray(desiredCapacity)
     private var writeIndex = 0
     private var filled = 0
+
+    /**
+     * Frames the ring can actually hold, decided once the analyzer reports its
+     * real resolution and sized against this process's heap limit.
+     */
+    var capacity = desiredCapacity
+        private set
 
     var frameWidth = 0
         private set
@@ -27,6 +37,10 @@ class BurstBuffer(private val capacity: Int) {
         synchronized(lock) {
             var p = pool
             if (p == null || p[0].width != image.width || p[0].height != image.height) {
+                capacity = MemoryBudget.recommendedCapacity(
+                    image.width, image.height, maxHeapBytes, desiredCapacity,
+                )
+                stamps = LongArray(capacity)
                 p = Array(capacity) { YuvFrame.allocate(image.width, image.height) }
                 pool = p
                 writeIndex = 0

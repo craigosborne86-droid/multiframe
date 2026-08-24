@@ -55,7 +55,7 @@ fun ControlsPanel(
         )
 
         Row(modifier = Modifier.padding(bottom = 6.dp)) {
-            if (caps.hasManualSensor) {
+            if (caps.hasManualSensor && (caps.hasIsoRange || caps.hasExposureRange)) {
                 Toggle("AE ${if (settings.manualExposure) "MAN" else "AUTO"}", settings.manualExposure) {
                     onChange(settings.copy(manualExposure = !settings.manualExposure))
                 }
@@ -65,25 +65,28 @@ fun ControlsPanel(
                     onChange(settings.copy(manualFocus = !settings.manualFocus))
                 }
             }
-            Toggle("ISP ${if (settings.suppressIspProcessing) "OFF" else "ON"}", settings.suppressIspProcessing) {
-                onChange(settings.copy(suppressIspProcessing = !settings.suppressIspProcessing))
+            // Only offered where the ISP's processing can actually be switched off.
+            if (caps.canDisableNoiseReduction() || caps.canDisableEdgeEnhancement()) {
+                Toggle("ISP ${if (settings.suppressIspProcessing) "OFF" else "ON"}", settings.suppressIspProcessing) {
+                    onChange(settings.copy(suppressIspProcessing = !settings.suppressIspProcessing))
+                }
             }
         }
 
         if (settings.manualExposure && caps.hasManualSensor) {
-            caps.isoRange?.let { range ->
+            if (caps.hasIsoRange) {
                 LabelledSlider(
                     label = "ISO",
                     value = settings.iso.toFloat(),
                     valueText = settings.iso.toString(),
-                    range = range.lower.toFloat()..range.upper.toFloat(),
+                    range = caps.isoMin!!.toFloat()..caps.isoMax!!.toFloat(),
                 ) { onChange(settings.copy(iso = it.toInt())) }
             }
-            caps.exposureTimeRange?.let { range ->
+            if (caps.hasExposureRange) {
                 // Shutter speed spans several orders of magnitude, so the slider
                 // is logarithmic or the short end would be unreachable.
-                val lo = ln(range.lower.toDouble()).toFloat()
-                val hi = ln(range.upper.toDouble()).toFloat()
+                val lo = ln(caps.exposureMinNs!!.toDouble()).toFloat()
+                val hi = ln(caps.exposureMaxNs!!.toDouble()).toFloat()
                 LabelledSlider(
                     label = "SHUTTER",
                     value = ln(settings.exposureTimeNs.toDouble()).toFloat().coerceIn(lo, hi),
@@ -91,12 +94,12 @@ fun ControlsPanel(
                     range = lo..hi,
                 ) { onChange(settings.copy(exposureTimeNs = exp(it.toDouble()).toLong())) }
             }
-        } else if (caps.evStep > 0f) {
+        } else if (caps.supportsExposureCompensation) {
             LabelledSlider(
                 label = "EV",
                 value = settings.evIndex.toFloat(),
                 valueText = "%.1f".format(settings.evIndex * caps.evStep),
-                range = caps.evRange.lower.toFloat()..caps.evRange.upper.toFloat(),
+                range = caps.evMin.toFloat()..caps.evMax.toFloat(),
             ) { onChange(settings.copy(evIndex = it.toInt())) }
         }
 

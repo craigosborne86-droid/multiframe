@@ -55,6 +55,7 @@ import dev.multiframe.camera.pipeline.BurstBuffer
 import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.ImageSaver
 import dev.multiframe.camera.pipeline.ManualSettings
+import dev.multiframe.camera.pipeline.MemoryBudget
 import dev.multiframe.camera.pipeline.Merger
 import dev.multiframe.camera.pipeline.OrientationTracker
 import dev.multiframe.camera.ui.ControlsPanel
@@ -66,8 +67,8 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private const val TAG = "Multiframe"
-private const val RING_CAPACITY = 12
-private val ANALYSIS_TARGET = Size(2048, 1536)
+/** Frames requested per shutter press; the ring shrinks this if the heap cannot hold it. */
+private const val DESIRED_BURST = 12
 
 @OptIn(ExperimentalCamera2Interop::class)
 @Composable
@@ -88,7 +89,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var caps by remember { mutableStateOf<CameraCapabilities?>(null) }
     var settings by remember { mutableStateOf(ManualSettings()) }
 
-    val buffer = remember { BurstBuffer(RING_CAPACITY) }
+    val buffer = remember { BurstBuffer(DESIRED_BURST) }
+    // Analysis resolution is chosen from the heap this process was actually
+    // granted, not assumed from the development device.
+    val analysisSize = remember {
+        MemoryBudget.recommendedAnalysisSize(Runtime.getRuntime().maxMemory())
+    }
     val orientation = remember { OrientationTracker(context) }
 
     DisposableEffect(Unit) {
@@ -106,7 +112,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 ResolutionSelector.Builder()
                     .setResolutionStrategy(
                         ResolutionStrategy(
-                            ANALYSIS_TARGET,
+                            Size(analysisSize.width, analysisSize.height),
                             ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
                         )
                     )
@@ -128,10 +134,23 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         try {
             val provider = ProcessCameraProvider.getInstance(context)
                 .await(ContextCompat.getMainExecutor(context))
+
+            // Not every Android device has a rear camera; some tablets and
+            // desktop-class devices only expose a front one.
+            val selector = listOf(
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                CameraSelector.DEFAULT_FRONT_CAMERA,
+            ).firstOrNull { runCatching { provider.hasCamera(it) }.getOrDefault(false) }
+
+            if (selector == null) {
+                status = "No camera available on this device"
+                return@LaunchedEffect
+            }
+
             provider.unbindAll()
             val bound = provider.bindToLifecycle(
                 lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
+                selector,
                 preview,
                 analysis,
             )
@@ -140,11 +159,16 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             val capabilities = CameraCapabilities.from(bound.cameraInfo)
             caps = capabilities
             Log.i(TAG, "Capabilities: ${capabilities.summary()}")
+            Log.i(
+                TAG,
+                "Heap max ${Runtime.getRuntime().maxMemory() / (1024 * 1024)}MB, " +
+                    "analysis ${analysisSize.width}x${analysisSize.height}",
+            )
 
             // Start about a stop under, so highlights stay off the clip point.
-            if (capabilities.evStep > 0f) {
+            if (capabilities.supportsExposureCompensation) {
                 val index = (-1.0f / capabilities.evStep).roundToInt()
-                    .coerceIn(capabilities.evRange.lower, capabilities.evRange.upper)
+                    .coerceIn(capabilities.evMin, capabilities.evMax)
                 settings = settings.copy(evIndex = index)
             }
         } catch (e: Exception) {
@@ -162,10 +186,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         try {
             Camera2CameraControl.from(cam.cameraControl)
                 .setCaptureRequestOptions(settings.toCaptureRequestOptions(c))
-            if (settings.evActive && c.evStep > 0f) {
-                cam.cameraControl.setExposureCompensationIndex(
-                    settings.evIndex.coerceIn(c.evRange.lower, c.evRange.upper)
-                )
+            if (settings.evActive && c.supportsExposureCompensation) {
+                cam.cameraControl.setExposureCompensationIndex(settings.effectiveEvIndex(c))
             }
         } catch (e: Exception) {
             Log.w(TAG, "Applying manual settings failed", e)
@@ -202,8 +224,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 }
                 Chip("A/B", abMode) { if (!busy) abMode = !abMode }
                 Chip("$burstFrames FRAMES", false) {
-                    if (!busy) burstFrames = when (burstFrames) {
-                        1 -> 2; 2 -> 4; 4 -> 8; 8 -> 12; else -> 1
+                    if (!busy) {
+                        // Only offer counts the heap-sized ring can actually hold.
+                        val steps = listOf(1, 2, 4, 8, 12).filter { it <= buffer.capacity }
+                        val here = steps.indexOf(burstFrames).coerceAtLeast(0)
+                        burstFrames = steps[(here + 1) % steps.size]
                     }
                 }
                 Chip("PRO", showControls) { showControls = !showControls }
@@ -257,7 +282,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             // One snapshot drives every output, so an A/B pair is
                             // guaranteed to be the same scene at the same instant.
                             val frames = buffer.snapshot(
-                                if (mergeEnabled || abMode) burstFrames else 1
+                                if (mergeEnabled || abMode) {
+                                    burstFrames.coerceAtMost(buffer.capacity)
+                                } else 1
                             )
                             if (frames.isEmpty()) return@withContext null
 

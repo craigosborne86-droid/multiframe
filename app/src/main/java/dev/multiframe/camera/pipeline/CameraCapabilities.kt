@@ -2,7 +2,6 @@ package dev.multiframe.camera.pipeline
 
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
-import android.util.Range
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraInfo
@@ -10,85 +9,121 @@ import androidx.camera.core.CameraInfo
 /**
  * What the attached camera can actually do, read at runtime.
  *
- * Nothing here is assumed: a device without MANUAL_SENSOR simply reports
- * [hasManualSensor] false and the UI hides those controls rather than sending
- * capture requests the hardware will reject.
+ * Every control the app offers is gated on something in here. A device without
+ * MANUAL_SENSOR, without a focusable lens, or without the ability to switch off
+ * the ISP's noise reduction gets a reduced UI rather than capture requests the
+ * hardware will reject.
  */
 data class CameraCapabilities(
     val hasManualSensor: Boolean,
-    val isoRange: Range<Int>?,
-    val exposureTimeRange: Range<Long>?,
+    val isoMin: Int?,
+    val isoMax: Int?,
+    val exposureMinNs: Long?,
+    val exposureMaxNs: Long?,
     val minFocusDiopters: Float,
-    val hasManualFocus: Boolean,
     val awbModes: List<Int>,
-    val evRange: Range<Int>,
+    val afModes: List<Int>,
+    val noiseReductionModes: List<Int>,
+    val edgeModes: List<Int>,
+    val evMin: Int,
+    val evMax: Int,
     val evStep: Float,
     val sensorOrientation: Int,
     val supportsRaw: Boolean,
 ) {
+    /** A fixed-focus lens reports a minimum focus distance of zero dioptres. */
+    val hasManualFocus: Boolean
+        get() = minFocusDiopters > 0f && afModes.contains(CameraMetadata.CONTROL_AF_MODE_OFF)
+
+    /**
+     * Switching the ISP's denoiser off is optional in the Camera2 spec, so it
+     * has to be checked rather than assumed.
+     */
+    fun canDisableNoiseReduction(): Boolean =
+        noiseReductionModes.contains(CameraMetadata.NOISE_REDUCTION_MODE_OFF)
+
+    fun canDisableEdgeEnhancement(): Boolean =
+        edgeModes.contains(CameraMetadata.EDGE_MODE_OFF)
+
+    /** Best available autofocus mode, or null on a fixed-focus lens. */
+    fun autoAfMode(): Int? = when {
+        afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE) ->
+            CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+        afModes.contains(CameraMetadata.CONTROL_AF_MODE_AUTO) ->
+            CameraMetadata.CONTROL_AF_MODE_AUTO
+        else -> null
+    }
+
+    val supportsExposureCompensation: Boolean get() = evStep > 0f && evMax > evMin
+
+    val hasIsoRange: Boolean get() = isoMin != null && isoMax != null && isoMax > isoMin
+
+    val hasExposureRange: Boolean
+        get() = exposureMinNs != null && exposureMaxNs != null && exposureMaxNs > exposureMinNs
+
+    fun summary(): String = buildString {
+        append(if (hasManualSensor) "manual" else "auto-only")
+        if (isoMin != null && isoMax != null) append("  ISO $isoMin-$isoMax")
+        if (exposureMinNs != null && exposureMaxNs != null) {
+            append("  ${exposureMinNs / 1000}us-${exposureMaxNs / 1_000_000}ms")
+        }
+        if (hasManualFocus) append("  focus 0-%.1fD".format(minFocusDiopters))
+        if (!canDisableNoiseReduction()) append("  NR:fixed")
+        if (supportsRaw) append("  RAW")
+    }
+
     companion object {
         @OptIn(ExperimentalCamera2Interop::class)
         fun from(cameraInfo: CameraInfo): CameraCapabilities {
             val c2 = Camera2CameraInfo.from(cameraInfo)
 
+            fun ints(key: CameraCharacteristics.Key<IntArray>): List<Int> =
+                (c2.getCameraCharacteristic(key) ?: IntArray(0)).toList()
+
             val caps = c2.getCameraCharacteristic(
                 CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES
             ) ?: IntArray(0)
 
-            val manual = caps.contains(
-                CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR
-            )
-            val raw = caps.contains(
-                CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW
-            )
-
-            val minFocus = c2.getCameraCharacteristic(
-                CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE
-            ) ?: 0f
-
             val exposureState = cameraInfo.exposureState
+            val supportsEv = exposureState.isExposureCompensationSupported
+
+            val isoRange = c2.getCameraCharacteristic(
+                CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE
+            )
+            val exposureRange = c2.getCameraCharacteristic(
+                CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE
+            )
+
+            val awb = ints(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
+                .ifEmpty { listOf(CameraMetadata.CONTROL_AWB_MODE_AUTO) }
 
             return CameraCapabilities(
-                hasManualSensor = manual,
-                isoRange = c2.getCameraCharacteristic(
-                    CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE
+                hasManualSensor = caps.contains(
+                    CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR
                 ),
-                exposureTimeRange = c2.getCameraCharacteristic(
-                    CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE
+                isoMin = isoRange?.lower,
+                isoMax = isoRange?.upper,
+                exposureMinNs = exposureRange?.lower,
+                exposureMaxNs = exposureRange?.upper,
+                minFocusDiopters = c2.getCameraCharacteristic(
+                    CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE
+                ) ?: 0f,
+                awbModes = awb,
+                afModes = ints(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES),
+                noiseReductionModes = ints(
+                    CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES
                 ),
-                minFocusDiopters = minFocus,
-                // A minimum focus distance of 0 diopters means a fixed-focus lens.
-                hasManualFocus = minFocus > 0f,
-                awbModes = (
-                    c2.getCameraCharacteristic(
-                        CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES
-                    ) ?: intArrayOf(CameraMetadata.CONTROL_AWB_MODE_AUTO)
-                    ).toList(),
-                evRange = if (exposureState.isExposureCompensationSupported) {
-                    exposureState.exposureCompensationRange
-                } else {
-                    Range(0, 0)
-                },
-                evStep = if (exposureState.isExposureCompensationSupported) {
-                    exposureState.exposureCompensationStep.toFloat()
-                } else {
-                    0f
-                },
+                edgeModes = ints(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES),
+                evMin = if (supportsEv) exposureState.exposureCompensationRange.lower else 0,
+                evMax = if (supportsEv) exposureState.exposureCompensationRange.upper else 0,
+                evStep = if (supportsEv) exposureState.exposureCompensationStep.toFloat() else 0f,
                 sensorOrientation = c2.getCameraCharacteristic(
                     CameraCharacteristics.SENSOR_ORIENTATION
                 ) ?: 90,
-                supportsRaw = raw,
+                supportsRaw = caps.contains(
+                    CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW
+                ),
             )
         }
-    }
-
-    fun summary(): String = buildString {
-        append(if (hasManualSensor) "manual" else "auto-only")
-        isoRange?.let { append("  ISO ${it.lower}-${it.upper}") }
-        exposureTimeRange?.let {
-            append("  ${it.lower / 1000}us-${it.upper / 1_000_000}ms")
-        }
-        if (hasManualFocus) append("  focus 0-%.1fD".format(minFocusDiopters))
-        if (supportsRaw) append("  RAW")
     }
 }

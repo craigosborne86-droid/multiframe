@@ -31,20 +31,25 @@ data class ManualSettings(
 
         if (suppressIspProcessing) {
             // Merging works better on data the ISP has not already denoised and
-            // sharpened. Hardware that lacks these modes ignores the request.
-            b.setCaptureRequestOption(
-                CaptureRequest.NOISE_REDUCTION_MODE,
-                CameraMetadata.NOISE_REDUCTION_MODE_OFF,
-            )
-            b.setCaptureRequestOption(
-                CaptureRequest.EDGE_MODE,
-                CameraMetadata.EDGE_MODE_OFF,
-            )
+            // sharpened, but OFF is an optional mode in the Camera2 spec, so it
+            // is only requested where the device advertises it.
+            if (caps.canDisableNoiseReduction()) {
+                b.setCaptureRequestOption(
+                    CaptureRequest.NOISE_REDUCTION_MODE,
+                    CameraMetadata.NOISE_REDUCTION_MODE_OFF,
+                )
+            }
+            if (caps.canDisableEdgeEnhancement()) {
+                b.setCaptureRequestOption(
+                    CaptureRequest.EDGE_MODE,
+                    CameraMetadata.EDGE_MODE_OFF,
+                )
+            }
         }
 
         if (manualExposure && caps.hasManualSensor) {
-            val iso = caps.isoRange?.clamp(this.iso) ?: this.iso
-            val time = caps.exposureTimeRange?.clamp(this.exposureTimeNs) ?: this.exposureTimeNs
+            val iso = effectiveIso(caps)
+            val time = effectiveExposureTimeNs(caps)
             b.setCaptureRequestOption(
                 CaptureRequest.CONTROL_AE_MODE,
                 CameraMetadata.CONTROL_AE_MODE_OFF,
@@ -65,21 +70,49 @@ data class ManualSettings(
             )
             b.setCaptureRequestOption(
                 CaptureRequest.LENS_FOCUS_DISTANCE,
-                focusDiopters.coerceIn(0f, caps.minFocusDiopters),
+                effectiveFocusDiopters(caps),
             )
         } else {
-            b.setCaptureRequestOption(
-                CaptureRequest.CONTROL_AF_MODE,
-                CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
-            )
+            // A fixed-focus lens advertises no AF mode at all; sending
+            // CONTINUOUS_PICTURE there would be rejected.
+            caps.autoAfMode()?.let {
+                b.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, it)
+            }
         }
 
-        if (caps.awbModes.contains(awbMode)) {
-            b.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, awbMode)
-        }
+        b.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, effectiveAwbMode(caps))
 
         return b.build()
     }
+
+    /** Values below are pure so they can be unit tested without a camera. */
+
+    fun effectiveIso(caps: CameraCapabilities): Int =
+        if (caps.isoMin != null && caps.isoMax != null) {
+            iso.coerceIn(caps.isoMin, caps.isoMax)
+        } else iso
+
+    fun effectiveExposureTimeNs(caps: CameraCapabilities): Long =
+        if (caps.exposureMinNs != null && caps.exposureMaxNs != null) {
+            exposureTimeNs.coerceIn(caps.exposureMinNs, caps.exposureMaxNs)
+        } else exposureTimeNs
+
+    fun effectiveFocusDiopters(caps: CameraCapabilities): Float =
+        focusDiopters.coerceIn(0f, caps.minFocusDiopters)
+
+    fun effectiveAwbMode(caps: CameraCapabilities): Int =
+        if (caps.awbModes.contains(awbMode)) awbMode else CameraMetadata.CONTROL_AWB_MODE_AUTO
+
+    fun effectiveEvIndex(caps: CameraCapabilities): Int =
+        if (caps.supportsExposureCompensation) {
+            evIndex.coerceIn(caps.evMin, caps.evMax)
+        } else {
+            0
+        }
+
+    /** Manual exposure is only offered where the sensor supports it. */
+    fun manualExposureActive(caps: CameraCapabilities): Boolean =
+        manualExposure && caps.hasManualSensor
 
     /** Human-readable shutter speed, e.g. "1/125" or "0.5s". */
     fun shutterLabel(): String {

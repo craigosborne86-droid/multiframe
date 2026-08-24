@@ -121,3 +121,52 @@ threshold did not reintroduce smearing:
 
     robust merge, default params   0.595 -> 0.365   (ideal 1/sqrt(8) = 0.354)
     worst ghost deviation          0.072            (plain averaging ~0.5)
+
+## Phase 4 — portability
+
+Four real assumptions were found by audit and removed.
+
+| Assumption | Was | Now |
+|---|---|---|
+| ISP noise reduction / edge can be switched off | Requested unconditionally | Gated on `NOISE_REDUCTION_AVAILABLE_MODES` and `EDGE_AVAILABLE_EDGE_MODES` |
+| Autofocus supports CONTINUOUS_PICTURE | Requested unconditionally | Falls back CONTINUOUS_PICTURE -> AUTO -> none, from `CONTROL_AF_AVAILABLE_MODES` |
+| A back camera exists | `DEFAULT_BACK_CAMERA` assumed | Tries back, then front, then reports no camera |
+| 12 frames at 2048x1536 always fits | Fixed constants | Both derived from `Runtime.maxMemory()` |
+
+The earlier code comment claiming unsupported modes are "ignored" was wrong;
+requesting an unadvertised mode is not guaranteed to be benign, so it is now
+checked.
+
+`hasManualFocus` also now requires an AF-off mode, not just a focusable lens:
+a lens that can focus but exposes no way to disable autofocus cannot be driven
+manually.
+
+### Heap-derived sizing
+
+Reducing frame count alone was not enough. On a small heap the merge's own
+working set (about 20 bytes per pixel) can exceed the budget by itself, so
+resolution comes down too. Memory sets the ceiling and a latency cap bounds it
+from above, since align and merge cost scales with pixel count.
+
+    heap 96MB  -> 1280x960    8 frames
+    heap 192MB -> 2048x1536   5 frames
+    heap 384MB -> 2048x1536   8 frames
+    heap 768MB -> 2048x1536   (capped for latency, not memory)
+
+Verified on the Pixel 9 Pro XL, which reports a 256MB heap:
+
+    Capabilities: manual  ISO 22-11277  26us-16000ms  focus 0-9.5D  RAW
+    Heap max 256MB, analysis 2048x1536
+
+The frame-count control cycles 2 -> 4 -> 8 -> 1 and never offers 12, because
+the ring can only afford 8 frames on this heap. See `p4_frame_cycle.png`.
+
+### Remaining known assumptions
+
+- The YUV to RGB conversion assumes full-range BT.601, and the merge assumes
+  roughly sRGB gamma 2.2. `YUV_420_888` does not expose its range or transfer
+  function, so a device outputting limited-range data would show slightly
+  raised blacks. Not currently detectable through the CameraX API.
+- 30 unit tests pass, but the non-Pixel hardware profiles are simulated
+  `CameraCapabilities` values, not real devices. They prove the app degrades as
+  intended given those inputs; they do not prove the inputs match real hardware.
