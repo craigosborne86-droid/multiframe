@@ -30,6 +30,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -67,6 +68,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.multiframe.camera.pipeline.BurstBuffer
 import dev.multiframe.camera.pipeline.CameraCapabilities
+import dev.multiframe.camera.pipeline.Lens
+import dev.multiframe.camera.pipeline.LensCatalog
 import dev.multiframe.camera.pipeline.ImageSaver
 import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.MemoryBudget
@@ -130,6 +133,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var zslWanted by remember { mutableStateOf(false) }
     var zslSurface by remember { mutableStateOf<Surface?>(null) }
     var zslStream by remember { mutableStateOf<ZslRawStream?>(null) }
+
+    // Every physical lens the device has, not a zoom ratio on one of them. A
+    // raw pipeline needs to know which sensor produced a frame, because black
+    // level, colour filter arrangement and calibration are all per lens.
+    var lenses by remember { mutableStateOf<List<Lens>>(emptyList()) }
+    var lens by remember { mutableStateOf<Lens?>(null) }
     // The surface the running stream was built against. A SurfaceView is
     // recreated when its fixed size is applied, so "a surface exists" is not
     // the same question as "the session is targeting the live one".
@@ -272,6 +281,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 cameraId = id
                 characteristics = ch
 
+                val catalog = LensCatalog.enumerate(
+                    context.getSystemService(CameraManager::class.java)
+                )
+                lenses = catalog
+                if (lens == null) lens = LensCatalog.default(catalog)
+                Log.i(TAG, "lenses: " + LensCatalog.rear(catalog).joinToString {
+                    "${it.label}/${it.zoomLabel}"
+                })
+
                 val configs = ZslRawStream.rawConfigs(ch)
                 configs.forEach { Log.i(TAG, "RAW stream $it") }
                 val decision = ZslPolicy.evaluate(capabilities.supportsRaw, configs)
@@ -298,15 +316,26 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // line up -- the user asking, the hardware allowing, and a preview surface
     // to render into -- and the surface arrives asynchronously, so anything
     // going away has to tear the stream down again through the same path.
-    LaunchedEffect(zslWanted, zslSurface, cameraId, caps) {
-        val decision = zslDecision
+    LaunchedEffect(zslWanted, zslSurface, cameraId, caps, lens) {
         val surface = zslSurface
-        val id = cameraId
-        val ch = characteristics
+        val chosen = lens
         val c = caps
 
+        // Stream configuration and sensor profile both have to come from the
+        // lens actually being used, not from whichever camera happened to be
+        // probed at startup.
+        val ch = chosen?.let {
+            runCatching {
+                context.getSystemService(CameraManager::class.java)
+                    .getCameraCharacteristics(it.cameraId)
+            }.getOrNull()
+        }
+        val decision = ch?.let {
+            ZslPolicy.evaluate(chosen.supportsRaw, ZslRawStream.rawConfigs(it))
+        }
+
         val canStream = zslWanted && decision is ZslDecision.Stream &&
-            surface != null && id != null && ch != null && c != null
+            surface != null && chosen != null && ch != null && c != null
 
         // Neither opening nor closing may be abandoned half way: a cancellation
         // between the camera opening and the handle being stored would leave
@@ -324,7 +353,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     zslOpenSurface = null
                     return@withLock
                 }
-                if (existing != null && zslOpenSurface === surface) return@withLock
+                if (existing != null && zslOpenSurface === surface &&
+                    existing.lensId == chosen!!.cameraId
+                ) {
+                    return@withLock
+                }
 
                 // Reached with a live stream only when the surface was replaced.
                 // The old session is still targeting the dead one, so it goes
@@ -358,7 +391,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
                 val opened = ZslRawStream.open(
                     manager = context.getSystemService(CameraManager::class.java),
-                    cameraId = id!!,
+                    lens = chosen!!,
                     characteristics = ch!!,
                     previewSurface = surface!!,
                     config = config,
@@ -375,9 +408,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 } else {
                     zslStream = opened
                     zslOpenSurface = surface
-                    status = "ZSL %s, ring ${opened.ringCapacity} (%.0f MB), burst %d".format(
-                        config, opened.ringReservedBytes / (1024.0 * 1024.0),
-                        opened.maxBurst,
+                    status = "%s ZSL %s, ring %d (%.0f MB), burst %d".format(
+                        chosen.label, config, opened.ringCapacity,
+                        opened.ringReservedBytes / (1024.0 * 1024.0), opened.maxBurst,
                     )
                 }
             }
@@ -407,6 +440,26 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         } catch (e: Exception) {
             Log.w(TAG, "Applying manual settings failed", e)
         }
+    }
+
+    // Outside the ZSL path there is no physical-lens selection to be had:
+    // CameraX binds a logical camera and offers no way to choose which sensor
+    // behind it serves a stream. Zoom ratio is the closest equivalent, and on a
+    // multi-camera phone it is what makes the device switch lenses. The raw
+    // path does it properly.
+    LaunchedEffect(lens, camera, zslStream) {
+        val cam = camera ?: return@LaunchedEffect
+        if (zslStream != null) return@LaunchedEffect
+        val target = lens?.zoomFactor ?: return@LaunchedEffect
+        runCatching {
+            val range = cam.cameraInfo.zoomState.value
+            val clamped = target.coerceIn(
+                range?.minZoomRatio ?: target,
+                range?.maxZoomRatio ?: target,
+            )
+            cam.cameraControl.setZoomRatio(clamped)
+            Log.i(TAG, "CameraX zoom set to %.2fx for ${lens?.label}".format(clamped))
+        }.onFailure { Log.w(TAG, "zoom for lens selection failed", it) }
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -550,6 +603,28 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 .navigationBarsPadding(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // Lens strip. Labelled in millimetres, because that is what tells a
+            // photographer what the frame will look like; the zoom factor is
+            // there for anyone who thinks in phone terms.
+            val rearLenses = remember(lenses) { LensCatalog.rear(lenses) }
+            if (rearLenses.size > 1) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    rearLenses.forEach { option ->
+                        LensChip(
+                            lens = option,
+                            selected = option.cameraId == lens?.cameraId,
+                            enabled = !busy,
+                        ) { lens = option }
+                    }
+                }
+            }
+
             if (showControls) {
                 ControlsPanel(
                     settings = settings,
@@ -650,6 +725,47 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         if (showAbout) {
             AboutSheet(onDismiss = { showAbout = false })
         }
+    }
+}
+
+/**
+ * One lens in the strip.
+ *
+ * Shows the equivalent focal length above the zoom factor: the first is what a
+ * photographer reasons about, the second is what phone cameras have trained
+ * everyone to look for.
+ */
+@Composable
+private fun LensChip(
+    lens: Lens,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .padding(horizontal = 4.dp)
+            .background(
+                if (selected) Color(0xFF4A9EFF) else Color(0xCC000000),
+                RoundedCornerShape(18.dp),
+            )
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .semantics { contentDescription = "${lens.label} lens" },
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = lens.label,
+            color = if (selected) Color(0xFF06121F) else Color.White,
+            fontSize = 13.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        Text(
+            text = lens.zoomLabel,
+            color = if (selected) Color(0xCC06121F) else Color(0x99FFFFFF),
+            fontSize = 9.sp,
+            fontFamily = FontFamily.Monospace,
+        )
     }
 }
 

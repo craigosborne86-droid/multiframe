@@ -81,7 +81,11 @@ class ZslRawStream private constructor(
     private val cameraThread: HandlerThread,
     val config: RawStreamConfig,
     val characteristics: CameraCharacteristics,
+    val lens: Lens,
 ) : AutoCloseable {
+
+    /** Which physical sensor this session's frames are coming from. */
+    val lensId: String get() = lens.cameraId
 
     /** Capture results held by sensor timestamp, in a preallocated ring. */
     private val resultSlots = arrayOfNulls<TotalCaptureResult>(RESULT_RING)
@@ -339,7 +343,7 @@ class ZslRawStream private constructor(
         @SuppressLint("MissingPermission")
         suspend fun open(
             manager: CameraManager,
-            cameraId: String,
+            lens: Lens,
             characteristics: CameraCharacteristics,
             previewSurface: Surface,
             config: RawStreamConfig,
@@ -396,7 +400,10 @@ class ZslRawStream private constructor(
             }, readerHandler)
 
             val device = try {
-                openDeviceWithRetry(manager, cameraId, cameraHandler)
+                // A lens that is a physical member of a logical camera is
+                // reached by opening the parent; the outputs then carry the
+                // physical id. Only a standalone lens opens by its own id.
+                openDeviceWithRetry(manager, lens.openId, cameraHandler)
             } catch (e: Exception) {
                 Log.e(TAG, "ZSL declined: camera open failed", e)
                 reader.close()
@@ -410,7 +417,10 @@ class ZslRawStream private constructor(
 
             val executor = Executor { cameraHandler.post(it) }
             val session = try {
-                createSession(device, listOf(previewSurface, reader.surface), executor)
+                createSession(
+                    device, listOf(previewSurface, reader.surface), executor,
+                    physicalCameraId = lens.logicalId?.let { lens.cameraId },
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "ZSL declined: session configuration failed", e)
                 device.close()
@@ -426,14 +436,14 @@ class ZslRawStream private constructor(
 
             val stream = ZslRawStream(
                 device, session, reader, ring, previewSurface,
-                readerThread, cameraThread, config, characteristics,
+                readerThread, cameraThread, config, characteristics, lens,
             )
 
             return try {
                 stream.applySettings(settings, caps)
                 Log.i(
                     TAG,
-                    "ZSL raw stream: $config, ring $ringDepth slots " +
+                    "ZSL raw stream on ${lens.label}: $config, ring $ringDepth slots " +
                         "(%.0f MB native), burst up to ${stream.maxBurst}".format(
                             ring.reservedBytes / (1024.0 * 1024.0)
                         ),
@@ -504,8 +514,17 @@ class ZslRawStream private constructor(
             device: CameraDevice,
             surfaces: List<Surface>,
             executor: Executor,
+            physicalCameraId: String? = null,
         ): CameraCaptureSession? = suspendCancellableCoroutine { cont ->
-            val outputs = surfaces.map { OutputConfiguration(it) }
+            val outputs = surfaces.map { surface ->
+                OutputConfiguration(surface).apply {
+                    // Tagging the output is the only way to say which sensor a
+                    // stream should come from. Without it the logical camera
+                    // decides, and a raw frame could arrive from a different
+                    // lens than the DNG metadata describes.
+                    if (physicalCameraId != null) setPhysicalCameraId(physicalCameraId)
+                }
+            }
             device.createCaptureSession(
                 SessionConfiguration(
                     SessionConfiguration.SESSION_REGULAR,
