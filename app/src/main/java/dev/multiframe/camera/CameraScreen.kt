@@ -213,6 +213,32 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             )
             if (!capabilities.supportsDng) rawCapture = null
 
+            // What raw actually costs to stream: decides whether a continuous
+            // zero-shutter-lag raw ring is feasible or a fantasy.
+            runCatching {
+                val id = Camera2CameraInfo.from(bound.cameraInfo).cameraId
+                val ch = context.getSystemService(CameraManager::class.java)
+                    .getCameraCharacteristics(id)
+                val map = ch.get(
+                    CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+                )
+                val sizes = map?.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)
+                sizes?.forEach { sz ->
+                    val minDur = map.getOutputMinFrameDuration(
+                        android.graphics.ImageFormat.RAW_SENSOR, sz
+                    )
+                    val stall = map.getOutputStallDuration(
+                        android.graphics.ImageFormat.RAW_SENSOR, sz
+                    )
+                    val fps = if (minDur > 0) 1_000_000_000.0 / minDur else 0.0
+                    Log.i(
+                        TAG,
+                        "RAW stream ${sz.width}x${sz.height}: minFrameDuration=" +
+                            "${minDur / 1000}us (%.1f fps) stall=${stall / 1000}us".format(fps),
+                    )
+                }
+            }.onFailure { Log.w(TAG, "raw stream probe failed", it) }
+
             characteristics = runCatching {
                 val id = Camera2CameraInfo.from(bound.cameraInfo).cameraId
                 context.getSystemService(CameraManager::class.java)

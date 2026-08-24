@@ -305,3 +305,22 @@ parallel Camera2 session with ImageReader(RAW_SENSOR) and captureBurst.
 Also note RAW_JPEG delivers two images per capture through separate callbacks,
 with the JPEG usually arriving first. Resuming on the first one crashed with
 "Already resumed"; the raw is the second.
+
+## Raw stream capability (probed 2026-08-24)
+
+Whether a continuous zero-shutter-lag raw ring is feasible depends on the
+sensor's raw stream configuration, not on guesswork:
+
+    RAW 4080x3072: minFrameDuration 33333us (30.0 fps)  stall 0us
+    RAW 4080x2288: minFrameDuration 16666us (60.0 fps)  stall 0us
+    RAW 2032x1536: minFrameDuration 16666us (60.0 fps)  stall 0us
+    RAW 2016x1136: minFrameDuration 16666us (60.0 fps)  stall 0us
+
+The stall duration of zero is the important figure. A non-zero stall would mean
+queuing a raw capture blocks the other streams, which would make continuous raw
+streaming impractical. At zero, full-resolution raw can run continuously at
+30 fps alongside preview.
+
+Consequence: an 8-frame raw burst spans 233 ms at 30 fps, against the 5.6 s
+window the current sequential takePicture approach produces. That is a 24x
+tighter capture window, and it is what makes zero shutter lag possible for raw.
