@@ -40,9 +40,8 @@ data class DevelopParams(
  * the two outputs carry identical computational-photography benefit rather than
  * coming from separate pipelines.
  *
- * Demosaicing is bilinear via a generic 3x3 gather, which works for any CFA
- * arrangement rather than hard-coding one pattern. A 3x3 window around any
- * Bayer pixel always contains all three colours.
+ * Demosaicing is gradient-corrected linear interpolation; see [Demosaic] for
+ * why, and for what the simple gather it replaced was costing.
  */
 object RawDeveloper {
 
@@ -197,35 +196,18 @@ object RawDeveloper {
         out: IntArray,
         rowBase: Int,
     ) {
-        val cfa = sensor.cfaPattern
         val m = color.matrix
-        val acc = FloatArray(3)
-        val cnt = IntArray(3)
-        val range = sensor.range.toFloat()
+        val rgb = FloatArray(3)
 
         for (y in yStart until yEnd) {
             for (x in 0 until w) {
-                acc[0] = 0f; acc[1] = 0f; acc[2] = 0f
-                cnt[0] = 0; cnt[1] = 0; cnt[2] = 0
-
-                // Gather every channel present in the 3x3 neighbourhood.
-                for (dy in -1..1) {
-                    val sy = y + dy
-                    if (sy < 0 || sy >= h) continue
-                    for (dx in -1..1) {
-                        val sx = x + dx
-                        if (sx < 0 || sx >= w) continue
-                        val c = cfa[(sy and 1) * 2 + (sx and 1)]
-                        val raw = frame.data[sy * w + sx].toInt() and 0xFFFF
-                        val lin = (raw - sensor.blackAt(sx, sy)).toFloat() / range
-                        acc[c] += lin.coerceAtLeast(0f) * color.gainFor(c, sy)
-                        cnt[c]++
-                    }
-                }
-
-                val r0 = if (cnt[0] > 0) acc[0] / cnt[0] else 0f
-                val g0 = if (cnt[1] > 0) acc[1] / cnt[1] else 0f
-                val b0 = if (cnt[2] > 0) acc[2] / cnt[2] else 0f
+                // Gradient-corrected demosaic: the sample the sensor actually
+                // measured at this site is kept exactly, and only the two
+                // missing colours are interpolated.
+                Demosaic.pixel(frame, sensor, color, x, y, rgb)
+                val r0 = rgb[0]
+                val g0 = rgb[1]
+                val b0 = rgb[2]
 
                 var r = m[0] * r0 + m[1] * g0 + m[2] * b0
                 var g = m[3] * r0 + m[4] * g0 + m[5] * b0
