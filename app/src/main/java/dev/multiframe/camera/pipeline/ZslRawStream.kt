@@ -306,6 +306,17 @@ class ZslRawStream private constructor(
     val zoom: Float get() = zoomRatio
     val maxZoom: Float get() = zoomRange?.upper ?: MAX_FALLBACK_ZOOM
 
+    /**
+     * Histograms the newest frame, for the live display.
+     *
+     * The same in-place read the highlight guard uses, so showing a histogram
+     * costs the ring nothing and consumes no frames the shutter might want.
+     */
+    fun histogram(bins: IntArray, stride: Int = 12): Boolean {
+        if (closed) return false
+        return ring.histogramNewest(bins, sensorProfile, stride)
+    }
+
     /** Releases the guard's hold on exposure, back to what the user asked for. */
     fun clearHighlightProtection(caps: CameraCapabilities, settings: ManualSettings) {
         if (closed || evOverride == null) return

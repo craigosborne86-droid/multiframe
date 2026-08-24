@@ -96,7 +96,12 @@ import dev.multiframe.camera.pipeline.ZslPolicy
 import dev.multiframe.camera.pipeline.ZslRawStream
 import dev.multiframe.camera.pipeline.Merger
 import dev.multiframe.camera.pipeline.OrientationTracker
+import dev.multiframe.camera.pipeline.Attitude
+import dev.multiframe.camera.pipeline.LevelSensor
 import dev.multiframe.camera.ui.AboutSheet
+import dev.multiframe.camera.ui.GuideMode
+import dev.multiframe.camera.ui.Guides
+import dev.multiframe.camera.ui.Histogram
 import dev.multiframe.camera.ui.ControlsPanel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -179,6 +184,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var sweepRequested by remember { mutableStateOf(false) }
     var sweepProgress by remember { mutableStateOf<MosaicProgress?>(null) }
     var sweepTargetLens by remember { mutableStateOf<Lens?>(null) }
+
+    // Composition aids. One control cycles them rather than several toggles.
+    var guides by remember { mutableStateOf(GuideMode.OFF) }
+    val level = remember { LevelSensor(context) }
+    var attitude by remember { mutableStateOf<Attitude?>(null) }
+    var histogram by remember { mutableStateOf<IntArray?>(null) }
     // The surface the running stream was built against. A SurfaceView is
     // recreated when its fixed size is applied, so "a surface exists" is not
     // the same question as "the session is targeting the live one".
@@ -199,6 +210,39 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     DisposableEffect(Unit) {
         orientation.enable()
         onDispose { orientation.disable() }
+    }
+
+    // The accelerometer only runs while the level is being shown; leaving it
+    // registered would drain the battery for a display nobody asked for.
+    DisposableEffect(guides) {
+        if (guides.showsLevel) level.enable()
+        onDispose { level.disable() }
+    }
+
+    LaunchedEffect(guides) {
+        if (!guides.showsLevel) {
+            attitude = null
+            return@LaunchedEffect
+        }
+        while (true) {
+            attitude = level.attitude
+            kotlinx.coroutines.delay(60)
+        }
+    }
+
+    // Live histogram, read in place from the ring so it costs no frames.
+    LaunchedEffect(zslStream, guides) {
+        val stream = zslStream
+        if (stream == null || guides == GuideMode.OFF) {
+            histogram = null
+            return@LaunchedEffect
+        }
+        val bins = IntArray(48)
+        while (true) {
+            val ok = withContext(Dispatchers.Default) { stream.histogram(bins) }
+            histogram = if (ok) bins.copyOf() else null
+            kotlinx.coroutines.delay(250)
+        }
     }
 
     LaunchedEffect(lifecycleOwner, zslWanted) {
@@ -698,6 +742,20 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             }
         }
 
+        Guides(mode = guides, attitude = attitude)
+
+        histogram?.let { bins ->
+            Histogram(
+                bins = bins,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 14.dp, bottom = 130.dp)
+                    .size(width = 132.dp, height = 44.dp)
+                    .background(Color(0x66000000), RoundedCornerShape(4.dp))
+                    .padding(3.dp),
+            )
+        }
+
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -726,6 +784,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     }
                 }
                 Chip("PRO", showControls) { showControls = !showControls }
+                Chip(guides.label, guides != GuideMode.OFF) { guides = guides.next() }
                 if (zslStream != null) {
                     Chip(
                         if (guardPull < -0.05f) "GUARD %.1f".format(guardPull) else "GUARD",
