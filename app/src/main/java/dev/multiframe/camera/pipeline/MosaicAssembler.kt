@@ -75,6 +75,14 @@ class MosaicAssembler(
      * overlap figure; this only refuses near-duplicates.
      */
     private val minStepFraction: Float = 0.12f,
+    /**
+     * Scale applied to every tile as it is placed.
+     *
+     * Less than one when the canvas has been capped for memory: the canvas is
+     * then smaller than the sweep's true extent, and a tile placed at native
+     * size would claim a larger share of it than it saw.
+     */
+    private val tileScale: Float = 1f,
 ) {
 
     private val placements = ArrayList<Placement>()
@@ -113,10 +121,12 @@ class MosaicAssembler(
         if (previous == null || previousPlacement == null) {
             // The first frame defines the origin: placed centred, with the rest
             // of the mosaic growing around it.
+            val scaled = tileWidth * tileScale
+            val scaledHeight = tileHeight * tileScale
             transform = Homography.translation(
-                (canvasWidth - tileWidth) / 2.0,
-                (canvasHeight - tileHeight) / 2.0,
-            )
+                (canvasWidth - scaled) / 2.0,
+                (canvasHeight - scaledHeight) / 2.0,
+            ).times(scaleTransform(tileScale))
         } else {
             val fit = FeatureMatcher.register(previous, proxy)
                 ?: return OfferResult.Rejected(RejectionReason.UNREGISTRABLE)

@@ -186,6 +186,7 @@ class MosaicSession private constructor(
                     canvasHeight = plan.canvasHeight,
                     tileWidth = tileWidth,
                     tileHeight = tileHeight,
+                    tileScale = plan.tileScale,
                 ),
             )
         }

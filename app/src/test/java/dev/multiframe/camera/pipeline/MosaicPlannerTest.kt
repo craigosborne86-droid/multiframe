@@ -143,6 +143,31 @@ class MosaicPlannerTest {
     }
 
     @Test
+    fun `capping the canvas also shrinks the tiles`() {
+        // Found by running a sweep against the live camera: a capped canvas is
+        // smaller than the sweep's true extent, so a tile placed at native size
+        // claims a larger share of it than it saw. One frame reported 56% of a
+        // canvas the plan said needed twenty-five, and the sweep would have
+        // called itself complete after two.
+        val uncapped = MosaicPlanner.plan(main, tele, tileW, tileH, maxMegapixels = 0.0)!!
+        val capped = MosaicPlanner.plan(main, tele, tileW, tileH, maxMegapixels = 60.0)!!
+
+        assertThat(uncapped.tileScale).isWithin(1e-3f).of(1f)
+        assertThat(capped.tileScale).isLessThan(1f)
+
+        // A tile's share of the canvas must be the same either way, because it
+        // saw the same fraction of the scene.
+        fun share(plan: MosaicPlan): Double {
+            val w = tileW * plan.tileScale.toDouble()
+            val h = tileH * plan.tileScale.toDouble()
+            return (w * h) / (plan.canvasWidth.toDouble() * plan.canvasHeight)
+        }
+        assertThat(share(capped)).isWithin(0.005).of(share(uncapped))
+        println("tile share of canvas: uncapped %.4f, capped %.4f"
+            .format(share(uncapped), share(capped)))
+    }
+
+    @Test
     fun `the canvas memory cost is stated`() {
         val plan = MosaicPlanner.plan(main, tele, tileW, tileH, maxMegapixels = 100.0)!!
 

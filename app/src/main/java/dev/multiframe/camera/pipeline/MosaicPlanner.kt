@@ -26,6 +26,17 @@ data class MosaicPlan(
     val overlap: Float,
     /** True when the canvas had to be reduced to stay within the memory budget. */
     val capped: Boolean,
+    /**
+     * How much a tile must be scaled when placed on the canvas.
+     *
+     * One when the canvas is the full size the geometry asks for. Less when it
+     * has been capped for memory: the canvas is then smaller than the sweep's
+     * true extent, so a tile placed at its native size would occupy a larger
+     * share of the frame than it actually saw. Left uncorrected, a capped sweep
+     * reports itself complete after two or three frames having covered a
+     * fraction of the scene.
+     */
+    val tileScale: Float,
 ) {
     val tileCount: Int get() = columns * rows
 
@@ -128,18 +139,23 @@ object MosaicPlanner {
         val widthGain = targetHalfWidth / captureHalfWidth
         val heightGain = targetHalfHeight / captureHalfHeight
 
-        var canvasWidth = ceil(tileWidth * widthGain).toInt()
-        var canvasHeight = ceil(tileHeight * heightGain).toInt()
+        val fullWidth = ceil(tileWidth * widthGain).toInt()
+        val fullHeight = ceil(tileHeight * heightGain).toInt()
+        var canvasWidth = fullWidth
+        var canvasHeight = fullHeight
 
         // Cap by area, scaling both axes together so framing is preserved.
         var capped = false
         val megapixels = canvasWidth.toDouble() * canvasHeight / 1_000_000.0
         if (maxMegapixels > 0 && megapixels > maxMegapixels) {
             val scale = sqrt(maxMegapixels / megapixels)
-            canvasWidth = (canvasWidth * scale).toInt().coerceAtLeast(tileWidth)
-            canvasHeight = (canvasHeight * scale).toInt().coerceAtLeast(tileHeight)
+            canvasWidth = (canvasWidth * scale).toInt().coerceAtLeast(tileWidth / 2)
+            canvasHeight = (canvasHeight * scale).toInt().coerceAtLeast(tileHeight / 2)
             capped = true
         }
+        // Tiles have to shrink by the same factor the canvas did, or each one
+        // claims more of the frame than it saw.
+        val tileScale = canvasWidth.toFloat() / fullWidth
 
         // Tiles needed, given each one only contributes its non-overlapping part.
         val step = (1f - clampedOverlap).toDouble()
@@ -156,6 +172,7 @@ object MosaicPlanner {
             linearGain = min(widthGain, heightGain).toFloat(),
             overlap = clampedOverlap,
             capped = capped,
+            tileScale = tileScale,
         )
     }
 
