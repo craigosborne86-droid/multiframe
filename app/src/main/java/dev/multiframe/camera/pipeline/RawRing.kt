@@ -172,6 +172,19 @@ class RawRing private constructor(
         )
     }
 
+    /**
+     * A downscaled luma view of the newest frame, without consuming it.
+     *
+     * Focus peaking wants the sensor's own image: the preview has been through
+     * the ISP's sharpening, so peaking it would measure the processing rather
+     * than the focus.
+     */
+    fun lumaNewest(out: ByteArray, width: Int, height: Int, profile: SensorProfile): Boolean {
+        if (closed) return false
+        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        return nLumaNewest(handle, out, width, height, black, profile.whiteLevel)
+    }
+
     fun resetStats() {
         if (!closed) nResetStats(handle)
     }
@@ -203,6 +216,10 @@ class RawRing private constructor(
     private external fun nResetStats(h: Long)
     private external fun nLockedCount(h: Long): Int
     private external fun nReadyCount(h: Long): Int
+    private external fun nLumaNewest(
+        h: Long, out: ByteArray, outWidth: Int, outHeight: Int,
+        black: IntArray, white: Int,
+    ): Boolean
     private external fun nHistogramNewest(
         h: Long, outBins: IntArray, stride: Int,
         black: IntArray, white: Int, cfa: IntArray,

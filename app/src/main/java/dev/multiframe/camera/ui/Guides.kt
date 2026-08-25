@@ -7,6 +7,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import dev.multiframe.camera.pipeline.Attitude
@@ -141,5 +144,55 @@ fun Histogram(
                 ),
             )
         }
+    }
+}
+
+/**
+ * Focus peaking overlay.
+ *
+ * Marks where the image is resolving detail, drawn straight from a small edge
+ * map rather than as thousands of individual shapes: at one rectangle per
+ * marked pixel a 500-wide map would be tens of thousands of draw calls a
+ * second. An ImageBitmap is one.
+ *
+ * Shown only while manual focus is engaged, because that is the only time it
+ * answers a question the user is asking.
+ */
+@Composable
+fun Peaking(
+    mask: ByteArray?,
+    maskWidth: Int,
+    maskHeight: Int,
+    modifier: Modifier = Modifier,
+    colour: Color = Color(0xFFFFCC33),
+) {
+    if (mask == null || maskWidth <= 0 || maskHeight <= 0) return
+    if (mask.size < maskWidth * maskHeight) return
+
+    val image = remember(mask, maskWidth, maskHeight) {
+        val pixels = IntArray(maskWidth * maskHeight)
+        val base = colour.value.toLong().let {
+            // Colour components, so only the alpha varies per pixel.
+            val argb = colour.toArgb()
+            argb and 0x00FFFFFF
+        }
+        for (i in pixels.indices) {
+            val strength = mask[i].toInt() and 0xFF
+            // Transparent where nothing is resolving, so the picture shows
+            // through everywhere the overlay has nothing to say.
+            pixels[i] = (strength shl 24) or base
+        }
+        android.graphics.Bitmap.createBitmap(
+            pixels, maskWidth, maskHeight, android.graphics.Bitmap.Config.ARGB_8888,
+        ).asImageBitmap()
+    }
+
+    Canvas(modifier = modifier.fillMaxSize()) {
+        drawImage(
+            image = image,
+            dstSize = androidx.compose.ui.unit.IntSize(
+                size.width.toInt(), size.height.toInt(),
+            ),
+        )
     }
 }

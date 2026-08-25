@@ -317,6 +317,17 @@ class ZslRawStream private constructor(
         return ring.histogramNewest(bins, sensorProfile, stride)
     }
 
+    /**
+     * A small luma view of the newest frame, for focus peaking.
+     *
+     * From the sensor rather than the preview, and read in place so it costs
+     * the ring nothing and consumes no frames the shutter might want.
+     */
+    fun luma(out: ByteArray, width: Int, height: Int): Boolean {
+        if (closed) return false
+        return ring.lumaNewest(out, width, height, sensorProfile)
+    }
+
     /** Releases the guard's hold on exposure, back to what the user asked for. */
     fun clearHighlightProtection(caps: CameraCapabilities, settings: ManualSettings) {
         if (closed || evOverride == null) return

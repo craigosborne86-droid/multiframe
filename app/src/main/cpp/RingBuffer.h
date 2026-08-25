@@ -136,6 +136,17 @@ public:
     bool HistogramNewest(int* bins, int binCount, int stride,
                          const int* black, int white, const int* cfa) const;
 
+    /**
+     * Writes a downscaled luma view of the newest frame, without consuming it.
+     *
+     * Focus peaking needs the sensor's own image rather than the preview, which
+     * has been through the ISP's sharpening and so shows edges the optics never
+     * produced. It also needs it small: peaking a twelve-megapixel frame several
+     * times a second would cost more than the rest of the viewfinder together.
+     */
+    bool LumaNewest(uint8_t* out, int outWidth, int outHeight,
+                    const int* black, int white) const;
+
     RingStats stats() const;
     void ResetStats();
 

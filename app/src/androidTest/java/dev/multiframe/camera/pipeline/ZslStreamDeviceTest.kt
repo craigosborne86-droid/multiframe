@@ -364,6 +364,59 @@ class ZslStreamDeviceTest {
         assertThat(s.isLocked).isFalse()
     }
 
+    /**
+     * Focus peaking against a live sensor.
+     *
+     * The algorithm is covered against synthetic images where the answer is
+     * known. What this checks is the path to it: that a small luma view can be
+     * pulled from the ring in place, that it agrees with what the ring's own
+     * histogram says about the scene, and that reading it consumes no frames.
+     *
+     * It deliberately makes no claim about scene content. A locked phone lying
+     * face down photographs the desk in the dark, and demanding detail from that
+     * would be testing the room rather than the code.
+     */
+    @Test
+    fun focusPeakingReadsTheLiveSensor() {
+        val s = openStream() ?: return
+        stream = s
+        assertThat(waitForFrames(s, 8)).isTrue()
+
+        val w = 320
+        val h = 240
+        val luma = ByteArray(w * h)
+        assertThat(s.luma(luma, w, h)).isTrue()
+
+        val bins = IntArray(64)
+        assertThat(s.histogram(bins, stride = 8)).isTrue()
+
+        // Both describe the same frame, so their idea of its brightness has to
+        // agree. If the downscale were reading the wrong slot, the wrong
+        // stride, or uninitialised memory, this is where it would show.
+        val meanLuma = luma.map { it.toInt() and 0xFF }.average() / 255.0
+        var weighted = 0.0
+        var total = 0L
+        bins.forEachIndexed { i, count ->
+            weighted += (i + 0.5) / bins.size * count
+            total += count
+        }
+        val meanHistogram = if (total == 0L) 0.0 else weighted / total
+
+        val plane = Plane(w, h, luma)
+        val mask = ByteArray(w * h)
+        FocusPeaking.detect(plane, mask)
+        Log.i(
+            TAG,
+            "peaking on a live frame: mean luma %.4f, histogram mean %.4f, score %.5f".format(
+                meanLuma, meanHistogram, FocusPeaking.focusScore(plane),
+            ),
+        )
+
+        assertThat(meanLuma).isWithin(0.12).of(meanHistogram)
+        // Reading it must not cost the shutter a frame.
+        assertThat(s.stats().ring.droppedNoSlot).isEqualTo(0)
+    }
+
     @Test
     fun theStreamShutsDownCleanly() {
         val s = openStream() ?: return

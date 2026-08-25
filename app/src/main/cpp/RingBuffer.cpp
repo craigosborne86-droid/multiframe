@@ -313,6 +313,51 @@ bool RawRing::HistogramNewest(int* bins, int binCount, int stride,
     return true;
 }
 
+bool RawRing::LumaNewest(uint8_t* out, int outWidth, int outHeight,
+                         const int* black, int white) const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (base_ == nullptr || out == nullptr || outWidth <= 0 || outHeight <= 0) return false;
+
+    int newest = -1;
+    int64_t newestSequence = -1;
+    for (int i = 0; i < capacity_; ++i) {
+        const Slot& s = slots_[static_cast<size_t>(i)];
+        if (s.state != SlotState::kReady) continue;
+        if (s.sequence > newestSequence) {
+            newestSequence = s.sequence;
+            newest = i;
+        }
+    }
+    if (newest < 0) return false;
+
+    const auto* src = reinterpret_cast<const uint16_t*>(
+        base_ + static_cast<size_t>(newest) * slotBytes_);
+    const int lo = std::min(std::min(black[0], black[1]), std::min(black[2], black[3]));
+    const float range = static_cast<float>(std::max(1, white - lo));
+
+    // Each output pixel is the mean of one 2x2 CFA cell, sampled on a grid.
+    // Averaging the cell rather than picking one site gives a luma that needs
+    // no knowledge of the pattern order: every cell holds one red, one blue and
+    // two greens whatever the arrangement.
+    for (int oy = 0; oy < outHeight; ++oy) {
+        const int sy = (oy * (height_ / 2)) / outHeight * 2;
+        for (int ox = 0; ox < outWidth; ++ox) {
+            const int sx = (ox * (width_ / 2)) / outWidth * 2;
+            if (sx + 1 >= width_ || sy + 1 >= height_) {
+                out[static_cast<size_t>(oy) * outWidth + ox] = 0;
+                continue;
+            }
+            const size_t base = static_cast<size_t>(sy) * width_ + sx;
+            const int sum = src[base] + src[base + 1] +
+                            src[base + width_] + src[base + width_ + 1];
+            const float norm = std::clamp((sum - lo * 4) / (range * 4.0f), 0.0f, 1.0f);
+            out[static_cast<size_t>(oy) * outWidth + ox] =
+                static_cast<uint8_t>(norm * 255.0f);
+        }
+    }
+    return true;
+}
+
 RingStats RawRing::stats() const {
     std::lock_guard<std::mutex> guard(mutex_);
     return stats_;
@@ -474,6 +519,24 @@ JNIEXPORT jint JNICALL
 Java_dev_multiframe_camera_pipeline_RawRing_nReadyCount(JNIEnv*, jobject, jlong handle) {
     RawRing* ring = ringOf(handle);
     return ring == nullptr ? 0 : ring->readyCount();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_multiframe_camera_pipeline_RawRing_nLumaNewest(
+        JNIEnv* env, jobject, jlong handle, jbyteArray out,
+        jint outWidth, jint outHeight, jintArray jblack, jint white) {
+    RawRing* ring = ringOf(handle);
+    if (ring == nullptr) return JNI_FALSE;
+    const jsize needed = outWidth * outHeight;
+    if (needed <= 0 || env->GetArrayLength(out) < needed) return JNI_FALSE;
+
+    int black[4];
+    env->GetIntArrayRegion(jblack, 0, 4, black);
+
+    std::vector<uint8_t> luma(static_cast<size_t>(needed));
+    if (!ring->LumaNewest(luma.data(), outWidth, outHeight, black, white)) return JNI_FALSE;
+    env->SetByteArrayRegion(out, 0, needed, reinterpret_cast<const jbyte*>(luma.data()));
+    return JNI_TRUE;
 }
 
 JNIEXPORT jboolean JNICALL

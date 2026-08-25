@@ -78,6 +78,8 @@ import dev.multiframe.camera.pipeline.BurstBuffer
 import dev.multiframe.camera.pipeline.AppSettings
 import dev.multiframe.camera.pipeline.AppSettings.Companion.reconcile
 import dev.multiframe.camera.pipeline.CameraCapabilities
+import dev.multiframe.camera.pipeline.FocusPeaking
+import dev.multiframe.camera.pipeline.Plane
 import dev.multiframe.camera.pipeline.Lens
 import dev.multiframe.camera.pipeline.LensCatalog
 import dev.multiframe.camera.pipeline.MosaicCapture
@@ -102,6 +104,7 @@ import dev.multiframe.camera.ui.AboutSheet
 import dev.multiframe.camera.ui.GuideMode
 import dev.multiframe.camera.ui.Guides
 import dev.multiframe.camera.ui.Histogram
+import dev.multiframe.camera.ui.Peaking
 import dev.multiframe.camera.ui.ControlsPanel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -120,6 +123,16 @@ private const val DESIRED_BURST = 12
 
 /** Side of the focus reticle, in pixels. */
 private const val RETICLE_PX = 180f
+
+/**
+ * Size of the luma view peaking runs on.
+ *
+ * Small on purpose: peaking a twelve-megapixel frame several times a second
+ * would cost more than the rest of the viewfinder together, and edges survive
+ * downscaling perfectly well.
+ */
+private const val PEAK_W = 320
+private const val PEAK_H = 240
 
 @OptIn(ExperimentalCamera2Interop::class)
 @Composable
@@ -190,6 +203,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     val level = remember { LevelSensor(context) }
     var attitude by remember { mutableStateOf<Attitude?>(null) }
     var histogram by remember { mutableStateOf<IntArray?>(null) }
+
+    // Focus peaking, shown only while manual focus is engaged, since that is
+    // the only time it answers a question the user is asking.
+    var peakingMask by remember { mutableStateOf<ByteArray?>(null) }
+    var focusScore by remember { mutableFloatStateOf(0f) }
     // The surface the running stream was built against. A SurfaceView is
     // recreated when its fixed size is applied, so "a surface exists" is not
     // the same question as "the session is targeting the live one".
@@ -227,6 +245,31 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         while (true) {
             attitude = level.attitude
             kotlinx.coroutines.delay(60)
+        }
+    }
+
+    // Focus peaking, from the sensor rather than the preview: the preview has
+    // been through the ISP's sharpening and would show edges the optics never
+    // produced.
+    LaunchedEffect(zslStream, settings.manualFocus) {
+        val stream = zslStream
+        if (stream == null || !settings.manualFocus) {
+            peakingMask = null
+            focusScore = 0f
+            return@LaunchedEffect
+        }
+        val luma = ByteArray(PEAK_W * PEAK_H)
+        val mask = ByteArray(PEAK_W * PEAK_H)
+        while (true) {
+            val ready = withContext(Dispatchers.Default) {
+                if (!stream.luma(luma, PEAK_W, PEAK_H)) return@withContext false
+                val plane = Plane(PEAK_W, PEAK_H, luma)
+                FocusPeaking.detect(plane, mask)
+                focusScore = FocusPeaking.focusScore(plane)
+                true
+            }
+            peakingMask = if (ready) mask.copyOf() else null
+            kotlinx.coroutines.delay(120)
         }
     }
 
@@ -743,6 +786,22 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
 
         Guides(mode = guides, attitude = attitude)
+
+        Peaking(mask = peakingMask, maskWidth = PEAK_W, maskHeight = PEAK_H)
+
+        if (settings.manualFocus && focusScore > 0f) {
+            Text(
+                text = "FOCUS %.0f".format(focusScore * 1000),
+                color = Color(0xFFFFCC33),
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 16.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            )
+        }
 
         histogram?.let { bins ->
             Histogram(
