@@ -154,6 +154,7 @@ class NativeMerge private constructor(
         bitmap: Bitmap, edgeThreshold: Float, tolerance: Float, strength: Float,
         minChroma: Float, innerRadius: Float,
     ): Int
+    private external fun nReleaseScratch()
     private external fun nSharpen(
         bitmap: Bitmap, amount: Float, threshold: Float, maxShift: Float,
     ): Boolean
@@ -168,6 +169,20 @@ class NativeMerge private constructor(
     companion object {
         @Volatile
         private var available: Boolean? = null
+
+        /**
+         * Hands back the develop scratch buffers.
+         *
+         * They are kept between captures so their pages are faulted in once
+         * rather than on every shot, which is worth about a fifth of a second.
+         * Holding roughly 150 MB while the system is short of memory is not,
+         * so this is called when it asks.
+         */
+        fun releaseScratch() {
+            if (!isAvailable()) return
+            runCatching { NativeMerge(0L, 0, 0, SensorProfile.DEFAULT).nReleaseScratch() }
+                .onFailure { Log.w(TAG, "could not release develop scratch", it) }
+        }
 
         /** Whether the native library loaded. Falls back to Kotlin if not. */
         fun isAvailable(): Boolean {

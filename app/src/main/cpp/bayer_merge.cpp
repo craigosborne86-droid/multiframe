@@ -402,6 +402,56 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nEstimatedSigma(
 
 namespace {
 
+/**
+ * Scratch buffers kept between captures.
+ *
+ * Develop allocated around 150 MB of working buffers every time it ran -- a
+ * normalised plane, a luma plane and a copy of the output -- and every one of
+ * those pages had to be faulted in on first touch. That cost was measured
+ * elsewhere in this project at roughly 1.4 ms per megabyte, which puts a fifth
+ * of a second of develop into the kernel zeroing pages that the previous
+ * capture had just finished with.
+ *
+ * Holding them costs memory the app is already holding far more of, and the
+ * pool is released when the system asks for memory back.
+ */
+class Scratch {
+public:
+    std::vector<float>& floats(size_t n) {
+        if (floats_.size() < n) floats_.resize(n);
+        return floats_;
+    }
+
+    std::vector<float>& floatsB(size_t n) {
+        if (floatsB_.size() < n) floatsB_.resize(n);
+        return floatsB_;
+    }
+
+    std::vector<float>& floatsC(size_t n) {
+        if (floatsC_.size() < n) floatsC_.resize(n);
+        return floatsC_;
+    }
+
+    std::vector<uint8_t>& bytes(size_t n) {
+        if (bytes_.size() < n) bytes_.resize(n);
+        return bytes_;
+    }
+
+    void release() {
+        floats_ = {}; floatsB_ = {}; floatsC_ = {}; bytes_ = {};
+    }
+
+private:
+    std::vector<float> floats_, floatsB_, floatsC_;
+    std::vector<uint8_t> bytes_;
+};
+
+// Develop is not reentrant -- one capture at a time -- so a single pool guarded
+// by a lock is enough, and the lock is taken once per call rather than per
+// pixel.
+Scratch gScratch;
+std::mutex gScratchLock;
+
 constexpr int kGammaLutSize = 4096;
 float gGammaLut[kGammaLutSize];
 bool gGammaReady = false;
@@ -680,7 +730,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     // clamping. Normalising once into a float plane turns those thirteen calls
     // into thirteen array reads. It costs one float per pixel, which is 50 MB
     // at twelve megapixels and native memory rather than managed heap.
-    std::vector<float> plane(static_cast<size_t>(width) * height);
+    std::lock_guard<std::mutex> scratchGuard(gScratchLock);
+    std::vector<float>& plane = gScratch.floats(static_cast<size_t>(width) * height);
 
     // Black level only, first. Defective sites are found before shading and
     // white balance are applied, so the comparison happens in the sensor's own
@@ -849,6 +900,12 @@ inline uint8_t shiftChannel(int value, float shift) {
 
 extern "C" {
 
+JNIEXPORT void JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nReleaseScratch(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> guard(gScratchLock);
+    gScratch.release();
+}
+
 JNIEXPORT jboolean JNICALL
 Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
         JNIEnv* env, jobject, jobject bitmap,
@@ -876,7 +933,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
     // neighbours, and recomputing it per neighbour would do the work nine
     // times over. At twelve megapixels that is 50 MB, which is native memory
     // and not the managed heap.
-    std::vector<float> luma(static_cast<size_t>(width) * height);
+    std::lock_guard<std::mutex> scratchGuard(gScratchLock);
+    std::vector<float>& luma = gScratch.floats(static_cast<size_t>(width) * height);
     parallelBands(height, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
             const uint8_t* row = base + static_cast<size_t>(y) * stride;
@@ -889,8 +947,9 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
 
     // Written into a copy of the rows being read, since a pixel's neighbours
     // must be the original values rather than already-sharpened ones.
-    std::vector<uint8_t> output(static_cast<size_t>(height) * stride);
-    std::memcpy(output.data(), base, output.size());
+    const size_t outputBytes = static_cast<size_t>(height) * stride;
+    std::vector<uint8_t>& output = gScratch.bytes(outputBytes);
+    std::memcpy(output.data(), base, outputBytes);
 
     parallelBands(height, [&](int y0, int y1) {
         const int from = std::max(y0, 1);
@@ -926,7 +985,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
         }
     });
 
-    std::memcpy(base, output.data(), output.size());
+    std::memcpy(base, output.data(), outputBytes);
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
 }
@@ -992,7 +1051,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDefringe(
 
     // Luma and the two chroma differences once, since the window needs its
     // neighbours' values and recomputing them would do the work 25 times over.
-    std::vector<float> luma(n), cr(n), cb(n);
+    std::lock_guard<std::mutex> scratchGuard(gScratchLock);
+    std::vector<float>& luma = gScratch.floats(n);
+    std::vector<float>& cr = gScratch.floatsB(n);
+    std::vector<float>& cb = gScratch.floatsC(n);
     parallelBands(height, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
             const uint8_t* row = base + static_cast<size_t>(y) * stride;
@@ -1009,8 +1071,9 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDefringe(
     });
 
     std::atomic<int> altered{0};
-    std::vector<uint8_t> output(static_cast<size_t>(height) * stride);
-    std::memcpy(output.data(), base, output.size());
+    const size_t outputBytes = static_cast<size_t>(height) * stride;
+    std::vector<uint8_t>& output = gScratch.bytes(outputBytes);
+    std::memcpy(output.data(), base, outputBytes);
 
     // Squared radii, so the per-pixel test needs no square root. Lateral colour
     // error is zero at the optical centre by definition and grows toward the
@@ -1073,7 +1136,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDefringe(
         altered.fetch_add(local);
     });
 
-    std::memcpy(base, output.data(), output.size());
+    std::memcpy(base, output.data(), outputBytes);
     AndroidBitmap_unlockPixels(env, bitmap);
     return altered.load();
 }

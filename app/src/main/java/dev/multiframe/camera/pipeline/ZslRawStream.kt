@@ -156,6 +156,9 @@ class ZslRawStream private constructor(
     val ringCapacity: Int get() = ring.capacity
     val ringReservedBytes: Long get() = ring.reservedBytes
 
+    /** Frames a shutter press could take right now. */
+    fun readyFrames(): Int = if (closed) 0 else ring.readyCount()
+
     /** Largest burst this ring can serve while still accepting incoming frames. */
     val maxBurst: Int get() = RawRingBudget.burstForDepth(ring.capacity)
 

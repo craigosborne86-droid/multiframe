@@ -417,6 +417,48 @@ class ZslStreamDeviceTest {
         assertThat(s.stats().ring.droppedNoSlot).isEqualTo(0)
     }
 
+    /**
+     * Repeated shots take a consistent time.
+     *
+     * Develop needs around 150 MB of working buffers. Allocating them per
+     * capture leaves every page to be faulted in again, and the cost is neither
+     * small nor steady -- measured with the buffers freed between shots, three
+     * develops took 925, 1259 and 959 ms. Keeping them gives 849, 826 and 840.
+     *
+     * The consistency is the point as much as the speed: a camera whose shutter
+     * sometimes takes half a second longer for no visible reason is worse to use
+     * than one that is uniformly a little slower. So this asserts the spread
+     * rather than the mean, which is also the only claim this device can support
+     * -- its run-to-run variation swallows anything smaller.
+     */
+    @Test
+    fun repeatedCapturesTakeAConsistentTime() {
+        val s = openStream() ?: return
+        stream = s
+        assertThat(waitForFrames(s, 12)).isTrue()
+
+        val develops = ArrayList<Long>()
+        repeat(3) {
+            // Wait for the ring to refill, so each shot has the same work.
+            val deadline = System.nanoTime() + 5_000_000_000L
+            while (s.readyFrames() < 4 && System.nanoTime() < deadline) {
+                Thread.sleep(20)
+            }
+            val result = runBlocking {
+                ZslCapture.captureAndMerge(context, s, 4, rotationDegrees = 0)
+            }
+            develops.add(result.developMillis)
+        }
+
+        Log.i(TAG, "develop across three shots: ${develops.joinToString("ms, ")}ms")
+
+        val slowest = develops.max()
+        val fastest = develops.min()
+        Log.i(TAG, "spread ${slowest - fastest}ms across ${develops.size} shots")
+        // Without the retained buffers this spread was 334 ms.
+        assertThat(slowest.toDouble()).isLessThan(fastest * 1.4)
+    }
+
     @Test
     fun theStreamShutsDownCleanly() {
         val s = openStream() ?: return

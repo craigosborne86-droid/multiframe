@@ -87,6 +87,7 @@ import dev.multiframe.camera.pipeline.Plane
 import dev.multiframe.camera.pipeline.Lens
 import dev.multiframe.camera.pipeline.LensCatalog
 import dev.multiframe.camera.pipeline.MemoryPressure
+import dev.multiframe.camera.pipeline.NativeMerge
 import dev.multiframe.camera.pipeline.PressureResponse
 import dev.multiframe.camera.pipeline.MosaicCapture
 import dev.multiframe.camera.pipeline.MosaicPlanner
@@ -286,6 +287,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     PressureResponse.NONE -> Unit
                     PressureResponse.RELEASE_RING,
                     PressureResponse.RELEASE_ALL -> {
+                        // The develop scratch is held between captures so its
+                        // pages are faulted once rather than per shot. It is
+                        // not worth holding while the system is struggling.
+                        NativeMerge.releaseScratch()
                         if (zslWanted) {
                             Log.w(TAG, "memory pressure $level: releasing the raw ring")
                             zslWanted = false
