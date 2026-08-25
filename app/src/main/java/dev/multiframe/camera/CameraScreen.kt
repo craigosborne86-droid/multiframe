@@ -82,6 +82,8 @@ import dev.multiframe.camera.pipeline.FocusPeaking
 import dev.multiframe.camera.pipeline.Plane
 import dev.multiframe.camera.pipeline.Lens
 import dev.multiframe.camera.pipeline.LensCatalog
+import dev.multiframe.camera.pipeline.MemoryPressure
+import dev.multiframe.camera.pipeline.PressureResponse
 import dev.multiframe.camera.pipeline.MosaicCapture
 import dev.multiframe.camera.pipeline.MosaicPlanner
 import dev.multiframe.camera.pipeline.MosaicProgress
@@ -228,6 +230,37 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     DisposableEffect(Unit) {
         orientation.enable()
         onDispose { orientation.disable() }
+    }
+
+    // The ring is the largest allocation in the app by a wide margin, and
+    // Android does not warn twice about holding it: it kills the process. Giving
+    // it back voluntarily degrades to sequential capture, which still takes
+    // photographs, and is reversible the moment pressure lifts.
+    DisposableEffect(context) {
+        val callbacks = object : android.content.ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) {
+                when (MemoryPressure.responseTo(level)) {
+                    PressureResponse.NONE -> Unit
+                    PressureResponse.RELEASE_RING,
+                    PressureResponse.RELEASE_ALL -> {
+                        if (zslWanted) {
+                            Log.w(TAG, "memory pressure $level: releasing the raw ring")
+                            zslWanted = false
+                            status = "raw ring released: the system is short of memory"
+                        }
+                    }
+                }
+            }
+
+            override fun onConfigurationChanged(config: android.content.res.Configuration) = Unit
+
+            @Deprecated("required by the interface")
+            override fun onLowMemory() {
+                onTrimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+            }
+        }
+        context.registerComponentCallbacks(callbacks)
+        onDispose { context.unregisterComponentCallbacks(callbacks) }
     }
 
     // The accelerometer only runs while the level is being shown; leaving it
@@ -523,7 +556,25 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     memory.availMem, memory.totalMem,
                     RawRingBudget.MAX_CAPACITY,
                 )
-                if (depth < RawRingBudget.MIN_CAPACITY) {
+                // Checked before allocating rather than only after failing: an
+        // allocation that succeeds and then gets the process killed is worse
+        // than one that was never attempted.
+        val required = RawRingBudget.frameBytes(config.width, config.height) * depth
+        if (depth >= RawRingBudget.MIN_CAPACITY &&
+            !MemoryPressure.canAffordRing(memory.availMem, required)
+        ) {
+            zslWanted = false
+            status = "not enough free memory for a %.0f MB ring".format(
+                required / (1024.0 * 1024.0),
+            )
+            Log.w(
+                TAG,
+                "ZSL declined: ${memory.availMem / (1024 * 1024)}MB free, " +
+                    "ring needs ${required / (1024 * 1024)}MB",
+            )
+            return@withLock
+        }
+        if (depth < RawRingBudget.MIN_CAPACITY) {
                     zslWanted = false
                     status = "not enough free memory for a raw ring"
                     Log.w(TAG, "ZSL declined: ${memory.availMem / (1024 * 1024)}MB free")
