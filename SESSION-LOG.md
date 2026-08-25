@@ -9,8 +9,8 @@ Indigo demonstrates on iPhone; original code, name, icon and UI throughout.
 
 - Package: `dev.multiframe.camera` (final — cannot change after publication)
 - Target device for development: Pixel 9 Pro XL (`komodo`), Android 17 / API 37
-- ~15,000 lines across 65 Kotlin files and 6 native files
-- 243 JVM unit tests and 46 on-device instrumentation tests passing
+- ~18,800 lines across 84 Kotlin files and 6 native files
+- 255 JVM unit tests and 75 on-device tests (62 running, 13 awaiting an unlocked screen)
 
 ---
 
@@ -594,6 +594,52 @@ Develop, by contrast, really was doing redundant work: the black-level
 subtraction, shading and white balance were happening inside a thirteen-neighbour
 read, so all of it ran thirteen times over through a coordinate-clamping lambda.
 Normalising once into a float plane took it from **1899 ms to 910 ms**.
+
+### Focus peaking, and a metric that was wrong in an interesting way
+
+Manual focus on a phone is guesswork: the screen is small and bright and shows a
+preview that has already been sharpened. Peaking replaces judgement with a
+reading, taken from the sensor's own image in the raw ring rather than from the
+preview — peaking the preview would measure the ISP's sharpening rather than the
+focus.
+
+Contrast is measured *relative to local brightness*. Raw gradient scales with
+brightness, so peaking on it lights up every highlight and ignores the shadows,
+which is exactly backwards when focusing on something dark.
+
+The focus metric took two attempts. Counting pixels marked above a threshold
+reports a **defocused** frame as sharper, because blur spreads an edge across
+more pixels rather than removing it: a three-times-blurred pattern scored 0.952
+against 0.466 for the sharp original. Summing the gradient fails too, since
+blurring a step into a ramp leaves its total variation unchanged. Mean *squared*
+gradient works, because squaring rewards concentration — which is what focus is:
+
+```
+defocus series: 0.354, 0.151, 0.094, 0.061, 0.041
+```
+
+### Handing memory back
+
+The ring is up to 765 MB, more than most applications use in total. Android does
+not warn twice about holding it under pressure — it kills the process, and the
+user loses the viewfinder rather than losing zero shutter lag. The app now
+releases the ring at `TRIM_MEMORY_RUNNING_LOW` and degrades to sequential
+capture, which still takes photographs. `RUNNING_MODERATE` is deliberately
+ignored: it fires routinely, and responding would surrender the ring during
+ordinary use.
+
+### UI testing, and a claim that had to be withdrawn
+
+A batch of Compose tests appeared to prove the overlays rendered. They did not:
+the test rule launches an activity, an activity behind the keyguard never
+resumes, and `setContent` produced no hierarchy at all. The tests only rendered
+and never queried, so nothing noticed — a UI test that asserts nothing is
+indistinguishable from one that works.
+
+Found by writing a test that *did* query, then confirmed by a two-line check
+proving even `Text("hello")` was absent. Every render path now calls
+`assumeRendered()`, so on a locked device the thirteen UI tests report as
+skipped rather than as passing.
 
 ---
 
