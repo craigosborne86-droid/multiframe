@@ -9,8 +9,8 @@ Indigo demonstrates on iPhone; original code, name, icon and UI throughout.
 
 - Package: `dev.multiframe.camera` (final — cannot change after publication)
 - Target device for development: Pixel 9 Pro XL (`komodo`), Android 17 / API 37
-- ~20,000 lines across 90 Kotlin files and 6 native files
-- 294 JVM unit tests and 79 on-device tests (66 running, 13 awaiting an unlocked screen)
+- ~21,000 lines across 95 Kotlin files and 6 native files
+- 320 JVM unit tests and 80 on-device tests (67 running, 13 awaiting an unlocked screen)
 
 ---
 
@@ -713,6 +713,66 @@ this state.** The develop rewrite (1899 → 910 ms) is far outside that and is
 real. Anything claiming a 10% gain in the merge should be treated as unproven
 until it can be measured on a cool device, and the honest route to a faster
 merge is a different execution model rather than tuning this loop.
+
+### Two real speedups, found by looking for structural mistakes
+
+After two failed micro-optimisations and a measurement that showed the device
+could not resolve anything under 15%, the useful question changed from "what can
+be shaved off this loop" to "what is structurally wrong".
+
+**The merge ran at the speed of the slowest core.** The band scheduler divided
+the image into one equal band per thread and joined. That is right for a
+symmetric machine and wrong for a phone: a Pixel has a few fast cores and
+several slow ones, so the pass could not finish until the slowest core ground
+through its share while the fast cores sat idle. Six bands per thread, claimed
+dynamically:
+
+```
+merge before: 1008, 1131, 1008 ms
+merge after:   812,  832,  904 ms
+```
+
+The ranges do not overlap, which is the standard this project now holds
+performance claims to.
+
+That change would also have introduced a race — the merge accumulated its
+statistics into 64 fixed slots indexed by an incrementing counter, safe only
+while each thread ran exactly one band — so the slots were replaced with a lock
+taken once per band.
+
+**Develop re-faulted 150 MB on every shot.** It allocated a normalised plane, a
+luma plane and an output copy per capture. Measuring this took two attempts and
+the first said the opposite of the truth: comparing separate test runs showed
+nothing, because every run starts a fresh process with a cold pool. The effect
+only appears across shots within one session:
+
+```
+buffers freed between shots:  925, 1259,  959 ms
+buffers kept:                 849,  826,  840 ms
+```
+
+The consistency matters as much as the speed — a camera whose shutter sometimes
+takes half a second longer for no visible reason is worse to use than one
+uniformly a little slower. The spread went from 334 ms to 23.
+
+A full shot is now about 1.9 s against 2.4 s.
+
+### The mosaic stopped chaining
+
+A sweep gives each frame several independent measurements: the tile above and
+the tile beside it both overlap it. Chaining used one and discarded the rest,
+which is how a long sweep drifts while every individual join looks perfect.
+Frames now register against every overlapping neighbour and are placed at the
+consensus of all of them.
+
+```
+chained row residual      4.00 -> 2.15 px
+two-dimensional grid      3.60 -> 0.64 px
+loop closure, truth 1300: chained 1312.9, with closure 1303.5
+```
+
+On a raster sweep the tile below the starting one now lands at exactly one step
+down and none across, however far the row travelled in between.
 
 ---
 
