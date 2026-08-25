@@ -18,6 +18,7 @@ data class AppSettings(
     val mergeEnabled: Boolean = true,
     val highlightGuard: Boolean = true,
     val zslEnabled: Boolean = false,
+    val captureMode: CaptureMode = CaptureMode.AUTO,
 ) {
 
     /**
@@ -41,6 +42,7 @@ data class AppSettings(
         KEY_MERGE to mergeEnabled.toString(),
         KEY_GUARD to highlightGuard.toString(),
         KEY_ZSL to zslEnabled.toString(),
+        KEY_MODE to captureMode.name,
     ) + (lensId?.let { mapOf(KEY_LENS to it) } ?: emptyMap())
 
     companion object {
@@ -57,6 +59,7 @@ data class AppSettings(
         const val KEY_MERGE = "merge"
         const val KEY_GUARD = "guard"
         const val KEY_ZSL = "zsl"
+        const val KEY_MODE = "mode"
 
         private const val PREFERENCES = "multiframe.settings"
 
@@ -95,6 +98,11 @@ data class AppSettings(
                 mergeEnabled = bool(KEY_MERGE, defaults.mergeEnabled),
                 highlightGuard = bool(KEY_GUARD, defaults.highlightGuard),
                 zslEnabled = bool(KEY_ZSL, defaults.zslEnabled),
+                // An unrecognised mode name -- from an older or newer version --
+                // costs the mode rather than the whole configuration.
+                captureMode = stored[KEY_MODE]?.let { name ->
+                    CaptureMode.entries.firstOrNull { it.name == name }
+                } ?: defaults.captureMode,
             )
         }
 

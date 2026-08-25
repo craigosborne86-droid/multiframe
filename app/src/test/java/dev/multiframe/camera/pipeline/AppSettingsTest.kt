@@ -49,6 +49,7 @@ class AppSettingsTest {
             mergeEnabled = false,
             highlightGuard = false,
             zslEnabled = true,
+            captureMode = CaptureMode.NIGHT,
         )
 
         val restored = AppSettings.decode(original.encode())
@@ -79,6 +80,15 @@ class AppSettingsTest {
         assertThat(restored.highlightGuard).isEqualTo(AppSettings().highlightGuard)
         // The settings either side of the damage survive.
         assertThat(restored.burstFrames).isEqualTo(16)
+    }
+
+    @Test
+    fun `an unrecognised capture mode falls back rather than failing`() {
+        // A mode name written by a later version, or a corrupted one.
+        val stored = AppSettings().encode().toMutableMap()
+        stored[AppSettings.KEY_MODE] = "TELEPATHY"
+
+        assertThat(AppSettings.decode(stored).captureMode).isEqualTo(CaptureMode.AUTO)
     }
 
     @Test

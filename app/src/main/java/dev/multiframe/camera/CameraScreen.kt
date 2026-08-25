@@ -78,6 +78,9 @@ import dev.multiframe.camera.pipeline.BurstBuffer
 import dev.multiframe.camera.pipeline.AppSettings
 import dev.multiframe.camera.pipeline.AppSettings.Companion.reconcile
 import dev.multiframe.camera.pipeline.CameraCapabilities
+import dev.multiframe.camera.pipeline.CaptureMode
+import dev.multiframe.camera.pipeline.CaptureModes
+import dev.multiframe.camera.pipeline.SceneAnalysis
 import dev.multiframe.camera.pipeline.FocusPeaking
 import dev.multiframe.camera.pipeline.Plane
 import dev.multiframe.camera.pipeline.Lens
@@ -188,6 +191,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var highlightGuard by remember { mutableStateOf(restored.highlightGuard) }
     var guardPull by remember { mutableFloatStateOf(0f) }
 
+    // What the user is photographing. The right settings for a night scene and
+    // a moving subject are opposites, and only the user knows which it is.
+    var captureMode by remember { mutableStateOf(restored.captureMode) }
+    var scene by remember { mutableStateOf<SceneAnalysis?>(null) }
+
     // Tap to focus and pinch to zoom. Table stakes for a camera: without them
     // the app cannot be pointed at a subject that is not in the middle.
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
@@ -230,6 +238,18 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     DisposableEffect(Unit) {
         orientation.enable()
         onDispose { orientation.disable() }
+    }
+
+    // What the chosen mode implies for this scene, recomputed as either moves.
+    val capturePlan = remember(captureMode, scene, zslStream, burstFrames) {
+        val stream = zslStream
+        if (stream == null) null
+        else CaptureModes.plan(
+            mode = captureMode,
+            analysis = scene ?: SceneAnalysis(0f, 0.5f, 0.1f, 3f),
+            availableFrames = stream.maxBurst,
+            requestedFrames = burstFrames,
+        )
     }
 
     // The ring is the largest allocation in the app by a wide margin, and
@@ -657,10 +677,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // The guard has to run continuously. In a zero-shutter-lag camera the
     // frames already exist when the shutter is pressed, so an exposure decision
     // taken then would apply to the next photograph rather than this one.
-    LaunchedEffect(zslStream, highlightGuard, burstFrames, caps) {
+    LaunchedEffect(zslStream, highlightGuard, burstFrames, caps, captureMode) {
         val stream = zslStream ?: return@LaunchedEffect
         val c = caps ?: return@LaunchedEffect
-        if (!highlightGuard) {
+        // Night mode deliberately does not protect highlights: a dark scene has
+        // none worth protecting, and pulling exposure would spend the shadow
+        // detail the mode exists to gather.
+        val modeAllows = capturePlan?.protectHighlights ?: true
+        if (!highlightGuard || !modeAllows) {
             stream.clearHighlightProtection(c, settings)
             guardPull = 0f
             return@LaunchedEffect
@@ -735,7 +759,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
     // Written whenever anything worth remembering changes. Cheap: a dozen
     // short strings, and only on an actual change rather than per frame.
-    LaunchedEffect(settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted) {
+    LaunchedEffect(
+        settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, captureMode,
+    ) {
         AppSettings.save(
             context,
             AppSettings(
@@ -745,6 +771,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 mergeEnabled = mergeEnabled,
                 highlightGuard = highlightGuard,
                 zslEnabled = zslWanted,
+                captureMode = captureMode,
             ),
         )
     }
@@ -896,6 +923,20 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 Chip("PRO", showControls) { showControls = !showControls }
                 Chip(guides.label, guides != GuideMode.OFF) { guides = guides.next() }
                 if (zslStream != null) {
+                    val plan = capturePlan
+                    val label = if (captureMode == CaptureMode.AUTO &&
+                        plan != null && plan.resolved != CaptureMode.AUTO
+                    ) {
+                        // Say what AUTO settled on, not just that it is AUTO.
+                        "AUTO/${plan.resolved.label}"
+                    } else {
+                        captureMode.label
+                    }
+                    Chip(label, captureMode != CaptureMode.AUTO) {
+                        if (!busy) captureMode = captureMode.next()
+                    }
+                }
+                if (zslStream != null) {
                     Chip(
                         if (guardPull < -0.05f) "GUARD %.1f".format(guardPull) else "GUARD",
                         highlightGuard,
@@ -1043,15 +1084,19 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     // locks them rather than starting a capture.
                     val stream = zslStream
                     if (stream != null) {
+                        val plan = capturePlan
+                        val frames = plan?.frames ?: burstFrames
                         busy = true
-                        status = "ZSL $burstFrames frames…"
+                        status = "%s: %d frames…".format(
+                            plan?.resolved?.label ?: "ZSL", frames,
+                        )
                         val rot = caps?.let {
                             orientation.captureRotation(it.sensorOrientation)
                         } ?: 0
                         scope.launch {
                             val r = withContext(Dispatchers.Default) {
                                 ZslCapture.captureAndMerge(
-                                    context, stream, burstFrames, rot,
+                                    context, stream, frames, rot,
                                 )
                             }
                             Log.i(TAG, "ZSL result: $r")
