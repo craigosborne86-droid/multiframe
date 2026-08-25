@@ -45,6 +45,11 @@ data class DevelopParams(
      * cost. See [Sharpen] for why this is not an effect.
      */
     val sharpen: Sharpen.Params = Sharpen.Params(),
+    /**
+     * How far a site must sit beyond its same-colour neighbours to be treated
+     * as defective. Zero disables the correction entirely.
+     */
+    val hotPixelThreshold: Float = HotPixels.DEFAULT_THRESHOLD,
 ) {
     companion object {
         const val AUTO_EXPOSURE = -1f
@@ -154,6 +159,7 @@ object RawDeveloper {
         val bitmap = android.graphics.Bitmap.createBitmap(
             w, h, android.graphics.Bitmap.Config.ARGB_8888,
         )
+        correctDefects(frame, sensor, params)
         val gain = resolveGain(frame, sensor, color, params)
         val resolved = params.copy(exposureGain = gain)
         val band = IntArray(w * bandRows)
@@ -206,6 +212,7 @@ object RawDeveloper {
         val w = frame.width
         val h = frame.height
         val out = IntArray(w * h)
+        correctDefects(frame, sensor, params)
         val resolved = params.copy(exposureGain = resolveGain(frame, sensor, color, params))
         parallelRows(h) { yStart, yEnd ->
             renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading)
@@ -256,6 +263,21 @@ object RawDeveloper {
                     encode(rgb[2], params)
             }
         }
+    }
+
+    /**
+     * Replaces defective sensor sites, in place on the frame.
+     *
+     * Before exposure is measured, so a stuck-bright site cannot drag the
+     * highlight percentile and darken the whole picture on its own.
+     */
+    private fun correctDefects(
+        frame: BayerFrame,
+        sensor: SensorProfile,
+        params: DevelopParams,
+    ) {
+        if (params.hotPixelThreshold <= 0f) return
+        HotPixels.suppressInFrame(frame, sensor, params.hotPixelThreshold)
     }
 
     /** Gamma encode, then the display-domain contrast stage. */

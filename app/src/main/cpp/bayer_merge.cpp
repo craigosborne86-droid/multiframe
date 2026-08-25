@@ -462,6 +462,52 @@ inline float shadingGain(const float* gains, int columns, int rows,
     return top * (1.0f - ty) + bottom * ty;
 }
 
+/**
+ * Replaces defective sensor sites in a normalised CFA plane.
+ *
+ * Mirrors HotPixels.kt, where the tests are. Compares against the four sites two
+ * pixels away, which on a Bayer grid are the nearest of the same colour, and
+ * only replaces a site that lies outside the range of all four by a margin --
+ * so a genuine highlight shared with a neighbour survives.
+ *
+ * The merge cannot do this job: it suppresses whatever varies between frames,
+ * and a defective site is wrong identically in all of them. Cleaning up the
+ * surrounding noise only makes the dots more obvious.
+ */
+long suppressHotPixels(float* plane, int width, int height, float threshold) {
+    if (width < 5 || height < 5 || threshold <= 0.0f) return 0;
+    std::atomic<long> replaced{0};
+
+    parallelBands(height, [&](int y0, int y1) {
+        const int from = std::max(y0, 2);
+        const int to = std::min(y1, height - 2);
+        long local = 0;
+        for (int y = from; y < to; ++y) {
+            const size_t row = static_cast<size_t>(y) * width;
+            for (int x = 2; x < width - 2; ++x) {
+                const float here = plane[row + x];
+                const float a = plane[row + x - 2];
+                const float b = plane[row + x + 2];
+                const float c = plane[row - 2 * static_cast<size_t>(width) + x];
+                const float d = plane[row + 2 * static_cast<size_t>(width) + x];
+
+                const float highest = std::max(std::max(a, b), std::max(c, d));
+                const float lowest = std::min(std::min(a, b), std::min(c, d));
+
+                if (here > highest + threshold) {
+                    plane[row + x] = highest;
+                    ++local;
+                } else if (here < lowest - threshold) {
+                    plane[row + x] = lowest;
+                    ++local;
+                }
+            }
+        }
+        replaced.fetch_add(local);
+    });
+    return replaced.load();
+}
+
 /** Smootherstep blended with identity: monotonic for any amount in 0..1. */
 inline float sCurve(float x, float amount) {
     if (amount <= 0.0f) return x;
@@ -533,7 +579,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         jfloatArray jgains, jfloatArray jmatrix,
         jfloat exposureGain, jfloat knee,
         jfloat contrast, jfloat desatStrength, jfloat desatStart, jfloat blackPoint,
-        jfloatArray jshading, jint shadingColumns, jint shadingRows) {
+        jfloatArray jshading, jint shadingColumns, jint shadingRows,
+        jfloat hotPixelThreshold) {
     ensureGammaLut();
 
     // Lens shading, when the camera reported a map for this capture. Raw is
@@ -594,6 +641,32 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     // into thirteen array reads. It costs one float per pixel, which is 50 MB
     // at twelve megapixels and native memory rather than managed heap.
     std::vector<float> plane(static_cast<size_t>(width) * height);
+
+    // Black level only, first. Defective sites are found before shading and
+    // white balance are applied, so the comparison happens in the sensor's own
+    // domain -- which is what lets the Kotlin fallback, which has no plane to
+    // work on and corrects the CFA in place, arrive at the same answer.
+    parallelBands(height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            const int rowParity = (y & 1) * 2;
+            const size_t rowBase = static_cast<size_t>(y) * width;
+            for (int x = 0; x < width; ++x) {
+                const int site = rowParity + (x & 1);
+                plane[rowBase + x] =
+                    std::max((static_cast<float>(src[rowBase + x]) - black[site]) / range, 0.0f);
+            }
+        }
+    });
+
+    if (hotPixelThreshold > 0.0f) {
+        const long replaced = suppressHotPixels(plane.data(), width, height, hotPixelThreshold);
+        if (replaced > 0) {
+            LOGI("replaced %ld defective sites (%.4f%% of the sensor)",
+                 replaced, 100.0 * replaced / (static_cast<double>(width) * height));
+        }
+    }
+
+    // Then shading and white balance, on the corrected values.
     parallelBands(height, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
             const int rowParity = (y & 1) * 2;
@@ -601,12 +674,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
             for (int x = 0; x < width; ++x) {
                 const int site = rowParity + (x & 1);
                 const int c = cfa[site];
-                float lin = (static_cast<float>(src[rowBase + x]) - black[site]) / range;
-                lin *= shadingGain(shadingPtr, shadingColumns, shadingRows,
-                                   x, y, width, height, site);
                 const float g = (c == 0) ? gains[0] : (c == 2) ? gains[3]
                                                                : ((y & 1) == 0 ? gains[1] : gains[2]);
-                plane[rowBase + x] = std::max(lin, 0.0f) * g;
+                plane[rowBase + x] *= shadingGain(shadingPtr, shadingColumns, shadingRows,
+                                                  x, y, width, height, site) * g;
             }
         }
     });

@@ -94,6 +94,7 @@ class NativeMerge private constructor(
             params.contrast, params.highlightDesaturation,
             params.desaturationStart, params.blackPoint,
             shading?.gains, shading?.columns ?: 0, shading?.rows ?: 0,
+            params.hotPixelThreshold,
         )
         if (!ok) {
             Log.w(TAG, "native develop failed, caller should fall back")
@@ -138,6 +139,7 @@ class NativeMerge private constructor(
         exposureGain: Float, knee: Float,
         contrast: Float, desatStrength: Float, desatStart: Float, blackPoint: Float,
         shading: FloatArray?, shadingColumns: Int, shadingRows: Int,
+        hotPixelThreshold: Float,
     ): Boolean
     private external fun nSharpen(
         bitmap: Bitmap, amount: Float, threshold: Float, maxShift: Float,

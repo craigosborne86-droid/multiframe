@@ -116,6 +116,74 @@ class DevelopParityTest {
     }
 
     /**
+     * Defective sites are corrected identically in both implementations.
+     *
+     * They are found before shading and white balance in native, and on the CFA
+     * in place in Kotlin, precisely so the comparison happens in the same
+     * domain. If those diverged, a hot pixel would be replaced in one path and
+     * not the other, and the fallback would produce a visibly different picture.
+     */
+    @Test
+    fun hotPixelCorrectionAgreesAndActuallyRuns() {
+        val w = 96
+        val h = 72
+        val profile = SensorProfile.DEFAULT
+        // Dim, so the difference the correction makes is visible. At normal
+        // exposure both the defect and its replacement clip at 255 and the
+        // comparison shows nothing.
+        val dim = fixedGain.copy(exposureGain = 0.5f)
+        val data = ShortArray(w * h) { 420.toShort() }
+        // A scattering of stuck-bright sites, kept well apart so none shields
+        // another.
+        val defects = listOf(20 to 20, 40 to 30, 60 to 50, 30 to 60)
+        for ((x, y) in defects) data[y * w + x] = 1010.toShort()
+        val frame = BayerFrame(w, h, data)
+
+        val corrected = RawDeveloper.develop(
+            BayerFrame(w, h, data.copyOf()), profile, ColorProfile.NEUTRAL, dim,
+        )
+        val merger = NativeMerge.create(w, h, profile)!!
+        val nativeBitmap = merger.use {
+            it.develop(directBufferOf(frame), ColorProfile.NEUTRAL, dim)
+        }!!
+
+        var worst = 0
+        for (y in 3 until h - 3) {
+            for (x in 3 until w - 3) {
+                val a = corrected[y * w + x]
+                val b = nativeBitmap.getPixel(x, y)
+                worst = maxOf(
+                    worst,
+                    abs(((a shr 16) and 0xFF) - Color.red(b)),
+                    abs(((a shr 8) and 0xFF) - Color.green(b)),
+                )
+            }
+        }
+        Log.i(TAG, "hot pixel parity: worst $worst/255")
+        assertThat(worst).isAtMost(2)
+
+        // And it has to actually have happened: with correction off the defect
+        // is still there, so the two renders must differ at that site.
+        val untouched = NativeMerge.create(w, h, profile)!!.use {
+            it.develop(
+                directBufferOf(BayerFrame(w, h, ShortArray(w * h) { i ->
+                    if (defects.any { (dx, dy) -> dy * w + dx == i }) 1010 else 420
+                }.map { v -> v.toShort() }.toShortArray())),
+                ColorProfile.NEUTRAL,
+                dim.copy(hotPixelThreshold = 0f),
+            )
+        }!!
+        val (dx, dy) = defects.first()
+        val withCorrection = Color.green(nativeBitmap.getPixel(dx, dy))
+        val without = Color.green(untouched.getPixel(dx, dy))
+        Log.i(TAG, "defective site: uncorrected $without, corrected $withCorrection")
+        nativeBitmap.recycle()
+        untouched.recycle()
+
+        assertThat(without).isGreaterThan(withCorrection + 20)
+    }
+
+    /**
      * Sharpening actually runs in the binary that ships.
      *
      * The parity test cannot show this: if sharpening were silently disabled in
