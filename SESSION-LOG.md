@@ -688,6 +688,32 @@ a thumbnail of a picture the app had just taken itself.
 Recording the URI at the moment of writing needs no permission, always shows the
 right picture, and costs one string.
 
+### What can and cannot be measured here
+
+Two attempts to speed up the merge were reverted, and a third measurement
+undermined the reasoning behind both.
+
+Repeating the *same* build three times, after letting the device settle, gives
+merge times of 1008, 1131 and 1008 ms and develop times of 949, 913 and 1027 ms.
+That is a **12% spread on identical code**. The phone has been running tests
+continuously for hours, and its thermal state drifts.
+
+So the two optimisations that were reverted — precomputing the tile index per
+column, and interleaving the sum and weight accumulators — produced differences
+of 2% and 11% respectively, both of which sit inside that spread. The earlier
+commit message claiming the first "made no measurable difference" was right by
+accident; the claim that the second "made it worse" was over-confident and is
+withdrawn here. Neither could be resolved.
+
+Reverting both was still correct — complexity with no demonstrated benefit is
+not worth keeping — but the stated reasons were firmer than the evidence.
+
+**The practical rule: changes below about 15% cannot be judged on this device in
+this state.** The develop rewrite (1899 → 910 ms) is far outside that and is
+real. Anything claiming a 10% gain in the merge should be treated as unproven
+until it can be measured on a cool device, and the honest route to a faster
+merge is a different execution model rather than tuning this loop.
+
 ---
 
 ## Super-resolution by telephoto mosaic
