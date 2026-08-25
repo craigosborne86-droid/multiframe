@@ -33,6 +33,11 @@ object ImageSaver {
         values.clear()
         values.put(MediaStore.MediaColumns.IS_PENDING, 0)
         resolver.update(uri, values, null, null)
+
+        // Recorded as it is written, which is the only moment the app is
+        // certain which image is its own without asking to read the whole
+        // photo library.
+        RecentCapture.remember(context, uri, displayName)
         return uri
     }
 }

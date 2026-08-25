@@ -65,6 +65,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -97,6 +98,8 @@ import dev.multiframe.camera.pipeline.MemoryBudget
 import dev.multiframe.camera.pipeline.RawBurstCapture
 import dev.multiframe.camera.pipeline.RawCapture
 import dev.multiframe.camera.pipeline.RawRingBudget
+import dev.multiframe.camera.pipeline.RecentCapture
+import dev.multiframe.camera.pipeline.RecentShot
 import dev.multiframe.camera.pipeline.ZslCapture
 import dev.multiframe.camera.pipeline.ZslDecision
 import dev.multiframe.camera.pipeline.ZslPolicy
@@ -196,6 +199,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var captureMode by remember { mutableStateOf(restored.captureMode) }
     var scene by remember { mutableStateOf<SceneAnalysis?>(null) }
 
+    // Self-timer, and the last shot taken.
+    var timerSeconds by remember { mutableIntStateOf(0) }
+    var countdown by remember { mutableIntStateOf(0) }
+    var lastShot by remember { mutableStateOf<RecentShot?>(null) }
+    var thumbnail by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+
     // Tap to focus and pinch to zoom. Table stakes for a camera: without them
     // the app cannot be pointed at a subject that is not in the middle.
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
@@ -238,6 +247,20 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     DisposableEffect(Unit) {
         orientation.enable()
         onDispose { orientation.disable() }
+    }
+
+    // The last capture, refreshed whenever one completes.
+    LaunchedEffect(busy) {
+        if (busy) return@LaunchedEffect
+        val shot = withContext(Dispatchers.IO) { RecentCapture.latest(context) }
+        lastShot = shot
+        thumbnail = if (shot == null) null else withContext(Dispatchers.IO) {
+            runCatching {
+                context.contentResolver.loadThumbnail(
+                    shot.uri, android.util.Size(160, 160), null,
+                )
+            }.onFailure { Log.w(TAG, "could not load the last shot", it) }.getOrNull()
+        }
     }
 
     // What the chosen mode implies for this scene, recomputed as either moves.
@@ -1021,6 +1044,18 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         }
                     }
                 }
+                Chip(
+                    if (timerSeconds == 0) "TIMER" else "${timerSeconds}s",
+                    timerSeconds > 0,
+                ) {
+                    if (!busy) {
+                        timerSeconds = when (timerSeconds) {
+                            0 -> 3
+                            3 -> 10
+                            else -> 0
+                        }
+                    }
+                }
                 Chip("i", showAbout) { showAbout = true }
             }
 
@@ -1078,7 +1113,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 busy = busy,
                 modifier = Modifier.padding(vertical = 28.dp),
                 onClick = {
-                    if (busy) return@ShutterButton
+                    if (busy || countdown > 0) return@ShutterButton
 
                     // Zero shutter lag: the frames already exist, so this press
                     // locks them rather than starting a capture.
@@ -1094,6 +1129,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             orientation.captureRotation(it.sensorOrientation)
                         } ?: 0
                         scope.launch {
+                            // The timer runs before anything is locked, so the
+                            // frames captured are the ones from the moment the
+                            // countdown ends rather than when it began.
+                            for (remaining in timerSeconds downTo 1) {
+                                countdown = remaining
+                                kotlinx.coroutines.delay(1000)
+                            }
+                            countdown = 0
+
                             val r = withContext(Dispatchers.Default) {
                                 ZslCapture.captureAndMerge(
                                     context, stream, frames, rot,
@@ -1229,6 +1273,53 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+
+        if (countdown > 0) {
+            Text(
+                text = countdown.toString(),
+                color = Color.White,
+                fontSize = 84.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .semantics { contentDescription = "Timer $countdown" },
+            )
+        }
+
+        // The last shot, which is also the way into the gallery.
+        thumbnail?.let { image ->
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 24.dp, bottom = 44.dp)
+                    .size(54.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.5.dp, Color(0x66FFFFFF), RoundedCornerShape(8.dp))
+                    .clickable(enabled = !busy) {
+                        lastShot?.let { shot ->
+                            // Handed to whatever the user views photographs
+                            // with, rather than this app growing a gallery.
+                            runCatching {
+                                context.startActivity(
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW, shot.uri,
+                                    ).addFlags(
+                                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                                    )
+                                )
+                            }.onFailure { Log.w(TAG, "nothing can view that image", it) }
+                        }
+                    }
+                    .semantics { contentDescription = "Last shot" },
+            ) {
+                androidx.compose.foundation.Image(
+                    bitmap = image.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
                 )
             }
         }

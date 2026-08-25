@@ -318,6 +318,10 @@ object RawBurstCapture {
         values.clear()
         values.put(MediaStore.MediaColumns.IS_PENDING, 0)
         resolver.update(uri, values, null, null)
+        // Only if no JPEG follows: a DNG has no preview this app can cheaply
+        // decode, so a raw thumbnail would be a blank square. The JPEG written
+        // straight after overwrites this.
+        RecentCapture.remember(context, uri, displayName)
         Log.i(TAG, "merged DNG written: $uri")
         true
     } catch (e: Exception) {
