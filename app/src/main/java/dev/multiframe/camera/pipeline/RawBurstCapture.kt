@@ -187,7 +187,9 @@ object RawBurstCapture {
         val writeMillis = System.currentTimeMillis() - t2
 
         val t3 = System.currentTimeMillis()
-        val color = ColorProfile.from(captureResult)
+        // From the sensor's own characterisation rather than the ISP's
+        // rendering matrix, which is tuned to the manufacturer's look.
+        val color = ColorProfile.calibrated(characteristics, captureResult)
         // Raw is uncorrected by definition, so the falloff the camera measured
         // for this capture has to be applied here or the corners stay dingy.
         val shading = ShadingMap.from(captureResult)

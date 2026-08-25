@@ -98,7 +98,7 @@ object MosaicCapture {
                 lastTimestamp = timestamp
 
                 val outcome = runCatching {
-                    consider(burst, session, profile, stream.config)
+                    consider(burst, session, profile, stream.config, stream.characteristics)
                 }.onFailure { Log.w(TAG, "mosaic frame failed", it) }.getOrNull()
 
                 burst.close()
@@ -143,6 +143,7 @@ object MosaicCapture {
         session: MosaicSession,
         profile: SensorProfile,
         config: RawStreamConfig,
+        characteristics: android.hardware.camera2.CameraCharacteristics,
     ): Boolean {
         val buffer = burst.frames.buffer(0) ?: return false
         val stride = burst.frames.rowStride
@@ -160,7 +161,7 @@ object MosaicCapture {
                     // Only now is it worth the half second.
                     m.setReference(buffer, stride)
                     val (merged, _) = m.finish()
-                    val color = ColorProfile.from(burst.referenceResult)
+                    val color = ColorProfile.calibrated(characteristics, burst.referenceResult)
                     val shading = ShadingMap.from(burst.referenceResult)
                     val tile = m.develop(merged, color, shading = shading)
                     if (tile == null) {
