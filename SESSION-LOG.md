@@ -10,7 +10,7 @@ Indigo demonstrates on iPhone; original code, name, icon and UI throughout.
 - Package: `dev.multiframe.camera` (final — cannot change after publication)
 - Target device for development: Pixel 9 Pro XL (`komodo`), Android 17 / API 37
 - ~15,000 lines across 65 Kotlin files and 6 native files
-- 218 JVM unit tests and 39 on-device instrumentation tests passing
+- 243 JVM unit tests and 46 on-device instrumentation tests passing
 
 ---
 
@@ -382,18 +382,36 @@ flat four-slot write headroom would have taken a third of that ring, so headroom
 now scales with depth (`capacity / 8`, clamped to 2..4) — 13 slots gives a burst
 of 11 instead of 9.
 
-### Still not verified
+### Verified on the live camera
 
-- **The shutter has not been pressed on the live stream.** Everything up to and
-  including a running 30 fps raw stream is confirmed; the handover, merge and
-  DNG/JPEG output from ring frames are not. An incoming call arrived on the
-  test device and on-device work stopped there.
-- The instrumentation suite has not been re-run since headroom became
-  proportional. `burstForDepth(32)` is unchanged at 28, so the assertions should
-  hold, but that is reasoning rather than a green run.
-- Frames merged from the ring have not been compared against the sequential
-  path for noise reduction, which is the measurement that shows whether a
-  233 ms window actually agrees better than a 5.6 s one.
+Phase 6 shipped with its central claim untested: everything had been checked
+against synthetic frames pushed into the ring by hand, which proves the pool
+works and says nothing about whether the sensor delivers raw at thirty frames a
+second into it.
+
+It does.
+
+```
+live stream: pushed=89 dropped=0 heldOff=0 gaps=0 fps=29.7 maxInterval=33.6ms
+             lost=0 failed=0
+handover:    8 frames spanning 235 ms
+shutter:     raw merge -> DNG + JPEG, 6 frames
+             handover 59us, merge 969ms, develop 884ms, write 162ms
+```
+
+Eighty-nine full-resolution raw frames in three seconds, nothing dropped, no
+gaps in the sensor timestamps, no buffers lost. The design predicted a 233 ms
+burst window; the camera delivered 235. **The shutter press itself costs 59
+microseconds** against a ten millisecond budget — and the stream kept running at
+29.8 fps with nothing dropped *during* the capture, which is the other half of
+the claim.
+
+Two things made this testable at all. The preview target is an `ImageReader`
+rather than a display surface — the camera does not care what consumes the
+preview stream, and a locked phone has no screen to give. And the CAMERA
+permission comes from `GrantPermissionRule` inside the test, because the harness
+uninstalls the app between runs and takes any shell grant with it.
+
 
 ---
 
@@ -532,6 +550,50 @@ Things every serious camera has and this had none of, added in a block:
   been returning zero since the native rewrite, so every claim about merge
   quality rested on a number that was not being computed. Verified against known
   noise: 2.10 for amplitude 4, 20.97 for amplitude 40.
+
+### Colour from the sensor rather than from the ISP
+
+`COLOR_CORRECTION_TRANSFORM` is the matrix the camera's own processor chose,
+tuned to produce the manufacturer's rendering. Using it means inheriting the
+look the stock app ships.
+
+The sensor also carries the colorimetric data a DNG carries: colour matrices
+under two illuminants, calibration transforms, and forward matrices taking
+white-balanced camera space to XYZ. Rendering through that describes what the
+sensor sees rather than what the vendor wants it to look like.
+
+```
+neutral 0.5 renders as (0.5000, 0.5000, 0.4998)
+```
+
+with all three matrix rows summing to 1.000, which is the property that makes it
+true. Two bugs on the way: the forward matrix has to map the scene's neutral
+onto the **D50 white point** and not onto (1,1,1) — normalising to the wrong one
+rendered every grey visibly blue — and the illuminant blend ran backwards.
+
+A wrong conclusion is worth recording. A probe reported all six calibration keys
+as absent on this device, and a whole fallback path was written on the strength
+of it — reading the tags back out of a DNG that `DngCreator` had written. The
+keys are not absent: **Android withholds them from an app that does not hold the
+CAMERA permission**, because a sensor's calibration is close to a fingerprint.
+The fallback is still worth having for hardware that genuinely stays silent, but
+it is not the main path, and it was built on a misreading.
+
+### An optimisation that did not work
+
+The merge's inner loop does two divisions per pixel purely to find which
+alignment tile a pixel belongs to — twelve million times per frame, for an
+answer that depends only on the coordinate. Precomputing it per column looked
+like an obvious win and made no measurable difference: 1051 ± 60 ms against
+roughly 1033 ms before, which is the same number. Reverted, and recorded,
+because the next person to look at that loop will have the same idea. The merge
+moves 25 MB of frame and touches 100 MB of float accumulators per frame; that is
+where its time goes, not in the arithmetic.
+
+Develop, by contrast, really was doing redundant work: the black-level
+subtraction, shading and white balance were happening inside a thirteen-neighbour
+read, so all of it ran thirteen times over through a coordinate-clamping lambda.
+Normalising once into a float plane took it from **1899 ms to 910 ms**.
 
 ---
 
