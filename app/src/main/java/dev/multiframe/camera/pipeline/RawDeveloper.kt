@@ -50,6 +50,8 @@ data class DevelopParams(
      * as defective. Zero disables the correction entirely.
      */
     val hotPixelThreshold: Float = HotPixels.DEFAULT_THRESHOLD,
+    /** Colour fringe suppression. See [Defringe] for what it does and does not fix. */
+    val defringe: Defringe.Params = Defringe.Params(),
 ) {
     companion object {
         const val AUTO_EXPOSURE = -1f
@@ -170,12 +172,14 @@ object RawDeveloper {
             bitmap.setPixels(band, 0, w, 0, y, w, rows)
             y += rows
         }
-        // Applied after the whole image exists, since the mask needs each
-        // pixel's neighbours and a band does not have them at its edges.
-        if (params.sharpen.enabled) {
+        // Applied after the whole image exists, since both need each pixel's
+        // neighbours and a band does not have them at its edges.
+        if (params.sharpen.enabled || params.defringe.enabled) {
             val all = IntArray(w * h)
             bitmap.getPixels(all, 0, w, 0, 0, w, h)
-            Sharpen.apply(all, w, h, params.sharpen)
+            // Defringe first: sharpening a fringe would make it worse.
+            if (params.defringe.enabled) Defringe.apply(all, w, h, params.defringe)
+            if (params.sharpen.enabled) Sharpen.apply(all, w, h, params.sharpen)
             bitmap.setPixels(all, 0, w, 0, 0, w, h)
         }
         return bitmap
@@ -217,6 +221,8 @@ object RawDeveloper {
         parallelRows(h) { yStart, yEnd ->
             renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading)
         }
+        // Defringe first: sharpening a fringe would make it worse.
+        if (resolved.defringe.enabled) Defringe.apply(out, w, h, resolved.defringe)
         if (resolved.sharpen.enabled) Sharpen.apply(out, w, h, resolved.sharpen)
         return out
     }

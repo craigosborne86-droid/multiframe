@@ -892,3 +892,150 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
 }
 
 }  // extern "C"
+
+
+// ---------------------------------------------------------------------------
+// Defringing.
+//
+// Mirrors Defringe.kt, where the tests are. A lens does not focus every
+// wavelength at the same scale, so along a high-contrast edge the colour planes
+// are slightly misregistered and show a coloured rim. The ISP corrects it for
+// its own JPEG; a raw pipeline inherits it.
+//
+// A fringe exists only at the edge, while a genuinely coloured object carries
+// its colour away from its own edges too, so chroma at an edge is limited to
+// the range found among nearby pixels that are not on one.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kFringeWindow = 2;
+// One more than the window: each neighbour is itself tested for being an edge,
+// and that test needs its own neighbours.
+constexpr int kFringeMargin = kFringeWindow + 1;
+
+inline float clampToward(float value, float low, float high,
+                         float tolerance, float strength) {
+    const float ceiling = high + tolerance;
+    const float floor = low - tolerance;
+    if (value > ceiling) return value - (value - ceiling) * strength;
+    if (value < floor) return value + (floor - value) * strength;
+    return value;
+}
+
+}  // namespace
+
+extern "C" {
+
+JNIEXPORT jint JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nDefringe(
+        JNIEnv* env, jobject, jobject bitmap,
+        jfloat edgeThreshold, jfloat tolerance, jfloat strength, jfloat minChroma,
+        jfloat innerRadius) {
+    if (strength <= 0.0f) return 0;
+
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) return 0;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return 0;
+
+    const int width = static_cast<int>(info.width);
+    const int height = static_cast<int>(info.height);
+    if (width <= kFringeMargin * 2 || height <= kFringeMargin * 2) return 0;
+
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS) {
+        return 0;
+    }
+    auto* base = static_cast<uint8_t*>(pixels);
+    const int stride = static_cast<int>(info.stride);
+    const size_t n = static_cast<size_t>(width) * height;
+
+    // Luma and the two chroma differences once, since the window needs its
+    // neighbours' values and recomputing them would do the work 25 times over.
+    std::vector<float> luma(n), cr(n), cb(n);
+    parallelBands(height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            const uint8_t* row = base + static_cast<size_t>(y) * stride;
+            for (int x = 0; x < width; ++x) {
+                const uint8_t* p = row + static_cast<size_t>(x) * 4;
+                const size_t i = static_cast<size_t>(y) * width + x;
+                luma[i] = 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
+                // Against green: a Bayer sensor has most of its samples there
+                // and least of its own error, so it is the reference.
+                cr[i] = static_cast<float>(p[0]) - p[1];
+                cb[i] = static_cast<float>(p[2]) - p[1];
+            }
+        }
+    });
+
+    std::atomic<int> altered{0};
+    std::vector<uint8_t> output(static_cast<size_t>(height) * stride);
+    std::memcpy(output.data(), base, output.size());
+
+    // Squared radii, so the per-pixel test needs no square root. Lateral colour
+    // error is zero at the optical centre by definition and grows toward the
+    // corners, so correcting the middle would be wrong as well as wasteful.
+    const float centreX = (width - 1) * 0.5f;
+    const float centreY = (height - 1) * 0.5f;
+    const float cornerSquared = centreX * centreX + centreY * centreY;
+    const float innerSquared = cornerSquared * innerRadius * innerRadius;
+
+    parallelBands(height, [&](int y0, int y1) {
+        const int from = std::max(y0, kFringeMargin);
+        const int to = std::min(y1, height - kFringeMargin);
+        int local = 0;
+        for (int y = from; y < to; ++y) {
+            const float dyc = y - centreY;
+            for (int x = kFringeMargin; x < width - kFringeMargin; ++x) {
+                const float dxc = x - centreX;
+                if (dxc * dxc + dyc * dyc < innerSquared) continue;
+                const size_t index = static_cast<size_t>(y) * width + x;
+                // Cheapest test first: most pixels carry no real chroma and
+                // never need the window scan. Without it the rule fires on
+                // ordinary chroma noise and becomes noise reduction applied to
+                // half the frame.
+                if (std::max(std::fabs(cr[index]), std::fabs(cb[index])) < minChroma) continue;
+
+                const float gx = std::fabs(luma[index + 1] - luma[index - 1]);
+                const float gy = std::fabs(luma[index + width] - luma[index - width]);
+                if (std::max(gx, gy) < edgeThreshold) continue;
+
+                float crLow = 1e9f, crHigh = -1e9f, cbLow = 1e9f, cbHigh = -1e9f;
+                int found = 0;
+                for (int dy = -kFringeWindow; dy <= kFringeWindow; ++dy) {
+                    const size_t row = index + static_cast<size_t>(dy) * width;
+                    for (int dx = -kFringeWindow; dx <= kFringeWindow; ++dx) {
+                        const size_t at = row + dx;
+                        const float ngx = std::fabs(luma[at + 1] - luma[at - 1]);
+                        const float ngy = std::fabs(luma[at + width] - luma[at - width]);
+                        if (std::max(ngx, ngy) >= edgeThreshold) continue;
+                        crLow = std::min(crLow, cr[at]); crHigh = std::max(crHigh, cr[at]);
+                        cbLow = std::min(cbLow, cb[at]); cbHigh = std::max(cbHigh, cb[at]);
+                        ++found;
+                    }
+                }
+                // No non-edge neighbour means no evidence about what colour
+                // belongs here, and altering it would be a guess.
+                if (found == 0) continue;
+
+                const float newCr = clampToward(cr[index], crLow, crHigh, tolerance, strength);
+                const float newCb = clampToward(cb[index], cbLow, cbHigh, tolerance, strength);
+                if (newCr == cr[index] && newCb == cb[index]) continue;
+
+                uint8_t* q = output.data() + static_cast<size_t>(y) * stride +
+                             static_cast<size_t>(x) * 4;
+                const float g = static_cast<float>(q[1]);
+                q[0] = static_cast<uint8_t>(std::clamp(std::lround(g + newCr), 0L, 255L));
+                q[2] = static_cast<uint8_t>(std::clamp(std::lround(g + newCb), 0L, 255L));
+                ++local;
+            }
+        }
+        altered.fetch_add(local);
+    });
+
+    std::memcpy(base, output.data(), output.size());
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return altered.load();
+}
+
+}  // extern "C"

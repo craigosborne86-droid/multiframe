@@ -101,8 +101,17 @@ class NativeMerge private constructor(
             bitmap.recycle()
             return null
         }
-        // A second pass, because the mask needs each pixel's neighbours and the
-        // develop loop writes one pixel at a time.
+        // Further passes, because both need each pixel's neighbours and the
+        // develop loop writes one pixel at a time. Defringe first: sharpening a
+        // fringe would make it worse.
+        if (params.defringe.enabled) {
+            val altered = nDefringe(
+                bitmap, params.defringe.edgeThreshold,
+                params.defringe.tolerance, params.defringe.strength,
+                params.defringe.minChroma, params.defringe.innerRadius,
+            )
+            if (altered > 0) Log.i(TAG, "defringed $altered pixels")
+        }
         if (params.sharpen.enabled) {
             nSharpen(
                 bitmap, params.sharpen.amount, params.sharpen.threshold,
@@ -141,6 +150,10 @@ class NativeMerge private constructor(
         shading: FloatArray?, shadingColumns: Int, shadingRows: Int,
         hotPixelThreshold: Float,
     ): Boolean
+    private external fun nDefringe(
+        bitmap: Bitmap, edgeThreshold: Float, tolerance: Float, strength: Float,
+        minChroma: Float, innerRadius: Float,
+    ): Int
     private external fun nSharpen(
         bitmap: Bitmap, amount: Float, threshold: Float, maxShift: Float,
     ): Boolean
