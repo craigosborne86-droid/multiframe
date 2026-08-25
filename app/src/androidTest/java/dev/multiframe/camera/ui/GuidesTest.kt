@@ -40,7 +40,8 @@ class GuidesTest {
         compose.setContent {
             Box(modifier = Modifier.fillMaxSize()) { content() }
         }
-        compose.waitForIdle()
+        // Without this the test renders nothing, asserts nothing, and passes.
+        compose.assumeRendered()
     }
 
     @Test
