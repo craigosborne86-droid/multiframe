@@ -160,9 +160,13 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSetReference(
     const int w = acc->width;
     parallelBands(acc->height, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
-            for (int x = 0; x < w; ++x) {
-                uint16_t v = sampleAt(base, rowStride, x, y);
-                size_t i = static_cast<size_t>(y) * w + x;
+            // One row pointer instead of recomputing the stride offset per
+            // pixel. The camera's rows are 16-bit and may be padded, so the
+            // pointer is stepped in bytes and read as pairs.
+            const uint8_t* row = base + static_cast<size_t>(y) * rowStride;
+            size_t i = static_cast<size_t>(y) * w;
+            for (int x = 0; x < w; ++x, ++i) {
+                const uint16_t v = static_cast<uint16_t>(row[x * 2] | (row[x * 2 + 1] << 8));
                 acc->reference[i] = v;
                 acc->sum[i] = static_cast<float>(v);
                 acc->weight[i] = 1.0f;
