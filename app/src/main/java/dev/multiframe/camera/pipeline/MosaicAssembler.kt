@@ -90,6 +90,15 @@ class MosaicAssembler(
     private var previousTransform: Homography? = null
 
     /**
+     * Proxies of placed tiles, kept so a new frame can be registered against
+     * every neighbour rather than only against the one before it.
+     *
+     * They are small -- a few hundred pixels square -- so a whole sweep's worth
+     * is a few megabytes, which is nothing beside the canvas.
+     */
+    private val placedProxies = ArrayList<Plane>()
+
+    /**
      * Coverage tracked on a coarse grid rather than per pixel. The question
      * being asked is "has the user swept here yet", which does not need
      * megapixel resolution and would be slow at it.
@@ -128,23 +137,39 @@ class MosaicAssembler(
                 (canvasHeight - scaledHeight) / 2.0,
             ).times(scaleTransform(tileScale))
         } else {
-            val fit = FeatureMatcher.register(previous, proxy)
-                ?: return OfferResult.Rejected(RejectionReason.UNREGISTRABLE)
-
-            // The fit maps previous-proxy points to this-proxy points. Placing
-            // this frame needs the opposite direction, and at full resolution.
             val proxyToTile = scaleTransform(proxyScale)
             val tileToProxy = proxyToTile.invert()
                 ?: return OfferResult.Rejected(RejectionReason.UNREGISTRABLE)
-            val inverse = fit.homography.invert()
-                ?: return OfferResult.Rejected(RejectionReason.UNREGISTRABLE)
 
-            transform = previousPlacement
-                .times(proxyToTile)
-                .times(inverse)
-                .times(tileToProxy)
-            inliers = fit.inliers.size
-            ratio = fit.inlierRatio
+            // Registered against every placed tile that overlaps, not only the
+            // one before it. A sweep gives each frame several independent
+            // measurements -- the tile beside it and the tile above both saw
+            // it -- and chaining uses one and discards the rest, which is how a
+            // long sweep drifts while every individual join looks perfect.
+            val predictions = ArrayList<Homography>()
+            var bestInliers = 0
+            var bestRatio = 0f
+
+            for (candidate in registrationCandidates()) {
+                val fit = FeatureMatcher.register(placedProxies[candidate], proxy) ?: continue
+                val inverse = fit.homography.invert() ?: continue
+                predictions.add(
+                    placements[candidate].transform
+                        .times(proxyToTile).times(inverse).times(tileToProxy)
+                )
+                if (fit.inliers.size > bestInliers) {
+                    bestInliers = fit.inliers.size
+                    bestRatio = fit.inlierRatio
+                }
+            }
+
+            if (predictions.isEmpty()) {
+                return OfferResult.Rejected(RejectionReason.UNREGISTRABLE)
+            }
+            transform = consensus(predictions)
+                ?: return OfferResult.Rejected(RejectionReason.UNREGISTRABLE)
+            inliers = bestInliers
+            ratio = bestRatio
         }
 
         if (!landsOnCanvas(transform)) {
@@ -176,7 +201,77 @@ class MosaicAssembler(
         placements.add(placement)
         previousProxy = proxy
         previousTransform = transform
+        placedProxies.add(proxy)
         return OfferResult.Placed(placement)
+    }
+
+    /**
+     * Which placed tiles are worth registering a new frame against.
+     *
+     * The most recent one always, since consecutive frames overlap most. Beyond
+     * that, whichever placed tiles are near enough to share ground -- which is
+     * where loop closures come from, and they are the measurements that pull a
+     * drifting sweep back.
+     *
+     * Capped, because registration is the expensive part and the nearest few
+     * neighbours carry almost all the information.
+     */
+    private fun registrationCandidates(): List<Int> {
+        if (placements.isEmpty()) return emptyList()
+        val newest = placements.size - 1
+        val reach = tileWidth * tileScale * NEIGHBOUR_REACH
+
+        val centre = placements[newest].transform
+            .apply(tileWidth / 2f, tileHeight / 2f)
+
+        val nearby = placements.indices
+            .filter { it != newest }
+            .map { index ->
+                val other = placements[index].transform
+                    .apply(tileWidth / 2f, tileHeight / 2f)
+                val dx = centre[0] - other[0]
+                val dy = centre[1] - other[1]
+                index to (dx * dx + dy * dy)
+            }
+            .filter { it.second < reach * reach }
+            .sortedBy { it.second }
+            .take(MAX_NEIGHBOURS - 1)
+            .map { it.first }
+
+        return listOf(newest) + nearby
+    }
+
+    /**
+     * Averages several predicted placements into one.
+     *
+     * The predictions' corner positions are averaged and a transform refitted
+     * from them, rather than the matrices being averaged directly: homographies
+     * do not average meaningfully element by element, but the points they
+     * predict do.
+     */
+    private fun consensus(predictions: List<Homography>): Homography? {
+        if (predictions.size == 1) return predictions.first()
+
+        val corners = listOf(
+            0f to 0f,
+            tileWidth.toFloat() to 0f,
+            0f to tileHeight.toFloat(),
+            tileWidth.toFloat() to tileHeight.toFloat(),
+        )
+        val matches = ArrayList<Match>(corners.size)
+        corners.forEach { (x, y) ->
+            var sumX = 0f
+            var sumY = 0f
+            var used = 0
+            for (prediction in predictions) {
+                val p = prediction.apply(x, y)
+                if (p[0].isNaN() || p[1].isNaN()) continue
+                sumX += p[0]; sumY += p[1]; used++
+            }
+            if (used > 0) matches.add(Match(x, y, sumX / used, sumY / used))
+        }
+        if (matches.size < 4) return predictions.first()
+        return Homography.fit(matches) ?: predictions.first()
     }
 
     /** Scales a transform between proxy and full-resolution coordinates. */
@@ -236,8 +331,22 @@ class MosaicAssembler(
 
     fun reset() {
         placements.clear()
+        placedProxies.clear()
         previousProxy = null
         previousTransform = null
         covered.fill(false)
+    }
+
+    private companion object {
+        /** How far away, in tile widths, a placed tile can still share ground. */
+        const val NEIGHBOUR_REACH = 1.4f
+
+        /**
+         * Tiles a new frame is registered against at most.
+         *
+         * Registration is the expensive part of accepting a frame, and the
+         * nearest few neighbours carry almost all the information.
+         */
+        const val MAX_NEIGHBOURS = 4
     }
 }

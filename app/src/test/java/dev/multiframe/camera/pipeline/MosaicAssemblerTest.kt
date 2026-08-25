@@ -226,6 +226,39 @@ class MosaicAssemblerTest {
     }
 
     @Test
+    fun `a raster sweep drifts less than a chain would`() {
+        // The reason a frame is registered against every overlapping neighbour
+        // rather than only the one before it. In a raster, the tile below the
+        // start of the second row has the tile above it as an independent
+        // measurement, and using it stops the row starting wherever the first
+        // row happened to end up.
+        val a = assembler()
+        val stepPx = 120
+
+        // First row left to right, second row underneath.
+        val offsets = buildList {
+            for (col in 0 until 4) add((100 + col * stepPx) to 100)
+            for (col in 3 downTo 0) add((100 + col * stepPx) to (100 + stepPx))
+        }
+        val placed = offsets.mapNotNull {
+            (a.offer(window(it.first, it.second), proxyScale) as? OfferResult.Placed)
+                ?.placement
+        }
+
+        assertThat(placed.size).isAtLeast(6)
+
+        // The tile directly below the first should sit one step down and none
+        // across, however far the row travelled in between.
+        val first = placed.first().transform.apply(0f, 0f)
+        val below = placed.last().transform.apply(0f, 0f)
+        println("row wrap: started (%.1f, %.1f), wrapped to (%.1f, %.1f)"
+            .format(first[0], first[1], below[0], below[1]))
+
+        assertThat(below[0]).isWithin(14f).of(first[0])
+        assertThat(below[1] - first[1]).isWithin(14f).of(stepPx.toFloat())
+    }
+
+    @Test
     fun `a proxy scale is applied to the placement`() {
         // Registration runs on downscaled frames; placements must be at full
         // resolution or the whole mosaic assembles at a fraction of its size.
