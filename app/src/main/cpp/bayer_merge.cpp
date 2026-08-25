@@ -580,40 +580,55 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     auto* dstBase = static_cast<uint8_t*>(pixels);
     const int stride = static_cast<int>(info.stride);
 
+    // One pass to normalise, then a second to demosaic.
+    //
+    // The demosaic reads thirteen neighbours per pixel. Doing the black-level
+    // subtraction, shading correction and white balance inside that read meant
+    // repeating the work thirteen times over, through a lambda that clamped
+    // both coordinates on every call -- for the interior, where nothing needs
+    // clamping. Normalising once into a float plane turns those thirteen calls
+    // into thirteen array reads. It costs one float per pixel, which is 50 MB
+    // at twelve megapixels and native memory rather than managed heap.
+    std::vector<float> plane(static_cast<size_t>(width) * height);
+    parallelBands(height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            const int rowParity = (y & 1) * 2;
+            const size_t rowBase = static_cast<size_t>(y) * width;
+            for (int x = 0; x < width; ++x) {
+                const int site = rowParity + (x & 1);
+                const int c = cfa[site];
+                float lin = (static_cast<float>(src[rowBase + x]) - black[site]) / range;
+                lin *= shadingGain(shadingPtr, shadingColumns, shadingRows,
+                                   x, y, width, height, site);
+                const float g = (c == 0) ? gains[0] : (c == 2) ? gains[3]
+                                                               : ((y & 1) == 0 ? gains[1] : gains[2]);
+                plane[rowBase + x] = std::max(lin, 0.0f) * g;
+            }
+        }
+    });
+
     parallelBands(height, [&](int y0, int y1) {
         float acc[3];
         int cnt[3];
         for (int y = y0; y < y1; ++y) {
             uint8_t* row = dstBase + static_cast<size_t>(y) * stride;
+            const bool interiorRow = (y >= 2 && y < height - 2);
             for (int x = 0; x < width; ++x) {
-                // White-balanced linear sample at an offset from this pixel.
-                auto sampleAt = [&](int dx, int dy) -> float {
-                    int sx = std::clamp(x + dx, 0, width - 1);
-                    int sy = std::clamp(y + dy, 0, height - 1);
-                    int c = cfa[(sy & 1) * 2 + (sx & 1)];
-                    float lin = (static_cast<float>(src[static_cast<size_t>(sy) * width + sx]) -
-                                 black[(sy & 1) * 2 + (sx & 1)]) / range;
-                    // Shading first: it is a property of the sensor and lens,
-                    // corrected before anything else looks at the value.
-                    lin *= shadingGain(shadingPtr, shadingColumns, shadingRows,
-                                       sx, sy, width, height, (sy & 1) * 2 + (sx & 1));
-                    float g = (c == 0) ? gains[0] : (c == 2) ? gains[3]
-                                                             : ((sy & 1) == 0 ? gains[1] : gains[2]);
-                    return std::max(lin, 0.0f) * g;
-                };
-
                 float r0, g0, b0;
 
-                if (x < 2 || y < 2 || x >= width - 2 || y >= height - 2) {
-                    // The 5x5 support does not exist in the two-pixel border.
+                if (!interiorRow || x < 2 || x >= width - 2) {
+                    // Border: no 5x5 support, so the simple gather, with the
+                    // bounds checks that only these pixels need.
                     acc[0] = acc[1] = acc[2] = 0.0f;
                     cnt[0] = cnt[1] = cnt[2] = 0;
                     for (int dy = -1; dy <= 1; ++dy) {
-                        if (y + dy < 0 || y + dy >= height) continue;
+                        const int sy = y + dy;
+                        if (sy < 0 || sy >= height) continue;
                         for (int dx = -1; dx <= 1; ++dx) {
-                            if (x + dx < 0 || x + dx >= width) continue;
-                            int c = cfa[((y + dy) & 1) * 2 + ((x + dx) & 1)];
-                            acc[c] += sampleAt(dx, dy);
+                            const int sx = x + dx;
+                            if (sx < 0 || sx >= width) continue;
+                            const int c = cfa[(sy & 1) * 2 + (sx & 1)];
+                            acc[c] += plane[static_cast<size_t>(sy) * width + sx];
                             cnt[c]++;
                         }
                     }
@@ -622,38 +637,41 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
                     b0 = cnt[2] ? acc[2] / cnt[2] : 0.0f;
                 } else {
                     // Gradient-corrected linear interpolation (Malvar, He and
-                    // Cutler). The measured sample at this site is kept exactly;
-                    // only the two missing colours are interpolated, with a
-                    // second-derivative term carrying the luminance gradient
-                    // across channels so the planes agree about edge position.
-                    // Mirrors Demosaic.kt, which is where the unit tests are.
-                    const float c0 = sampleAt(0, 0);
-                    const float nA = sampleAt(0, -1), sA = sampleAt(0, 1);
-                    const float eA = sampleAt(1, 0), wA = sampleAt(-1, 0);
-                    const float nn = sampleAt(0, -2), ss = sampleAt(0, 2);
-                    const float ee = sampleAt(2, 0), ww = sampleAt(-2, 0);
-                    const float diag = sampleAt(-1, -1) + sampleAt(1, -1) +
-                                       sampleAt(-1, 1) + sampleAt(1, 1);
+                    // Cutler). The measured sample at this site is kept
+                    // exactly; only the two missing colours are interpolated,
+                    // with a second-derivative term carrying the luminance
+                    // gradient across channels so the planes agree about edge
+                    // position. Mirrors Demosaic.kt, where the tests are.
+                    const float* p = plane.data() + static_cast<size_t>(y) * width + x;
+                    const int w1 = width;
+                    const int w2 = width * 2;
+
+                    const float c0 = p[0];
+                    const float nA = p[-w1], sA = p[w1];
+                    const float eA = p[1], wA = p[-1];
+                    const float nn = p[-w2], ss = p[w2];
+                    const float ee = p[2], ww = p[-2];
+                    const float diag = p[-w1 - 1] + p[-w1 + 1] + p[w1 - 1] + p[w1 + 1];
                     const float axis = nA + sA + eA + wA;
                     const float axis2 = nn + ss + ee + ww;
 
-                    int here = cfa[(y & 1) * 2 + (x & 1)];
+                    const int here = cfa[(y & 1) * 2 + (x & 1)];
                     if (here == 1) {
-                        bool redHorizontal = cfa[(y & 1) * 2 + ((x + 1) & 1)] == 0;
-                        float alongH = 5.0f * c0 + 4.0f * (wA + eA) - (ww + ee) -
-                                       diag + 0.5f * (nn + ss);
-                        float alongV = 5.0f * c0 + 4.0f * (nA + sA) - (nn + ss) -
-                                       diag + 0.5f * (ww + ee);
-                        r0 = (redHorizontal ? alongH : alongV) / 8.0f;
+                        const bool redHorizontal = cfa[(y & 1) * 2 + ((x + 1) & 1)] == 0;
+                        const float alongH = 5.0f * c0 + 4.0f * (wA + eA) - (ww + ee) -
+                                             diag + 0.5f * (nn + ss);
+                        const float alongV = 5.0f * c0 + 4.0f * (nA + sA) - (nn + ss) -
+                                             diag + 0.5f * (ww + ee);
+                        r0 = (redHorizontal ? alongH : alongV) * 0.125f;
                         g0 = c0;
-                        b0 = (redHorizontal ? alongV : alongH) / 8.0f;
+                        b0 = (redHorizontal ? alongV : alongH) * 0.125f;
                     } else if (here == 0) {
                         r0 = c0;
-                        g0 = (4.0f * c0 + 2.0f * axis - axis2) / 8.0f;
-                        b0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) / 8.0f;
+                        g0 = (4.0f * c0 + 2.0f * axis - axis2) * 0.125f;
+                        b0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) * 0.125f;
                     } else {
-                        r0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) / 8.0f;
-                        g0 = (4.0f * c0 + 2.0f * axis - axis2) / 8.0f;
+                        r0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) * 0.125f;
+                        g0 = (4.0f * c0 + 2.0f * axis - axis2) * 0.125f;
                         b0 = c0;
                     }
                     // The correction extrapolates and can overshoot past black.
@@ -671,12 +689,12 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
                 b *= tone.exposureGain;
                 renderLinear(r, g, b, tone);
 
-                uint8_t* p = row + static_cast<size_t>(x) * 4;
+                uint8_t* q = row + static_cast<size_t>(x) * 4;
                 // RGBA_8888 is byte order R,G,B,A in memory.
-                p[0] = toByte(renderDisplay(encodeSrgb(r), tone));
-                p[1] = toByte(renderDisplay(encodeSrgb(g), tone));
-                p[2] = toByte(renderDisplay(encodeSrgb(b), tone));
-                p[3] = 255;
+                q[0] = toByte(renderDisplay(encodeSrgb(r), tone));
+                q[1] = toByte(renderDisplay(encodeSrgb(g), tone));
+                q[2] = toByte(renderDisplay(encodeSrgb(b), tone));
+                q[3] = 255;
             }
         }
     });
