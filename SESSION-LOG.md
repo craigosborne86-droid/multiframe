@@ -9,8 +9,8 @@ Indigo demonstrates on iPhone; original code, name, icon and UI throughout.
 
 - Package: `dev.multiframe.camera` (final — cannot change after publication)
 - Target device for development: Pixel 9 Pro XL (`komodo`), Android 17 / API 37
-- ~18,800 lines across 84 Kotlin files and 6 native files
-- 255 JVM unit tests and 75 on-device tests (62 running, 13 awaiting an unlocked screen)
+- ~20,000 lines across 90 Kotlin files and 6 native files
+- 294 JVM unit tests and 79 on-device tests (66 running, 13 awaiting an unlocked screen)
 
 ---
 
@@ -640,6 +640,53 @@ Found by writing a test that *did* query, then confirmed by a two-line check
 proving even `Text("hello")` was absent. Every render path now calls
 `assumeRendered()`, so on a locked device the thirteen UI tests report as
 skipped rather than as passing.
+
+### Defective sensor sites, which the merge cannot touch
+
+Every sensor has sites that read wrong, and on a fifty-megapixel sensor there
+are hundreds. They are not random: a site is wrong the same way in every frame,
+which is exactly why burst merging does not help — averaging suppresses what
+varies, and a constant defect survives untouched. Cleaning up the surrounding
+noise only makes the dots more obvious. **The better the merge, the worse they
+look.**
+
+Comparison is against the four sites two pixels away, the nearest of the same
+colour, and a site is replaced only when it lies outside the range of *all four*
+by a margin. That deliberately leaves some defects: two defects two sites apart
+shield each other. It is the same property that lets a real two-pixel highlight
+survive, and one cannot be had without the other — taking a star out of an
+astrophotograph would be the worse failure.
+
+### Capture modes
+
+The machinery all existed; what was missing was a way to say what you are
+photographing, because the right answers are contradictory.
+
+**Night** takes every frame the ring has, allows a quarter-second exposure, and
+switches the highlight guard *off* — a dark scene has no highlights worth
+protecting, and pulling exposure would spend the shadow detail the mode exists
+to gather. 2.40 stops of recovery over a 933 ms burst.
+
+**Action** takes four frames, and that is the interesting decision. More frames
+is not simply better: the merge's robustness weighting rejects frames where the
+subject has moved, so extra frames contribute nothing while lengthening the
+window and making the rejection worse. 1.00 stop over 133 ms.
+
+**Auto** chooses between ordinary and night and *never* chooses action. Whether
+something is moving is not visible in a brightness histogram; guessing would be
+wrong as often as right and wrong in the expensive direction. Motion is
+something the user knows and the camera does not.
+
+### A thumbnail that does not read your photo library
+
+The obvious implementation asks MediaStore for the newest image in the app's
+folder. On device that returns nothing — an app only sees entries it owns, and
+ownership is lost on reinstall. Making it work would mean holding
+`READ_MEDIA_IMAGES`, permission to read the user's entire photo library, to show
+a thumbnail of a picture the app had just taken itself.
+
+Recording the URI at the moment of writing needs no permission, always shows the
+right picture, and costs one string.
 
 ---
 
