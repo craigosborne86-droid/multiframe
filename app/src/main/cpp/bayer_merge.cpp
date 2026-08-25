@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -66,20 +67,54 @@ inline uint16_t sampleAt(const uint8_t* base, int rowStrideBytes, int x, int y) 
     return static_cast<uint16_t>(p[0] | (p[1] << 8));
 }
 
+/**
+ * Runs [body] over horizontal bands of the image, in parallel.
+ *
+ * Work is claimed dynamically rather than divided up front, which matters on a
+ * phone. Android CPUs are heterogeneous: a Pixel has a few fast cores and
+ * several slow ones, and a fast core can be several times the speed of a slow
+ * one. Splitting the image into one equal band per thread means the pass cannot
+ * finish until the slowest core has ground through its share, while the fast
+ * cores sit idle having finished theirs -- so the whole image runs at the speed
+ * of the slowest core, whatever the others could have done.
+ *
+ * Cutting the image into far more bands than there are threads and letting each
+ * thread take the next one as it becomes free lets the fast cores simply do
+ * more of them. The bands still have to be large enough that claiming one costs
+ * nothing next to doing it.
+ */
 void parallelBands(int height, const std::function<void(int, int)>& body) {
-    unsigned hw = std::thread::hardware_concurrency();
+    const unsigned hw = std::thread::hardware_concurrency();
     int threads = static_cast<int>(std::max(2u, hw));
     threads = std::min(threads, std::max(1, height));
-    int band = (height + threads - 1) / threads;
 
+    // Several bands per thread, so a fast core can take more of them, but not
+    // so many that the atomic claim is a measurable cost.
+    constexpr int kBandsPerThread = 6;
+    constexpr int kMinBandRows = 8;
+    int bandRows = std::max(kMinBandRows,
+                            (height + threads * kBandsPerThread - 1) /
+                                (threads * kBandsPerThread));
+    const int bands = (height + bandRows - 1) / bandRows;
+
+    std::atomic<int> nextBand{0};
     std::vector<std::thread> pool;
-    pool.reserve(threads);
-    for (int t = 0; t < threads; ++t) {
-        int start = t * band;
-        int end = std::min(start + band, height);
-        if (start >= end) break;
-        pool.emplace_back([&body, start, end] { body(start, end); });
-    }
+    pool.reserve(static_cast<size_t>(threads));
+
+    auto worker = [&]() {
+        for (;;) {
+            const int index = nextBand.fetch_add(1, std::memory_order_relaxed);
+            if (index >= bands) return;
+            const int start = index * bandRows;
+            const int end = std::min(start + bandRows, height);
+            if (start >= end) return;
+            body(start, end);
+        }
+    };
+
+    for (int t = 1; t < threads; ++t) pool.emplace_back(worker);
+    // The calling thread takes bands too rather than waiting on the others.
+    worker();
     for (auto& th : pool) th.join();
 }
 
@@ -244,12 +279,18 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
     const float tileW = static_cast<float>(w / 2) / tilesX;
     const float tileH = static_cast<float>(h / 2) / tilesY;
 
-    std::vector<double> contrib(64, 0.0);
-    std::vector<long long> counts(64, 0);
-    std::atomic<int> slot{0};
+    // Accumulated under a lock at the end of each band rather than into a
+    // per-thread slot. The slot scheme indexed a fixed array of 64 by an
+    // incrementing counter, which was safe only while each thread ran exactly
+    // one band; now that bands are claimed dynamically a thread runs several,
+    // and a sweep of more than 64 bands would have two of them sharing a slot
+    // and racing. A few dozen lock acquisitions per frame cost nothing beside
+    // the twelve million pixels they follow.
+    double totalContrib = 0.0;
+    long long totalCount = 0;
+    std::mutex totals;
 
     parallelBands(h, [&](int y0, int y1) {
-        int me = slot.fetch_add(1) % 64;
         double localContrib = 0.0;
         long long localCount = 0;
 
@@ -278,14 +319,13 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                 ++localCount;
             }
         }
-        contrib[me] += localContrib;
-        counts[me] += localCount;
+        std::lock_guard<std::mutex> guard(totals);
+        totalContrib += localContrib;
+        totalCount += localCount;
     });
 
-    for (int i = 0; i < 64; ++i) {
-        acc->contributionSum += contrib[i];
-        acc->contributionCount += counts[i];
-    }
+    acc->contributionSum += totalContrib;
+    acc->contributionCount += totalCount;
     acc->merged++;
 }
 
