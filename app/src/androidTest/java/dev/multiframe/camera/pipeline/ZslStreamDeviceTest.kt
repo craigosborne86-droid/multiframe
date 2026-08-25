@@ -254,6 +254,46 @@ class ZslStreamDeviceTest {
         assertThat(analysis.highlightLevel).isGreaterThan(0f)
     }
 
+    /**
+     * The whole shutter, through to files on disk.
+     *
+     * The last untested link. Everything from the ring to the merge was
+     * verified above; this runs the path a user's press actually takes,
+     * including writing a DNG and a JPEG through MediaStore.
+     */
+    @Test
+    fun pressingTheShutterWritesADngAndAJpeg() {
+        val s = openStream() ?: return
+        stream = s
+        assertThat(waitForFrames(s, 12)).isTrue()
+
+        val result = runBlocking {
+            ZslCapture.captureAndMerge(
+                context = context,
+                stream = s,
+                frameCount = 6,
+                rotationDegrees = 0,
+            )
+        }
+
+        Log.i(
+            TAG,
+            "shutter: ${result.message} | handover ${result.handoverMicros}us, " +
+                "span ${result.burstSpanMillis}ms, merge ${result.mergeMillis}ms, " +
+                "develop ${result.developMillis}ms, write ${result.writeMillis}ms",
+        )
+        Log.i(TAG, "stream health after: ${result.streamStats}")
+
+        assertThat(result.framesCaptured).isAtLeast(4)
+        // The claim the whole architecture is for: the press itself is free.
+        assertThat(result.handoverMicros).isLessThan(10_000)
+        // Both outputs come from the one merged frame, so neither may be missing.
+        assertThat(result.savedDng).isNotNull()
+        assertThat(result.savedJpeg).isNotNull()
+        assertThat(result.stats).isNotNull()
+        assertThat(result.stats!!.framesMerged).isAtLeast(4)
+    }
+
     @Test
     fun theStreamShutsDownCleanly() {
         val s = openStream() ?: return
