@@ -176,6 +176,89 @@ class DevelopParityTest {
         assertThat(worst).isAtMost(1)
     }
 
+    /**
+     * The same accumulation, over displacements that differ from tile to tile.
+     *
+     * The test above hands the burst a single shift, which every tile shares.
+     * That leaves the run structure of the native loop untested in the one way
+     * it can go wrong: it walks a row as a sequence of runs of constant tile
+     * column, and a boundary drawn one pixel out would take a pixel's
+     * displacement from its neighbour. With one displacement across the image
+     * that mistake is invisible, because the neighbour's is the same.
+     *
+     * So both implementations are handed the same field, made rather than
+     * searched for. It includes shifts that push a run off each edge, and one
+     * tile displaced clean out of the frame -- displacements no aligner would
+     * return, which is the point: this compares the accumulation, not the
+     * search.
+     */
+    @Test
+    fun nativeAndKotlinMergeAgreeOnAVaryingField() {
+        val w = 320
+        val h = 240
+        val reference = mergeScene(w, h, 11)
+        // Independently noisy rather than a copy, so the weighting is exercised
+        // in both directions instead of every pixel landing inside tolerance.
+        val alternate = mergeScene(w, h, 23)
+
+        val native = NativeMerge.create(w, h, profile)
+        assertThat(native).isNotNull()
+        val tilesX = maxOf(1, native!!.proxyWidth / 32)
+        val tilesY = maxOf(1, native.proxyHeight / 32)
+        val dx = IntArray(tilesX * tilesY)
+        val dy = IntArray(tilesX * tilesY)
+        for (ty in 0 until tilesY) {
+            for (tx in 0 until tilesX) {
+                val i = ty * tilesX + tx
+                dx[i] = ((tx * 2 + ty) % 5) - 2
+                dy[i] = ((tx + ty * 2) % 5) - 2
+            }
+        }
+        // One tile that contributes nothing at all, which is the whole-run
+        // rejection rather than the per-pixel one.
+        dy[0] = h
+        val field = AlignmentField(tilesX, tilesY, dx, dy)
+
+        val kotlinMerger = BayerAccumulator(w, h, profile)
+        kotlinMerger.setReference(reference)
+        kotlinMerger.add(alternate, field)
+        val (kotlinFrame, kotlinStats) = kotlinMerger.finish()
+
+        val stride = w * 2
+        native.setReference(directBufferOf(reference), stride)
+        native.addFrame(directBufferOf(alternate), stride, field)
+        val (mergedBuffer, nativeStats) = native.finish()
+
+        val nativeData = ShortArray(w * h)
+        mergedBuffer.rewind()
+        mergedBuffer.asShortBuffer().get(nativeData)
+
+        var worst = 0
+        var differing = 0
+        for (i in nativeData.indices) {
+            val delta = abs(
+                (nativeData[i].toInt() and 0xFFFF) - (kotlinFrame.data[i].toInt() and 0xFFFF),
+            )
+            if (delta != 0) differing++
+            if (delta > worst) worst = delta
+        }
+        Log.i(
+            TAG,
+            "varying-field merge parity: worst $worst, $differing of ${nativeData.size} " +
+                "differing; contribution native %.4f vs kotlin %.4f".format(
+                    nativeStats.meanContribution, kotlinStats.meanContribution,
+                ),
+        )
+
+        native.close()
+        // The mean contribution divides one running total by another, so it
+        // only agrees if the same pixels were skipped as well as the same
+        // arithmetic done on the ones that were not.
+        assertThat(nativeStats.meanContribution)
+            .isWithin(1e-4f).of(kotlinStats.meanContribution)
+        assertThat(worst).isAtMost(1)
+    }
+
     @Test
     fun nativeAndKotlinDevelopAgree() {
         assertThat(NativeMerge.isAvailable()).isTrue()

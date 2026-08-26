@@ -69,15 +69,27 @@ class BayerAccumulator(
 
     /** Aligns [frame] onto the reference and merges it. */
     fun add(frame: BayerFrame) {
-        val ref = reference ?: error("setReference first")
+        val pyramid = refPyramid ?: error("setReference first")
         require(frame.width == width && frame.height == height)
 
-        val field = Aligner.align(
-            refPyramid!!,
-            Aligner.buildPyramid(lumaProxy(frame)),
-            tilesX,
-            tilesY,
+        add(
+            frame,
+            Aligner.align(pyramid, Aligner.buildPyramid(lumaProxy(frame)), tilesX, tilesY),
         )
+    }
+
+    /**
+     * Merges [frame] against an alignment already found.
+     *
+     * The search and the accumulation are separable, and the native side has
+     * always taken them apart -- `nAddFrame` is handed a field. Splitting this
+     * one the same way lets a test hand both implementations the same
+     * displacements, including displacements no aligner would return, which is
+     * the only way to compare the accumulation rather than the search.
+     */
+    fun add(frame: BayerFrame, field: AlignmentField) {
+        val ref = reference ?: error("setReference first")
+        require(frame.width == width && frame.height == height)
 
         if (noiseVar == null) noiseVar = estimateNoise(ref, frame, field)
         val nv = noiseVar!!
