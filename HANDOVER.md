@@ -6,120 +6,137 @@ holds the reasoning behind everything below.
 
 ## Where things stand
 
-Everything builds. **332 unit tests pass**, and **99 device tests** run on a
+Everything builds. **332 unit tests pass**, and **102 device tests** run on a
 Pixel 9 Pro XL on Android 17.
 
 Every row of [SUPERRES.md](SUPERRES.md) is built. Phases 6, 7 and 8 are closed
 with measurements on the phone.
 
-Three things landed this session, each measured on real captures against the
-build immediately before it:
+This session split the develop timer and acted on what it showed:
 
-- the merge accumulation walks tile runs rather than pixels — about 28% off
-- and does four pixels at a time in NEON — about another 17%
-- the JPEG encode runs in strips across every core — about 240 ms to 34-57 ms
-
-A fourth was built, measured, found to do nothing, and reverted: interleaving
-the merge's two accumulation planes. Do not repeat it; the log says why.
+- **the develop is five stages, four of which had never been timed.** Naming
+  them found that the demosaic is 130 ms of a 296 ms native develop, not most
+  of it — and that **capture sharpening was 93 ms**, a third of the native
+  develop and the second largest item in a whole capture, reported nowhere
+- **sharpening now writes in place and runs four pixels at a time in NEON**, for
+  85-103 ms down to 54-65. Bit-identical: the parity test still reports worst
+  0/255 against the Kotlin reference
+- two harnesses added, `SharpenSpeedDeviceTest` and `DevelopSpeedDeviceTest`,
+  because the capture path could not resolve the change (see below)
 
 `test-photos`: instrumentation runs write real captures into
-`/sdcard/DCIM/Multiframe/`, and about 45 of them accumulated. They are the
+`/sdcard/DCIM/Multiframe/`, and roughly 60 have accumulated. They are the
 user's to delete.
 
 ## How this repo works
 
-Five rules, all of them earned rather than assumed, and worth keeping:
+Six rules, all of them earned rather than assumed, and worth keeping:
 
 - **Every C++ stage is pinned to a Kotlin reference by a parity test.** Develop,
   sharpening, shading, alignment, rotation and the merge. The Kotlin is the
   reference implementation; the native one is held to it.
 - **A speed claim needs non-overlapping ranges, not a better mean.** This log
   has withdrawn claims that sat inside the device's run-to-run spread.
-- **A null result needs a harness that could have seen the effect.** This is the
-  newest rule and was learned the expensive way: nine samples across two
-  installs reported the run-hoisting change as a 3% nothing. Twenty-five samples
-  across four found 21%, and real captures found 28%. Before reporting that
-  something changed nothing, say what the measurement could resolve.
+- **That rule is also a statement about the harness.** The sharpening change was
+  first measured through real captures, correctly, and the pooled ranges still
+  overlapped — a capture runs the camera, the merge, a DNG writer and a
+  MediaStore publish over the same cores. Isolating the pass separated them. If
+  the ranges overlap, ask what the instrument can see before concluding
+  anything.
+- **A null result needs a harness that could have seen the effect**, and a
+  parity test needs a fixture that could have shown the difference. The develop
+  parity test now renders each width a second time with sharpening off and
+  asserts the two differ, so it cannot pass by sharpening nothing.
 - **No timing is ever taken from the emulator.** It settles framework behaviour,
   never performance.
-- **Third-party code is a last resort, and there is now exactly one piece of
-  it.** libjpeg-turbo is vendored under `cpp/third_party/`, because the NDK
-  ships no JPEG encoder and `Bitmap.compress` offers no handle on the one it
-  wraps. It cannot be pinned to a Kotlin reference like everything else here, so
-  it is pinned to the framework encoder's output instead.
+- **Third-party code is a last resort, and there is exactly one piece of it.**
+  libjpeg-turbo is vendored under `cpp/third_party/`, pinned to the framework
+  encoder's output rather than to a Kotlin reference, because it cannot be.
 - **Negative results are recorded and reverted**, not kept on faith. Four
   experiments have been backed out this way: a lower-priority DNG writer thread,
   disabling filtering on the rotation, aligning natively inside the merge
   benchmark, and interleaving the merge's two accumulation planes.
 
-A recurring lesson, hit four times now: a single reported figure often bundles
+A recurring lesson, hit five times now: a single reported figure often bundles
 two very different things. Splitting the timer before optimising found that
-alignment was 83% of the "merge", and that the JPEG encode — not the demosaic —
-is the largest item inside "develop".
+alignment was 83% of the "merge", that the JPEG encode — not the demosaic — was
+the largest item inside "develop", and this session that sharpening was a third
+of what was left.
 
 ## Next step
 
-**The native develop, at around 290-330 ms, is now the largest single item in a
-capture.** The merge accumulation is about 26 ms a frame, and the JPEG encode is
-34-57 ms since it started using every core. `develop breakdown` in logcat splits
-it; split it further before optimising, which is advice this log has had to take
-four times.
+**Take a rested capture reading first.** The phone degraded during this session
+and never recovered: a run that measured 496-628 ms of develop in the morning
+measured 866-912 ms at the end, on every stage including the JPEG encode and
+the MediaStore publish, which nothing touched. So the post-sharpening figure for
+a whole capture has not been measured on a healthy phone. It should be about
+260 ms of native develop, but that is arithmetic, not a measurement.
 
-Do not start by assuming the demosaic is the cost. That assumption has been
-wrong once already here — it was the JPEG encode that time.
+**Then the render, at 199 ms on a rested phone, is the largest item.** It splits:
 
-If you come back to `nAddFrame`, two things are already settled:
+    black 15ms, hotpixels 14ms, shading 38ms, demosaic+tone 130ms
 
-- **Interleaving `sum` and `weight` into one plane of pairs has been tried and
-  reverted.** Do not repeat it. It is arithmetically identical and makes no
-  measurable difference, because interleaving does nothing for sequential
-  access: sixteen consecutive pixels touch two cache lines either way.
-  Array-of-structs wins when access is random.
-- **The noise lookup is why the compiler never vectorised this loop**, and it is
-  still scalar inside the NEON path — `noise[refRaw]` is a data-dependent load
-  and NEON has no gather. Folding it into a sixteen-entry `vqtbl4q_u8` table
-  lookup is possible and would need the bin computed in vector form, which has
-  to reproduce `binOf` exactly or the parity test will and should fail.
+- **`demosaic+tone` is still a bundle**, and this log has been wrong five times
+  about which half of a bundle held the time. Split it before optimising. It
+  cannot be done with a timer — it is one fused loop — so it needs an ablation
+  build, the way the sharpening before-and-after was built: keep the demosaic
+  and replace the tone stage with a direct byte write, alternate against the
+  shipping build, take the difference. Keep the demosaic result used or the
+  compiler will delete it.
+- **`shading` at 38 ms is the cheapest real win.** `shadingGain` runs per pixel
+  and does two float divides, four clamps and four gathers into the map, for a
+  grid whose cells are 240 pixels wide. The x-dependent parts (`fx`, `x0`, `tx`)
+  depend only on x and could be computed once for the whole image; within a
+  cell, the four corner values are loop-invariant. Both are exact
+  rearrangements — no reassociation — so parity survives.
+- **`black` and `hotpixels` are two passes over the same 50 MB plane** with the
+  hot-pixel scan between them only because the correction has to happen in the
+  sensor's own domain, before shading. Fusing hot pixels with shading is
+  possible with a two-row lag, but band boundaries make it fiddly and it is
+  worth maybe 15-20 ms.
 
-`DevelopParityTest.nativeAndKotlinMergeAgree` and
-`nativeAndKotlinMergeAgreeOnAVaryingField` are the safety net and both pass, so
-a change that breaks the arithmetic will be caught. The second is the one that
-matters for anything touching the run structure or the vector width: it hands
-both implementations the same tile-varying displacements, including a tile
-displaced out of frame, and runs at three widths so the tile runs land off the
-multiple of four and the vector loop's one-, two- and three-pixel remainders are
-all exercised. Add a width there before widening the vector body further.
+Do not start by assuming the demosaic is the cost. That assumption has now been
+wrong twice here — the JPEG encode the first time, sharpening the second.
 
-**Before re-measuring, give the phone a rest.** See below.
+If you come back to `nAddFrame`, two things are settled: **interleaving `sum`
+and `weight` has been tried and reverted** (see the log), and **the noise lookup
+is why the compiler never vectorised the loop** — `noise[refRaw]` is a
+data-dependent load and NEON has no gather. Folding it into a `vqtbl4q_u8`
+lookup would need the bin computed in vector form, reproducing `binOf` exactly.
 
-## How to measure the merge
+## How to measure
 
-`MergeSpeedDeviceTest` times the accumulation over a burst, with an unchanged
-pass timed beside it as a control. Some hard-won notes:
+Three instruments, in decreasing order of authority:
+
+- **The real capture path is the only authority on what a photograph costs.**
+  Run `ZslStreamDeviceTest#repeatedCapturesTakeAConsistentTime` and read
+  `develop breakdown`, `develop stages`, `develop:` and `sharpen:` out of
+  logcat. That is real camera frames.
+- **`SharpenSpeedDeviceTest` and `DevelopSpeedDeviceTest` isolate a stage**, and
+  are comparison instruments only. The develop one **reads about twice what a
+  capture pays and nobody knows why** — clock ramp, exposure and foreground
+  scheduling were each tried as explanations and each failed. It is repeatable
+  to about 2% (medians of 406, 414, 415 across three runs), which is what makes
+  it useful for before-and-after. Never quote it as what a capture costs.
+- `MergeSpeedDeviceTest` times the accumulation, and aligns on the JVM where a
+  capture aligns natively, so it reads high. Switching it to `alignNative` is
+  still the obvious improvement and still has not been done.
+
+Hard-won notes that still apply:
 
 - **Alternate the two builds several times, not once.** Push both APKs to
-  `/data/local/tmp` and `adb shell pm install -r` from there: twenty seconds
-  against three minutes for a wireless install, which is what makes four
-  alternations affordable.
-- **The device degrades over an afternoon.** Free memory fell to 1.2 GB with
-  swap nearly gone and the battery reached 39 C, and the identical binary that
-  had measured a 254 ms burst measured 466. Watch `dumpsys battery` and
-  `/proc/meminfo` alongside the numbers, and give it time to recover — it does.
-- **Never subtract a figure in the log from one taken in a different run.** The
-  same scalar binary measured 50-59 ms a frame in the morning and 31.7-33.3 ms
-  in the afternoon. Only the alternated comparison inside a single run means
-  anything.
+  `/data/local/tmp` and `adb shell pm install -r` from there: about twenty
+  seconds against three minutes for a wireless install, which is what makes four
+  alternations affordable. To build a before-APK that shares a new harness,
+  splice the old implementation back into the current tree, build, save the APK,
+  then restore — that is how this session's sharpening comparison was made.
+- **The device degrades over an afternoon, and a short rest does not fix it.**
+  Watch `dumpsys battery` and `/proc/meminfo`, and know that both can look fine
+  while everything runs at half speed.
+- **Never subtract a figure in the log from one taken in a different run.** Only
+  an alternated comparison inside a single session means anything.
 - **Wireless adb drops writes** under this load: installs fail with "device
-  offline" and then succeed on a retry. Loop the install two or three times
-  rather than trusting one.
-- **The real capture path is better evidence than the harness**, and it is
-  cheap: run `ZslStreamDeviceTest` and read `merge breakdown ... accumulate` out
-  of logcat. That is real camera frames, and it is the same quantity every
-  accumulate figure in the log has been.
-- `MergeSpeedDeviceTest` aligns on the JVM where a capture aligns natively, so
-  it reads high — 44 MB of garbage a burst, collected on the cores doing the
-  accumulating. Switching it to `alignNative` is the obvious improvement and
-  could not be evaluated on a phone this tired.
+  offline" and then succeed on a retry. Loop the install two or three times.
 
 ## Environment
 
@@ -147,7 +164,7 @@ pass timed beside it as a control. Some hard-won notes:
   whichever name ships. [NAMES.md](NAMES.md) recommends *Coadd* over the working
   name and explains why.
 
-## Two open decisions
+## Three open decisions
 
 - **The rotation.** 69 ms after being tiled. It could go to zero by not rotating
   pixels at all and writing an EXIF orientation tag instead — but that changes

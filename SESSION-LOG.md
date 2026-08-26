@@ -1811,6 +1811,183 @@ before optimising rather than after.
 
 99 device tests pass, 332 unit tests pass.
 
+## The develop, split into what it is actually made of
+
+The handover said the native develop was the largest item left in a capture, at
+290-330 ms, and said to split it before optimising. That advice had been earned
+four times over and was worth taking a fifth.
+
+"Native develop" was five stages behind one number, and four of them had never
+been timed at all. Named, on the phone, on real captures:
+
+    develop breakdown: setup 2ms, native 296ms, rotate 0ms, encode+save 140ms
+      autoexposure 3ms, bitmap 1ms, render 199ms, defringe 0ms, sharpen 93ms
+        black 15ms, hotpixels 14ms, shading 38ms, demosaic+tone 130ms
+        luma 15ms, copies 11ms, sharpen 65ms
+
+Two things fell out of that, and the second one is the reason the rule exists.
+
+**The demosaic is not most of the develop.** It is 130 ms of 296, sharing that
+figure with a black-level pass, a hot-pixel scan, a shading pass and a
+sharpening pass. Starting from the assumption that the demosaic was the cost --
+which is exactly what the handover warned against -- would have aimed the work
+at 44% of the problem.
+
+**And capture sharpening was 93 ms**, a third of the native develop and the
+second largest item in a whole capture. Nothing had ever reported it. It lives
+behind its own JNI call, inside a figure named after something else, and it had
+been there since it was written.
+
+### Sharpening, in place and four pixels at a time
+
+Two things were wrong with it, and neither was the algorithm.
+
+**It went through a full copy of the image.** Fifty megabytes out and fifty
+back, on the stated grounds that a pixel's neighbours must be the original
+values rather than already-sharpened ones. That reason is correct and the copy
+was still unnecessary: every neighbour the loop reads comes from the luminance
+plane, which is computed once from the untouched image and never written again.
+The only pixel whose colour is read is the one being written. The copy was
+guarding a hazard that cannot occur -- and timing it first, before deleting it,
+is what turned "this looks unnecessary" into eleven milliseconds a capture.
+
+**And the nine-tap box blur was scalar.** It is now four pixels at a time in
+NEON, and bit-identical rather than close. That distinction mattered more than
+usual here. The obvious way to vectorise a 3x3 box sum is to add the three rows
+and then reduce, which changes the order the nine floats are added in; float
+addition is not associative, so it would have produced a different picture from
+the Kotlin reference the parity test pins this to. Adding them lane-wise instead
+means lane j performs exactly the sequence the scalar loop performs for x+j.
+`vcvtaq_s32_f32` rounds ties away from zero, which is what `std::lround` does,
+so the rounding agrees too, and the parity test still reports **worst 0/255**.
+
+    isolated harness, medians of nine rounds, four alternations
+    before  103, 88, 93, 85 ms
+    after    65, 54, 58, 57 ms
+
+Those ranges do not overlap, which is the standard this log holds a speed claim
+to. Getting them to not overlap took a second attempt at measuring.
+
+### The first measurement was not good enough, and said so
+
+The first attempt measured the sharpen stage through real captures, alternating
+the two builds four times -- the method that has worked for everything else
+here. It produced before-medians of 144-175 ms against after-medians of 77-106,
+which is the right answer, but the pooled ranges overlapped: 96-218 against
+55-136. A capture runs the camera, the merge, a DNG writer thread and a
+MediaStore publish across the same cores, and its sharpen figure swings by a
+factor of two between neighbouring shots.
+
+`SharpenSpeedDeviceTest` runs the pass alone on a fixed picture instead, nine
+rounds a run, and the ranges separate. The rule that a speed claim needs
+non-overlapping ranges is not only a test to apply at the end; it is also a
+statement about what the harness has to be able to see.
+
+Two details of that harness are worth keeping. It restores the image from a
+pristine copy between rounds, outside the clock, because sharpening now writes
+over the pixels it reads and every round would otherwise sharpen an image the
+last round had already sharpened. And the scene is detail without noise -- the
+same one the JPEG speed test uses, for the same reason. Sharpening skips every
+pixel below its threshold, so a flat scene would skip nearly everything and a
+noisy one would sharpen everything, and neither is what a merged capture looks
+like.
+
+### The parity test could not have caught a mistake in the tail
+
+`DevelopParityTest` compared native against Kotlin at one size, 64x48. The
+vector loop walks four pixels at a time from x=1 and finishes the remainder one
+at a time, and at width 64 that remainder is always two. A mistake in the
+one-pixel or three-pixel tail would have passed.
+
+It now runs at four widths. Two of them are odd, which no sensor is: an even
+width can only ever leave a remainder of nought or two, so the odd tails are
+unreachable from a real frame size and would have gone untested for as long as
+the fixtures looked like sensors.
+
+The same test now also renders each width a second time with sharpening off and
+asserts the two differ. Without that it would pass just as happily on a fixture
+too flat to sharpen -- silent about the very loop it exists to cover. It reports
+328-388 pixels moved at each width, so it has teeth.
+
+### A harness for the render, and what is wrong with it
+
+The render is what is left: 199 ms of a capture. `DevelopSpeedDeviceTest` times
+it alone, and three consecutive runs of one binary gave medians of 406, 414 and
+415 ms, so alternated between builds it resolves a few per cent.
+
+**It also reads about twice what a capture pays, and I could not find out why.**
+Every stage is inflated -- black 55 against 15, hot pixels 49 against 14,
+shading 82 against 38, demosaic and tone 200 against 130 -- including the two
+whose work does not depend on the picture at all, so it is not the scene. Three
+explanations were tried and none of them held:
+
+  * **Clock ramp.** Running the rounds back to back rather than spaced moved the
+    median from 433 ms to 364. Part of it, then, but not most of it -- and
+    back-to-back rounds drift upward within a single run as the phone warms,
+    from 227 ms to 380 across ten. The gap is kept because it is what makes the
+    instrument repeatable.
+  * **Exposure.** The first version of the harness fixed the gain at 2.6, which
+    on that scene put nearly every pixel over the tone curve's knee and into its
+    exponential shoulder. Letting auto-exposure choose showed how wrong that
+    was -- it picks 0.62, a factor of four lower -- and the demosaic-and-tone
+    figure did not move when it was corrected. A satisfying theory, measured,
+    and wrong.
+  * **Scheduling.** A capture holds a camera session and a compute test does
+    not, so the obvious guess was that the test is treated as background work.
+    Running it with the app's own Activity in the foreground made it slower, not
+    faster: the preview then competes for the same cores.
+
+So it goes in as a comparison instrument and is labelled as one, in the same way
+`MergeSpeedDeviceTest` is. The capture path stays the authority on what a
+photograph actually costs.
+
+One thing that theory did catch: the harness originally passed no shading map,
+and a null map takes a shortcut in which every gain is 1 and the interpolation
+never runs. The shading stage read 11-34 ms against the 38-45 a capture logs --
+the harness measuring a branch no capture takes.
+
+### The phone degraded again, and the test said so
+
+After forty minutes of sustained eight-core float work, a final capture run
+reported develops of 1018, 1474 and 1252 ms where the same binary had measured
+496-628 an hour earlier, and `repeatedCapturesTakeAConsistentTime` failed on its
+own spread assertion. That is the test doing its job.
+
+Ten minutes later it passed again at 900, 912 and 866 ms -- still roughly twice
+the morning's figures, on every stage including the JPEG encode and the
+MediaStore publish, neither of which anything touched today. The battery read
+37.7 C throughout, which is not hot. Whatever the state is, it is device-wide,
+it outlasts a short rest, and it is not visible in the two things this log knows
+to watch.
+
+So: **never subtract a figure taken in one run from one taken in another.** This
+log has said that before and it keeps earning its place.
+
+### Where the time is now, and what has not been measured
+
+Measured on a rested phone, before the sharpening change:
+
+    develop breakdown: setup 2ms, native 296ms, rotate 0ms, encode+save 140ms
+      autoexposure 3ms, bitmap 1ms, render 199ms, defringe 0ms, sharpen 93ms
+        black 15ms, hotpixels 14ms, shading 38ms, demosaic+tone 130ms
+
+The sharpening change is measured two ways, both alternated: 85-103 ms down to
+54-65 in the isolated harness, and 144-175 down to 77-106 through real captures.
+So the native develop should now be around 260 ms and the render is clearly the
+largest item in it.
+
+**"Around 260" is arithmetic, not a measurement.** The phone degraded before a
+rested capture run could be taken of the shipped build, and this log does not
+promote a subtraction across runs into a figure. Take that reading first thing
+next session, on a phone that has rested, before believing any number here about
+the whole.
+
+What is not in doubt is the shape: the render is the largest item, and inside it
+demosaic-and-tone is the largest stage -- and that is still a bundle of two
+things, which is the fifth time this log has arrived at that sentence.
+
+102 device tests pass, 332 unit tests pass.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
