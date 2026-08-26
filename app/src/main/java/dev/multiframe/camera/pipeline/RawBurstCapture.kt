@@ -188,10 +188,35 @@ object RawBurstCapture {
         // from that same data.
         val t2 = System.currentTimeMillis()
         val dngName = "MF_${stamp}_${tag}_${captured}f.dng"
+
         // Written straight from the native buffer: no Java copy for the DNG.
-        val dngOk = captureResult != null &&
-            writeDng(context, mergedBuffer, width, height, characteristics, captureResult, dngName)
-        val writeMillis = System.currentTimeMillis() - t2
+        //
+        // And written *while* the JPEG is being developed and encoded, because
+        // the two have nothing to say to each other: both only read the merged
+        // buffer, and the native develop reads it through its base address
+        // rather than the buffer's position. Measured sequentially they were
+        // about 300 ms of DNG followed by 600 ms of develop, and the encode
+        // alone -- 240 ms of libjpeg on twelve and a half megapixels -- was the
+        // largest single item in a capture.
+        //
+        // The write gets its own duplicate of the buffer. `writeByteBuffer`
+        // advances the position it is given and the Kotlin develop fallback
+        // rewinds the same buffer, so sharing one would have them fighting over
+        // a cursor even though neither changes a pixel.
+        var dngUri: android.net.Uri? = null
+        var dngMillis = 0L
+        val dngWriter = if (captureResult != null) {
+            Thread {
+                val started = System.currentTimeMillis()
+                dngUri = writeDng(
+                    context, mergedBuffer.duplicate(), width, height,
+                    characteristics, captureResult, dngName,
+                )
+                dngMillis = System.currentTimeMillis() - started
+            }.apply { name = "dng-write"; start() }
+        } else {
+            null
+        }
 
         val t3 = System.currentTimeMillis()
         // From the sensor's own characterisation rather than the ISP's
@@ -237,6 +262,25 @@ object RawBurstCapture {
         bitmap.recycle()
         val encodeMillis = System.currentTimeMillis() - tEncode
         val developMillis = System.currentTimeMillis() - t3
+
+        // Nothing may be reported until the DNG is actually on disk.
+        dngWriter?.join()
+        val dngOk = dngUri != null
+        val writeMillis = dngMillis
+        val outputsMillis = System.currentTimeMillis() - t2
+        Log.i(
+            TAG,
+            "outputs: dng %dms alongside develop %dms, %dms wall".format(
+                dngMillis, developMillis, outputsMillis,
+            ),
+        )
+
+        // Decided once, now both are finished. A DNG has no preview this app
+        // can cheaply decode, so the JPEG is the thumbnail whenever there is
+        // one; the DNG only stands in when there is not.
+        if (!jpegOk) {
+            dngUri?.let { RecentCapture.remember(context, it, dngName) }
+        }
 
         // "develop" has never only been develop. It spans the colour profile,
         // the native render, a full-resolution rotation, the JPEG encode and
@@ -330,7 +374,7 @@ object RawBurstCapture {
         characteristics: CameraCharacteristics,
         result: TotalCaptureResult,
         displayName: String,
-    ): Boolean = try {
+    ): android.net.Uri? = try {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
             put(MediaStore.MediaColumns.MIME_TYPE, MIME_DNG)
@@ -354,15 +398,16 @@ object RawBurstCapture {
         values.clear()
         values.put(MediaStore.MediaColumns.IS_PENDING, 0)
         resolver.update(uri, values, null, null)
-        // Only if no JPEG follows: a DNG has no preview this app can cheaply
-        // decode, so a raw thumbnail would be a blank square. The JPEG written
-        // straight after overwrites this.
-        RecentCapture.remember(context, uri, displayName)
+        // The thumbnail is not decided here any more. It used to be recorded
+        // and then overwritten by the JPEG written straight afterwards, which
+        // worked only while the two were sequential -- now that they overlap,
+        // whichever finished last would win the race and a DNG thumbnail is a
+        // blank square. The caller decides once both are done.
         Log.i(TAG, "merged DNG written: $uri")
-        true
+        uri
     } catch (e: Exception) {
         Log.e(TAG, "merged DNG write failed", e)
-        false
+        null
     }
 
     internal fun stamp(): String =

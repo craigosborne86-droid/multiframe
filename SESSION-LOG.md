@@ -1275,11 +1275,38 @@ for no visible reason is worse than one uniformly slower. A full disk was buying
 exactly that unpredictability. Three samples either side is thin evidence for a
 mean and reasonable evidence for a tenfold difference in spread.
 
-**Where that points.** The JPEG encode is not obviously wasteful -- 12.5 MP at
-52 MP/s through libjpeg-turbo is about what it costs. But it currently runs
-*after* the DNG has been written, and the two have nothing to say to each other.
-Overlapping them would hide one behind the other without making either faster,
-which is worth more than shaving the demosaic.
+**Where that points, and what it bought.** The JPEG encode is not obviously
+wasteful -- 12.5 MP at 52 MP/s through libjpeg-turbo is about what it costs.
+But it ran *after* the DNG had been written, and the two have nothing to say to
+each other. Both only read the merged buffer, and the native develop reads it
+through its base address rather than the buffer's position, so they can run at
+once:
+
+    outputs: dng 348ms alongside develop 597ms, 597ms wall
+    outputs: dng 264ms alongside develop 618ms, 618ms wall
+    outputs: dng 451ms alongside develop 675ms, 676ms wall
+
+The wall time is the develop time, to the millisecond. The DNG write is
+completely hidden. A capture that spent 653 ms developing and then 303 ms
+writing now spends 638 ms doing both -- about 320 ms off every shot, and none
+of it from making anything faster.
+
+**Two things it had to be careful about.** The write gets its own `duplicate()`
+of the buffer: `writeByteBuffer` advances the position it is given and the
+Kotlin develop fallback rewinds the same buffer, so sharing one would have had
+them fighting over a cursor while neither changed a pixel. And `writeDng` used
+to record the DNG as the review thumbnail on the understanding that "the JPEG
+written straight after overwrites this" -- true only while the two were
+sequential. Overlapped, whichever finished last would have won, and a DNG
+thumbnail is a blank square because nothing here can cheaply decode its preview.
+The thumbnail is now decided once, after both are done.
+
+**What it cost.** Develop itself got noisier: on the same three-shot test,
+608/610/621 ms became 618/742/789, because the writer competes for the same
+cores. Dropping the writer's thread priority a notch was tried and changed
+nothing measurable -- 176 ms of spread against 171, means within noise -- so it
+was taken out again rather than kept on faith. The end-to-end figure is still
+the one that matters, and it fell by about a third.
 
 **First-capture figures are not steady-state ones.** The first capture after an
 install measured a 1441 ms merge against 934 ms warm, which briefly looked like
