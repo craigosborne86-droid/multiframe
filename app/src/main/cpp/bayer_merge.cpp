@@ -19,6 +19,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 #define LOG_TAG "MultiframeNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
@@ -351,6 +355,16 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
     parallelBands(h, [&](int y0, int y1) {
         double localContrib = 0.0;
         long long localCount = 0;
+#if defined(__ARM_NEON)
+        // The vector path keeps four running totals of the contributed weight
+        // and folds them in once the band is done. That is a different
+        // summation order from the scalar loop's single running total, and the
+        // only figure it reaches is the mean contribution -- a diagnostic,
+        // reported to four decimals, where reordering a double sum of twelve
+        // million values in [0, 1] moves the twelfth.
+        float64x2_t contribLo = vdupq_n_f64(0.0);
+        float64x2_t contribHi = vdupq_n_f64(0.0);
+#endif
 
         for (int y = y0; y < y1; ++y) {
             const int ty = std::clamp(static_cast<int>((y / 2) / tileH), 0, tilesY - 1);
@@ -374,7 +388,77 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
 
                 const uint8_t* src = base + static_cast<size_t>(sy) * rowStride +
                                      static_cast<size_t>(xStart + shiftX) * 2;
-                for (int x = xStart; x < xEnd; ++x, src += 2) {
+                int x = xStart;
+
+#if defined(__ARM_NEON)
+                // Four pixels at a time.
+                //
+                // The compiler cannot do this one itself, and the reason is the
+                // noise lookup: `noise[refRaw]` is a load whose address depends
+                // on the data, and NEON has no gather. So that one term stays
+                // scalar -- four loads straight into lanes, no round trip
+                // through the stack -- and everything either side of it goes
+                // four wide.
+                //
+                // The arithmetic is the same arithmetic, and it is written
+                // the same way -- a multiply and then an add, which under
+                // -ffast-math the compiler contracts into a fused multiply-add
+                // here exactly as it already did in the scalar loop below. That
+                // is not a liberty this change took: both paths emit `fmla`,
+                // and what settles it either way is the parity test, which
+                // holds both against the Kotlin reference pixel for pixel.
+                //
+                // This path reads the source with a 16-bit vector load, where
+                // the scalar one assembles each sample from two bytes and is
+                // therefore endian-neutral. Every ABI this builds for is
+                // little-endian, and the scalar loop below is what would run
+                // anywhere else.
+                for (; x + 4 <= xEnd; x += 4, src += 8) {
+                    const uint16x4_t refRaw4 = vld1_u16(refRow + x);
+                    const float32x4_t refV =
+                        vcvtq_f32_u32(vmovl_u16(refRaw4));
+                    const float32x4_t altV = vcvtq_f32_u32(vmovl_u16(
+                        vld1_u16(reinterpret_cast<const uint16_t*>(src))));
+
+                    const float32x4_t d = vsubq_f32(altV, refV);
+                    const float32x4_t d2 = vmulq_f32(d, d);
+
+                    // Values above white clamp to the top bin, which is what
+                    // binOf did with them, so the last entry answers for them.
+                    float32x4_t n2 = vdupq_n_f32(0.0f);
+                    n2 = vld1q_lane_f32(
+                        noise + std::min<int>(refRow[x + 0], white), n2, 0);
+                    n2 = vld1q_lane_f32(
+                        noise + std::min<int>(refRow[x + 1], white), n2, 1);
+                    n2 = vld1q_lane_f32(
+                        noise + std::min<int>(refRow[x + 2], white), n2, 2);
+                    n2 = vld1q_lane_f32(
+                        noise + std::min<int>(refRow[x + 3], white), n2, 3);
+
+                    // Both arms are evaluated and one is selected. The divide
+                    // is the arm that is almost never taken -- a frame agrees
+                    // with its reference to within tolerance nearly everywhere
+                    // -- and a branch that mispredicts a few percent of twelve
+                    // million times costs more than a divide that is thrown
+                    // away. Where d2 is zero the divide yields an infinity and
+                    // the select discards it.
+                    const float32x4_t wgt = vbslq_f32(
+                        vcleq_f32(d2, n2), vdupq_n_f32(1.0f), vdivq_f32(n2, d2));
+
+                    vst1q_f32(sumRow + x, vaddq_f32(vld1q_f32(sumRow + x),
+                                                    vmulq_f32(altV, wgt)));
+                    vst1q_f32(weightRow + x,
+                              vaddq_f32(vld1q_f32(weightRow + x), wgt));
+
+                    // Widened to double before accumulating. Twelve million
+                    // weights summed in single precision would stop moving the
+                    // total long before the end of the image.
+                    contribLo = vaddq_f64(contribLo, vcvt_f64_f32(vget_low_f32(wgt)));
+                    contribHi = vaddq_f64(contribHi, vcvt_high_f64_f32(wgt));
+                }
+#endif
+
+                for (; x < xEnd; ++x, src += 2) {
                     const uint16_t refRaw = refRow[x];
                     const float refV = static_cast<float>(refRaw);
                     const float altV = static_cast<float>(
@@ -393,6 +477,9 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                 localCount += xEnd - xStart;
             }
         }
+#if defined(__ARM_NEON)
+        localContrib += vaddvq_f64(contribLo) + vaddvq_f64(contribHi);
+#endif
         std::lock_guard<std::mutex> guard(totals);
         totalContrib += localContrib;
         totalCount += localCount;

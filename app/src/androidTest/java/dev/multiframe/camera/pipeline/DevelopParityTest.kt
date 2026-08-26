@@ -194,8 +194,18 @@ class DevelopParityTest {
      */
     @Test
     fun nativeAndKotlinMergeAgreeOnAVaryingField() {
-        val w = 320
-        val h = 240
+        // Several widths, because the native loop walks each run of constant
+        // tile column four pixels at a time and finishes the remainder one at a
+        // time. At 320 the runs come out 64 wide and the remainder is almost
+        // always empty, so a mistake at that boundary would never show. The
+        // other two widths put the tile edges off the multiple of four and
+        // exercise remainders of one, two and three.
+        for (w in intArrayOf(320, 322, 326)) {
+            assertVaryingFieldParity(w, 240)
+        }
+    }
+
+    private fun assertVaryingFieldParity(w: Int, h: Int) {
         val reference = mergeScene(w, h, 11)
         // Independently noisy rather than a copy, so the weighting is exercised
         // in both directions instead of every pixel landing inside tolerance.
@@ -244,8 +254,8 @@ class DevelopParityTest {
         }
         Log.i(
             TAG,
-            "varying-field merge parity: worst $worst, $differing of ${nativeData.size} " +
-                "differing; contribution native %.4f vs kotlin %.4f".format(
+            "varying-field merge parity at ${w}x$h: worst $worst, $differing of " +
+                "${nativeData.size} differing; contribution native %.4f vs kotlin %.4f".format(
                     nativeStats.meanContribution, kotlinStats.meanContribution,
                 ),
         )

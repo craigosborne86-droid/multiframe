@@ -1618,13 +1618,78 @@ That is worth an experiment's cost to have established rather than assumed, and
 it is a better reason not to do it than the measurement is: the measurement
 could not have resolved 5% in any case.
 
-### What is left in the loop
+## The accumulation, four pixels at a time
 
-**NEON**, which is now the thing to try: the run loop is a flat span of pixels
-with no branch in it. Note before starting that the accumulation is not
-bandwidth-bound -- `setReference` sustains about 13 GB/s over the same buffers
-through the same band scheduler while the accumulate manages a third of that --
-so there is headroom for wider arithmetic to actually show up.
+With the run loop a flat span of pixels and no branch in it, NEON was the thing
+left to try, and unlike the interleaving it had a mechanism behind it: the
+accumulation is not bandwidth-bound. `setReference` sustains about 13 GB/s over
+the same buffers through the same band scheduler while the accumulate manages a
+third of that, so there was headroom for wider arithmetic to show.
+
+**Why the compiler had not already done it.** `-O3 -ffast-math` vectorises most
+things of this shape unprompted, and it left this loop alone. The reason is one
+term: `noise[refRaw]` is a load whose address comes from the data, and NEON has
+no gather instruction. One data-dependent load is enough to stop the whole loop
+being vectorised, even though everything around it is trivially parallel.
+
+So the gather stays scalar -- four `vld1q_lane_f32`, straight from the table
+into lanes with no round trip through the stack -- and everything either side of
+it goes four wide. The weight's two arms are both evaluated and one selected
+with `vbslq_f32`; the divide is the arm almost never taken, and computing it and
+throwing it away beats a branch that mispredicts a few percent of twelve million
+times. The contributed weight is widened to double and kept in two
+`float64x2_t`, folded down once the band is finished.
+
+**Three alternating installs each, on a phone at the same temperature or hotter
+for the vector build in every pass:**
+
+    real captures, per frame:  scalar 31.7, 31.7, 33.3 ms
+                               NEON   23.4, 25.8, 26.7 ms
+
+    synthetic, per burst:      scalar 261.5, 331.0, 357.5 ms
+                               NEON   244.5, 246.5, 249.5 ms
+
+Non-overlapping on both, which is the bar. About 17% off the real per-frame
+accumulate and 25% off the synthetic burst.
+
+**The vector build is also far steadier**, and that was not the point but may
+matter more than the mean. Its three run medians span 244.5 to 249.5 -- two per
+cent -- where the scalar build's span 261.5 to 357.5. A camera whose shutter
+sometimes takes longer for no visible reason is worse than one uniformly
+slower, an argument this log has already made about retained develop buffers and
+a full disk. Three runs is thin evidence for a spread and it is the same
+direction all three times.
+
+### Two things to be careful about here
+
+**The tail was the part at risk, and the parity test could not see it.** The
+vector loop takes four pixels at a time and the scalar loop finishes the
+remainder. At 320 wide the tile runs come out 64 pixels across, so the remainder
+is almost always empty and a mistake at that boundary would never show. The
+merge parity test now runs at 320, 322 and 326, which puts the tile edges off
+the multiple of four and exercises remainders of one, two and three. Zero
+differing pixels at all three widths, and the mean contribution agrees to four
+decimals despite the reordered summation.
+
+**A comment was written that the disassembly contradicted.** The first version
+of this claimed the multiply and the add were kept separate rather than fused,
+because the Kotlin reference rounds between them. The generated code says
+otherwise: `fmla` in the vector loop -- and `fmadd` in the scalar loop, which
+had been doing it since long before this change, because `-ffast-math`
+contracts. Nothing was taken that was not already being taken, and what settles
+it either way is the parity test rather than the intent. The comment now says
+what the compiler does.
+
+### On quoting absolute numbers across a session
+
+The scalar build measured 50-59 ms a frame earlier in the day and 31.7-33.3 ms
+in the run above. Same binary, same phone, same test. What moved was the
+device: heat, free memory, and how much had been asked of it in the preceding
+hour. Only the alternated comparison inside one run means anything, and figures
+from different runs of this log should not be subtracted from each other.
+
+95 device tests pass, including the develop-consistency assertion that had
+failed earlier under memory pressure.
 
 And one thing about the harness itself: `MergeSpeedDeviceTest` aligns on the JVM
 where a capture takes the native path, which is 44 MB of garbage a burst that

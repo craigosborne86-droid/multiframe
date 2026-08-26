@@ -12,8 +12,9 @@ Pixel 9 Pro XL on Android 17.
 Every row of [SUPERRES.md](SUPERRES.md) is built. Phases 6, 7 and 8 are closed
 with measurements on the phone.
 
-The merge accumulation now walks tile runs rather than pixels, which took the
-per-frame accumulate from 71 ms to 52 on real captures.
+The merge accumulation now walks tile runs rather than pixels and does four
+pixels at a time in NEON. Both were measured on real captures against the build
+before them: the run walk about 28% off, the vectorisation about another 17%.
 
 ## How this repo works
 
@@ -43,27 +44,34 @@ is the largest item inside "develop".
 
 ## Next step
 
-**NEON** in `nAddFrame`, now that the inner loop is a flat span of pixels with
-no branch in it. Two things to know before starting:
+The merge is no longer the obvious place to spend effort. On a real capture the
+accumulation is now roughly 26 ms a frame against alignment's 20-40, and the
+**JPEG encode at around 240 ms is comfortably the largest single item in a
+shot** — see the open decisions at the bottom.
 
-- The accumulation is **not bandwidth-bound**. `setReference` sustains about
-  13 GB/s over the same buffers through the same band scheduler while the
-  accumulate manages a third of that, so there is headroom for wider arithmetic
-  to actually show up.
-- **Interleaving `sum` and `weight` into one plane of pairs has already been
-  tried and reverted.** Do not repeat it. It is arithmetically identical and
-  makes no measurable difference, and the reason is that interleaving does
-  nothing for sequential access: sixteen consecutive pixels touch two cache
-  lines either way. Array-of-structs wins when access is random. The session
-  log has the numbers.
+If you do come back to `nAddFrame`, two things are already settled:
+
+- **Interleaving `sum` and `weight` into one plane of pairs has been tried and
+  reverted.** Do not repeat it. It is arithmetically identical and makes no
+  measurable difference, because interleaving does nothing for sequential
+  access: sixteen consecutive pixels touch two cache lines either way.
+  Array-of-structs wins when access is random.
+- **The noise lookup is why the compiler never vectorised this loop**, and it is
+  still scalar inside the NEON path — `noise[refRaw]` is a data-dependent load
+  and NEON has no gather. Folding it into a sixteen-entry `vqtbl4q_u8` table
+  lookup is possible and would need the bin computed in vector form, which has
+  to reproduce `binOf` exactly or the parity test will and should fail.
 
 `DevelopParityTest.nativeAndKotlinMergeAgree` and
 `nativeAndKotlinMergeAgreeOnAVaryingField` are the safety net and both pass, so
 a change that breaks the arithmetic will be caught. The second is the one that
-matters for anything touching the run structure: it hands both implementations
-the same tile-varying displacements, including a tile displaced out of frame.
+matters for anything touching the run structure or the vector width: it hands
+both implementations the same tile-varying displacements, including a tile
+displaced out of frame, and runs at three widths so the tile runs land off the
+multiple of four and the vector loop's one-, two- and three-pixel remainders are
+all exercised. Add a width there before widening the vector body further.
 
-**Before re-measuring, reboot the phone.** See below.
+**Before re-measuring, give the phone a rest.** See below.
 
 ## How to measure the merge
 
@@ -74,11 +82,17 @@ pass timed beside it as a control. Some hard-won notes:
   `/data/local/tmp` and `adb shell pm install -r` from there: twenty seconds
   against three minutes for a wireless install, which is what makes four
   alternations affordable.
-- **The device degrades over an afternoon.** By the end of the session that
-  produced this, free memory was 1.2 GB with swap nearly gone and the battery
-  at 39 C, and the identical binary that had measured a 254 ms burst measured
-  466. Reboot before a measuring run, and watch `dumpsys battery` and
-  `/proc/meminfo` alongside the numbers.
+- **The device degrades over an afternoon.** Free memory fell to 1.2 GB with
+  swap nearly gone and the battery reached 39 C, and the identical binary that
+  had measured a 254 ms burst measured 466. Watch `dumpsys battery` and
+  `/proc/meminfo` alongside the numbers, and give it time to recover — it does.
+- **Never subtract a figure in the log from one taken in a different run.** The
+  same scalar binary measured 50-59 ms a frame in the morning and 31.7-33.3 ms
+  in the afternoon. Only the alternated comparison inside a single run means
+  anything.
+- **Wireless adb drops writes** under this load: installs fail with "device
+  offline" and then succeed on a retry. Loop the install two or three times
+  rather than trusting one.
 - **The real capture path is better evidence than the harness**, and it is
   cheap: run `ZslStreamDeviceTest` and read `merge breakdown ... accumulate` out
   of logcat. That is real camera frames, and it is the same quantity every
