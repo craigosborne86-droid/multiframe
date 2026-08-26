@@ -5,9 +5,12 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Environment
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
-import java.io.OutputStream
+import java.io.FileOutputStream
 
 private const val TAG = "Multiframe"
 
@@ -27,29 +30,43 @@ object ImageSaver {
         quality: Int = 95,
         metadata: CaptureMetadata? = null,
     ): Uri? {
-        val values = pendingEntry(displayName)
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            ?: return null
+        var encoder = "strips"
+        var compressMillis = 0L
 
-        val tCompress = System.currentTimeMillis()
-        resolver.openOutputStream(uri)?.use { out: OutputStream ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        } ?: return null
-        val compressMillis = System.currentTimeMillis() - tCompress
+        val tPublishStart = longArrayOf(0L)
+        val uri = saveJpegWith(context, displayName, metadata) { pfd ->
+            val tCompress = System.currentTimeMillis()
+            // Every core rather than one. Falls back to the framework encoder,
+            // which is the same library reached through Skia, if the strip
+            // encoder declines the bitmap or fails partway.
+            val done = NativeJpeg.encodeToFd(bitmap, pfd.fd, quality) || run {
+                encoder = "framework"
+                // Whatever the attempt managed to write is not a JPEG, and the
+                // descriptor is still sitting wherever it stopped.
+                Os.ftruncate(pfd.fileDescriptor, 0)
+                Os.lseek(pfd.fileDescriptor, 0, OsConstants.SEEK_SET)
+                // Deliberately not closed: the descriptor belongs to the caller
+                // and closing the stream would close it early.
+                val out = FileOutputStream(pfd.fileDescriptor)
+                val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                out.flush()
+                ok
+            }
+            compressMillis = System.currentTimeMillis() - tCompress
+            tPublishStart[0] = System.currentTimeMillis()
+            done
+        }
 
         // Split because "encode and save" was measured at 284-375 ms without
         // anyone knowing which half it was -- and it was measured on a disk
         // that was 98% full, where the write and the publish are both suspect.
-        val tPublish = System.currentTimeMillis()
-        val published = publish(context, uri, values, metadata, displayName)
         Log.i(
             TAG,
-            "saveJpeg: compress+write %dms, publish %dms".format(
-                compressMillis, System.currentTimeMillis() - tPublish,
+            "saveJpeg: %s compress+write %dms, publish %dms".format(
+                encoder, compressMillis, System.currentTimeMillis() - tPublishStart[0],
             ),
         )
-        return published
+        return uri
     }
 
     /**
@@ -84,6 +101,38 @@ object ImageSaver {
         if (!written) {
             // A pending entry nothing was written into is not a photograph. It
             // would otherwise sit in the library as a zero-byte file forever.
+            resolver.delete(uri, null, null)
+            return null
+        }
+
+        return publish(context, uri, values, metadata, displayName)
+    }
+
+    /**
+     * The same, handing over the descriptor itself rather than its number.
+     *
+     * A writer that can fail after writing something needs to be able to wind
+     * the file back, and that takes the [ParcelFileDescriptor] rather than the
+     * int inside it.
+     */
+    private fun saveJpegWith(
+        context: Context,
+        displayName: String,
+        metadata: CaptureMetadata? = null,
+        write: (pfd: ParcelFileDescriptor) -> Boolean,
+    ): Uri? {
+        val values = pendingEntry(displayName)
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: return null
+
+        val written = try {
+            resolver.openFileDescriptor(uri, "w")?.use { write(it) } ?: false
+        } catch (e: Exception) {
+            Log.w(TAG, "could not open $displayName for writing", e)
+            false
+        }
+        if (!written) {
             resolver.delete(uri, null, null)
             return null
         }

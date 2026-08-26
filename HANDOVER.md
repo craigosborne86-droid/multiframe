@@ -32,6 +32,11 @@ Five rules, all of them earned rather than assumed, and worth keeping:
   something changed nothing, say what the measurement could resolve.
 - **No timing is ever taken from the emulator.** It settles framework behaviour,
   never performance.
+- **Third-party code is a last resort, and there is now exactly one piece of
+  it.** libjpeg-turbo is vendored under `cpp/third_party/`, because the NDK
+  ships no JPEG encoder and `Bitmap.compress` offers no handle on the one it
+  wraps. It cannot be pinned to a Kotlin reference like everything else here, so
+  it is pinned to the framework encoder's output instead.
 - **Negative results are recorded and reverted**, not kept on faith. Four
   experiments have been backed out this way: a lower-priority DNG writer thread,
   disabling filtering on the rotation, aligning natively inside the merge
@@ -44,12 +49,16 @@ is the largest item inside "develop".
 
 ## Next step
 
-The merge is no longer the obvious place to spend effort. On a real capture the
-accumulation is now roughly 26 ms a frame against alignment's 20-40, and the
-**JPEG encode at around 240 ms is comfortably the largest single item in a
-shot** — see the open decisions at the bottom.
+**The native develop, at around 290-330 ms, is now the largest single item in a
+capture.** The merge accumulation is about 26 ms a frame, and the JPEG encode is
+34-57 ms since it started using every core. `develop breakdown` in logcat splits
+it; split it further before optimising, which is advice this log has had to take
+four times.
 
-If you do come back to `nAddFrame`, two things are already settled:
+Do not start by assuming the demosaic is the cost. That assumption has been
+wrong once already here — it was the JPEG encode that time.
+
+If you come back to `nAddFrame`, two things are already settled:
 
 - **Interleaving `sum` and `weight` into one plane of pairs has been tried and
   reverted.** Do not repeat it. It is arithmetically identical and makes no
@@ -134,7 +143,12 @@ pass timed beside it as a control. Some hard-won notes:
   pixels at all and writing an EXIF orientation tag instead — but that changes
   what the file *is*, trading the time for a dependence on every viewer honouring
   the tag, which is precisely what this app rotates in order not to need.
-- **The JPEG encode**, around 240 ms and now comfortably the largest single item
-  in a capture. It is not wasteful — 12.5 MP at roughly 52 MP/s through
-  libjpeg-turbo is about what that costs — so the options are quality, a
-  different encoder, or leaving it alone.
+- **JPEG file size.** The strip encoder writes files about 5% larger than the
+  framework did, because every strip has to share one Huffman table set and so
+  it cannot do the second pass that fits the tables to the image. The pixels are
+  identical; only the byte count differs. Worth revisiting only if size ever
+  matters more than the three times speedup it bought.
+- **Quality is still 95, and lowering it would not buy speed** — measured, on
+  photograph-like content the encode time barely moves between q95 and q75 while
+  the file halves. It remains a size decision, and the DNG written alongside is
+  the archival copy, so q90 would be defensible.

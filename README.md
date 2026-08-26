@@ -57,7 +57,7 @@ See [BUILD.md](BUILD.md). Short version:
     export JAVA_HOME="$HOME/Library/Java/JavaVirtualMachines/jdk-21.0.12.1+1/Contents/Home"
     ./gradlew :app:assembleDebug
     ./gradlew :app:testDebugUnitTest          # 332 tests, no device
-    ./gradlew :app:connectedDebugAndroidTest  # 95 tests, needs a device
+    ./gradlew :app:connectedDebugAndroidTest  # 99 tests, needs a device
 
 ## How the code is arranged
 
@@ -68,9 +68,17 @@ Everything of consequence is in `app/src/main/java/dev/multiframe/camera/pipelin
 | Capture | `ZslRawStream`, `RawRing`, `ZslCapture`, `RawBurstCapture` |
 | Merge | `bayer_merge.cpp`, `NativeMerge`, `Aligner`, `Align.cpp`, `BayerMerger` |
 | Develop | `Demosaic`, `ToneCurve`, `ColorScience`, `LensShading`, `HotPixels`, `Sharpen`, `Defringe` |
-| Output | `ImageSaver`, `ExifWriter`, `RecentCapture`, `Rotate.cpp` |
+| Output | `ImageSaver`, `ExifWriter`, `RecentCapture`, `Rotate.cpp`, `Jpeg.cpp`, `NativeJpeg` |
 | Decisions | `ZslPolicy`, `ExposureStrategy`, `CaptureMode`, `MemoryPressure` |
 | Mosaic | `Homography`, `FeatureMatcher`, `MosaicPlanner`, `MosaicAssembler`, `MosaicRefiner`, `Mosaic.cpp` |
+
+One third-party dependency, and it is native: **libjpeg-turbo**, vendored under
+`app/src/main/cpp/third_party/` with its provenance recorded beside it. The NDK
+ships no JPEG encoder, and `Bitmap.compress` reaches Skia's copy of this same
+library through an interface that offers no handle on it — one call, one thread.
+Having the library directly is what lets a capture be encoded in strips across
+every core, which took the encode from about 240 ms to under 100. Everything
+else in `cpp/` is written here.
 
 Two conventions run through it.
 
@@ -94,7 +102,7 @@ a *defocused* frame as sharper, a demosaic that was destroying 43% of fine
 detail, a ratio test that kept precisely its worst matches, and two performance
 claims that had to be withdrawn for sitting inside the measurement noise.
 
-**A note on what is verified.** All 95 device tests run on the phone — a Pixel
+**A note on what is verified.** All 99 device tests run on the phone — a Pixel
 9 Pro XL on Android 17 — with none skipped *provided the screen is awake*,
 including the fourteen Compose tests
 that spent most of this project's life reporting as skipped, because an activity

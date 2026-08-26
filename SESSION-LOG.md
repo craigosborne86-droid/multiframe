@@ -10,7 +10,7 @@ Indigo demonstrates on iPhone; original code, name, icon and UI throughout.
 - Package: `dev.multiframe.camera` (final — cannot change after publication)
 - Target device for development: Pixel 9 Pro XL (`komodo`), Android 17 / API 37
 - ~21,000 lines across 95 Kotlin files and 6 native files
-- 332 JVM unit tests and 95 on-device tests
+- 332 JVM unit tests and 99 on-device tests
 
 ---
 
@@ -1698,6 +1698,118 @@ reads high. Swapping it for `alignNative` was tried and could not be evaluated,
 because by then the phone was short of memory and the samples ranged over a
 factor of six. It should be done on a phone that has just been rebooted, and the
 figures above re-taken with it.
+
+## The JPEG encode, on every core instead of one
+
+The encode was the largest single item in a capture at about 240 ms, and the
+handover recorded three options: quality, a different encoder, or leaving it
+alone. Two of those turned out to be answerable by measurement before writing
+anything.
+
+**There is no hardware JPEG encoder to reach for.** Not asserted from general
+knowledge -- looked for, in every `media_codecs*.xml` on the device. Nothing
+declares an image encoder. HEIC on this phone goes through the video encoder,
+which is a change to what the file *is* rather than a faster way to make the
+same file.
+
+**Quality is a size lever, not a speed one.** This was the surprise. On
+photograph-like content -- detail everywhere, noise almost nowhere, which is
+what a merged capture from this app looks like -- the encode barely notices:
+
+    q95  ~240 ms  1912 KB
+    q90  ~208 ms  1161 KB
+    q85  ~198 ms   863 KB
+    q75  ~195 ms   617 KB
+
+Below q90 the time stops moving while the file keeps shrinking, because what is
+left is fixed work -- colour conversion and the DCT -- rather than entropy
+coding. An earlier version of that measurement used heavy synthetic noise and
+reported 407 ms at q95, which flattered the quality knob considerably: noise is
+close to incompressible, and it is the one thing this pipeline exists to remove.
+A benchmark whose input the app would never produce answers a question nobody
+asked.
+
+So the only real option was the third, and it needed the library.
+
+### What was actually wrong with `Bitmap.compress`
+
+Nothing, except the door. It reaches Skia's copy of libjpeg-turbo -- the same
+library -- but through an interface with no handle on it: one call, one thread,
+no restart interval. Twelve and a half megapixels cost about 240 ms there while
+seven cores sit idle.
+
+A JPEG's entropy-coded data is one long serial dependency, because each block's
+DC coefficient is stored as a difference from the block before it. Restart
+markers are the way out: they divide the scan into intervals that reset the DC
+predictor, so intervals do not depend on each other and can be produced at the
+same time.
+
+So the image is cut into horizontal strips, each encoded on its own thread as
+though it were an image in its own right, and the results are stitched: the
+first strip's header, then every strip's entropy data with a restart marker
+between, then the end-of-image. Two details make the seam invisible. Each strip
+is given a restart interval equal to its own length in MCUs, so it emits no
+markers internally and its data is exactly one interval. And the height in the
+stitched header is patched from the first strip's to the whole image's.
+
+    4080x3072 q95 framework: median 297 ms, 1912 KB
+    4080x3072 q95 strips:    median  98 ms, 2013 KB
+
+Three times faster, measured in one run with both encoders in the same binary
+and the rounds alternated, so no install and no thermal drift comes into it. On
+real captures through `ZslCapture` the effect is larger still, because a merged
+photograph is smoother than that synthetic scene: `compress+write` went from
+about 240 ms to **34-57 ms**.
+
+### What it costs, which is not nothing
+
+**The files are about 5% larger**, and that is a real trade rather than a
+rounding error. The framework encoder makes a second pass over the image to
+derive Huffman tables fitted to it; the strip encoder uses the standard ones,
+because every strip has to share one table set for the stitch to be legal. Two
+passes for five per cent is a fair deal when you have one thread and a poor one
+when you have eight.
+
+**The APK grew 331 KB**, 68.35 MB to 68.68 MB. The vendored source is 4.1 MB
+across 256 files; the linker keeps only the 8-bit compressor. (The first count
+taken was 519, which is what `find` reports on this exFAT volume: macOS writes
+an AppleDouble sidecar next to every file, and half of what it found was those.)
+
+**And it is the project's first third-party native dependency**, which is worth
+saying plainly. Everything else in `cpp/` is written here and pinned to a Kotlin
+reference by a parity test. libjpeg-turbo is not, and cannot be. What it gets
+instead is `JpegEncodeParityTest`, which holds its output against the
+framework's -- and that turned out to be a stronger check than expected.
+
+### The pixels are identical, which was not the plan
+
+The test was written expecting "close": two encoders, same settings, some
+rounding between them. It compares after decoding and allows a worst channel
+difference of 2. The measured difference is **zero**, at every size tried and
+every strip count -- 640x480, 641x481, 700x393, 320x17, at 1, 2, 3 and 8
+strips. Same quantisation tables, same 4:2:0 subsampling, same standard Huffman
+tables, so the coefficients agree exactly and nothing is left to differ.
+
+The seam check is the one that matters most and it asserts exact equality
+outright: the same image encoded as 1, 2, 4, 5, 8 and 16 strips must decode
+identically. If the number of threads could change the picture, the stitch would
+depend on where the seams fell, which is the whole risk of the approach.
+
+The awkward sizes are deliberate. A minimum coded unit is sixteen pixels square
+once chroma is subsampled, so a height that is not a multiple of sixteen leaves
+a short final strip, a width that is not leaves a partial MCU column in every
+row, and 320x17 asks for more strips than there are MCU rows.
+
+### Where the time is now
+
+    develop breakdown: native+setup 290ms, rotate 0-66ms, encode+save 82-128ms
+
+The encode is no longer the largest item in a capture; the native develop is.
+That is the fourth time in this log that fixing the biggest thing has promoted
+something else, and the fourth time the useful move was to split the timer
+before optimising rather than after.
+
+99 device tests pass, 332 unit tests pass.
 
 ## Outstanding for release
 
