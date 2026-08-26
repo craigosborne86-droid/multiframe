@@ -6,15 +6,25 @@ holds the reasoning behind everything below.
 
 ## Where things stand
 
-Everything builds. **332 unit tests pass**, and **95 device tests** run on a
+Everything builds. **332 unit tests pass**, and **99 device tests** run on a
 Pixel 9 Pro XL on Android 17.
 
 Every row of [SUPERRES.md](SUPERRES.md) is built. Phases 6, 7 and 8 are closed
 with measurements on the phone.
 
-The merge accumulation now walks tile runs rather than pixels and does four
-pixels at a time in NEON. Both were measured on real captures against the build
-before them: the run walk about 28% off, the vectorisation about another 17%.
+Three things landed this session, each measured on real captures against the
+build immediately before it:
+
+- the merge accumulation walks tile runs rather than pixels — about 28% off
+- and does four pixels at a time in NEON — about another 17%
+- the JPEG encode runs in strips across every core — about 240 ms to 34-57 ms
+
+A fourth was built, measured, found to do nothing, and reverted: interleaving
+the merge's two accumulation planes. Do not repeat it; the log says why.
+
+`test-photos`: instrumentation runs write real captures into
+`/sdcard/DCIM/Multiframe/`, and about 45 of them accumulated. They are the
+user's to delete.
 
 ## How this repo works
 
