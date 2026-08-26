@@ -1584,17 +1584,47 @@ goes first.
 The suite is otherwise green: 332 unit tests, and 95 device tests of which 94
 pass in this state.
 
+### Interleaving sum and weight, which was tried and reverted
+
+The obvious next move looked like this: `sum` and `weight` are separate 50 MB
+planes, so every pixel of the accumulation touches two cache lines fifty
+megabytes apart, and each thread keeps four streams in flight instead of three.
+Putting them side by side as one array of pairs should halve the streams and put
+both values a pixel needs on one line.
+
+It was built -- one `Site {float sum; float weight;}` plane through `nCreate`,
+`nSetReference`, `nAddFrame` and `nFinish` -- and it is arithmetically identical:
+both merge parity tests report zero differing pixels of 76800. And it makes no
+measurable difference. Seven alternations across two runs, on both the synthetic
+harness and real captures:
+
+    synthetic, per burst:  planes 328 ms, interleaved 344 ms  (+5%)
+    real, per frame:       planes 30.7 ms, interleaved 29.4 ms  (-4%)
+
+The two disagree in sign, both sit inside a noise floor that was 20% at best,
+and the run medians overlap completely. Reverted.
+
+**The reasoning was wrong, and that is the part worth keeping.** Interleaving
+does nothing for cache line traffic under sequential access, and this loop walks
+x in order. Sixteen consecutive pixels touch one 64-byte line of `sum` and one
+of `weight` -- two lines. Interleaved, the same sixteen pixels occupy 16 x 8 =
+128 bytes -- also two lines. The same lines, the same bytes, the same order.
+Array-of-structs beats struct-of-arrays when access is *random*, because then a
+line fetched for one field carries the other; when access is sequential both
+layouts stream perfectly and the transformation buys nothing. What was left was
+four streams against three, which the prefetchers absorb without noticing.
+
+That is worth an experiment's cost to have established rather than assumed, and
+it is a better reason not to do it than the measurement is: the measurement
+could not have resolved 5% in any case.
+
 ### What is left in the loop
 
-Two things, in the order they are worth trying:
-
-- **`sum` and `weight` are separate planes**, so every pixel touches two cache
-  lines 50 MB apart and the loop keeps four streams per thread going at once.
-  Interleaving them into one plane of pairs would halve the streams and put both
-  values a pixel needs on one line. It touches `nSetReference` and `nFinish` as
-  well, so it is a larger change than this one.
-- **NEON**, which is now finally worth reaching for: the run loop is a flat span
-  of pixels with no branch in it.
+**NEON**, which is now the thing to try: the run loop is a flat span of pixels
+with no branch in it. Note before starting that the accumulation is not
+bandwidth-bound -- `setReference` sustains about 13 GB/s over the same buffers
+through the same band scheduler while the accumulate manages a third of that --
+so there is headroom for wider arithmetic to actually show up.
 
 And one thing about the harness itself: `MergeSpeedDeviceTest` aligns on the JVM
 where a capture takes the native path, which is 44 MB of garbage a burst that

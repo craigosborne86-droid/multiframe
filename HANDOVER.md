@@ -31,10 +31,10 @@ Five rules, all of them earned rather than assumed, and worth keeping:
   something changed nothing, say what the measurement could resolve.
 - **No timing is ever taken from the emulator.** It settles framework behaviour,
   never performance.
-- **Negative results are recorded and reverted**, not kept on faith. Three
+- **Negative results are recorded and reverted**, not kept on faith. Four
   experiments have been backed out this way: a lower-priority DNG writer thread,
-  disabling filtering on the rotation, and aligning natively inside the merge
-  benchmark.
+  disabling filtering on the rotation, aligning natively inside the merge
+  benchmark, and interleaving the merge's two accumulation planes.
 
 A recurring lesson, hit four times now: a single reported figure often bundles
 two very different things. Splitting the timer before optimising found that
@@ -43,14 +43,19 @@ is the largest item inside "develop".
 
 ## Next step
 
-Two, in the order they are worth trying, both in `nAddFrame`:
+**NEON** in `nAddFrame`, now that the inner loop is a flat span of pixels with
+no branch in it. Two things to know before starting:
 
-1. **`sum` and `weight` are separate 50 MB planes**, so every pixel touches two
-   cache lines far apart and each thread keeps four streams going. Interleaving
-   them into one plane of pairs would halve the streams and put both values a
-   pixel needs on one line. It touches `nSetReference` and `nFinish` too.
-2. **NEON**, which is finally worth reaching for now that the inner loop is a
-   flat span of pixels with no branch in it.
+- The accumulation is **not bandwidth-bound**. `setReference` sustains about
+  13 GB/s over the same buffers through the same band scheduler while the
+  accumulate manages a third of that, so there is headroom for wider arithmetic
+  to actually show up.
+- **Interleaving `sum` and `weight` into one plane of pairs has already been
+  tried and reverted.** Do not repeat it. It is arithmetically identical and
+  makes no measurable difference, and the reason is that interleaving does
+  nothing for sequential access: sixteen consecutive pixels touch two cache
+  lines either way. Array-of-structs wins when access is random. The session
+  log has the numbers.
 
 `DevelopParityTest.nativeAndKotlinMergeAgree` and
 `nativeAndKotlinMergeAgreeOnAVaryingField` are the safety net and both pass, so
