@@ -1290,21 +1290,41 @@ evidently takes the same path for an axis-aligned rotation whichever flag it is
 given, and the difference is this device's ordinary run-to-run spread. Reverted,
 because a change with no evidence behind it is worse than no change.
 
-**What to do about it is genuinely open**, and the obvious answer is not
-obviously right. Folding the quarter turn into the native develop's output
-indexing sounds free -- the render already writes into a bitmap, so write into a
-transposed one -- but a transposed write scatters across fifty megabytes instead
-of running along it, and a cache-hostile store pattern can cost more than the
-separate pass it replaces. Doing it properly means a blocked transpose, and Skia
-is likely already doing something of the sort. Any version of this has to be
-measured against 232 ms rather than assumed to beat it.
+**A blocked transpose took it to 69 ms.**
 
-The alternative is to not rotate at all: leave the pixels in the sensor's
-orientation and write an EXIF orientation tag, which is what every camera does
-and what the DNG already carries. That is not an optimisation but a change to
-what the file *is* -- it trades 232 ms for a dependence on the viewer honouring
-the tag, and this app currently rotates precisely so that it does not have to.
-Worth deciding deliberately rather than for speed.
+    flat:     native+setup 386ms, rotate  0ms, encode+save 348ms
+    upright:  native+setup 289ms, rotate 69ms, encode+save 334ms
+
+The reason a transpose is slow is not arithmetic, it is memory: walking the
+source along its rows means walking the destination down its columns, so every
+pixel written lands in a different cache line and a 50 MB destination evicts
+itself continuously. Copying in 32x32 tiles fixes that -- a tile of the source
+maps to a tile of the destination and both fit in L1 while it is copied. Reads
+stay sequential within a row; writes stay inside thirty-two short runs instead
+of scattering across the whole image.
+
+232 ms to 69, which is about 163 ms off every upright photograph. At 1024x768,
+where the allocation is the same on both sides and only the transpose differs,
+it is 5.7 ms against the framework's 15.2.
+
+**Pinned pixel for pixel, because dimensions prove almost nothing here.** A
+transpose with its handedness reversed produces an image of exactly the right
+shape and the wrong contents, and the capture test asserting that 4080x3072
+becomes 3072x4080 would pass on a mirrored picture. `RotateParityTest` compares
+against the framework's Matrix path pixel by pixel, on a pattern where every
+pixel encodes its own coordinates so nothing can move unnoticed, at sizes that
+are deliberately not multiples of the tile -- the partial tiles at the right and
+bottom edges being where an off-by-one would hide in a strip a few pixels wide.
+Seven cases, zero differing pixels.
+
+**The alternative was not taken, and remains available.** Not rotating at all --
+leaving the pixels in the sensor's orientation and writing an EXIF orientation
+tag, as every camera does and as the DNG already carries -- would cost nothing
+at all. It is not an optimisation but a change to what the file *is*, trading
+the last 69 ms for a dependence on every viewer honouring the tag, which is
+precisely what this app rotates in order not to need. Worth deciding on its
+merits rather than for speed, and 69 ms is a much weaker reason to decide it
+than 232 was.
 
 **The disk was not the problem, and that was worth checking rather than
 assuming.** With 42 GB free instead of 5.9, and the gallery emptied:

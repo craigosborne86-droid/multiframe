@@ -6,6 +6,7 @@ add_library(multiframe SHARED
     RingBuffer.cpp
     Mosaic.cpp
     Align.cpp
+    Rotate.cpp
 )
 
 target_compile_options(multiframe PRIVATE
