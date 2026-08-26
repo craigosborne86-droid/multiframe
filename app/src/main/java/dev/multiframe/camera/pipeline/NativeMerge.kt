@@ -78,6 +78,10 @@ class NativeMerge private constructor(
         shading: ShadingMap? = null,
     ): Bitmap? {
         val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        // Five stages hide behind one figure here, and four of them have never
+        // been timed. Every one is a full pass over twelve and a half
+        // megapixels, so any of them could be the largest.
+        val tExposure = System.currentTimeMillis()
         val gain = if (params.exposureGain > 0f) {
             params.exposureGain
         } else {
@@ -86,7 +90,9 @@ class NativeMerge private constructor(
                 color.gains, params.highlightPercentile, params.highlightTarget,
             )
         }
+        val tBitmap = System.currentTimeMillis()
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val tNative = System.currentTimeMillis()
         val ok = nDevelop(
             merged, bitmap, width, height,
             profile.cfaPattern, black, profile.whiteLevel,
@@ -104,6 +110,7 @@ class NativeMerge private constructor(
         // Further passes, because both need each pixel's neighbours and the
         // develop loop writes one pixel at a time. Defringe first: sharpening a
         // fringe would make it worse.
+        val tDefringe = System.currentTimeMillis()
         if (params.defringe.enabled) {
             val altered = nDefringe(
                 bitmap, params.defringe.edgeThreshold,
@@ -112,13 +119,22 @@ class NativeMerge private constructor(
             )
             if (altered > 0) Log.i(TAG, "defringed $altered pixels")
         }
+        val tSharpen = System.currentTimeMillis()
         if (params.sharpen.enabled) {
             nSharpen(
                 bitmap, params.sharpen.amount, params.sharpen.threshold,
                 params.sharpen.maxShift,
             )
         }
+        val tEnd = System.currentTimeMillis()
         Log.i(TAG, "native develop gain=%.2f".format(gain))
+        Log.i(
+            TAG,
+            "develop stages: autoexposure %dms, bitmap %dms, render %dms, defringe %dms, sharpen %dms".format(
+                tBitmap - tExposure, tNative - tBitmap, tDefringe - tNative,
+                tSharpen - tDefringe, tEnd - tSharpen,
+            ),
+        )
         return bitmap
     }
 

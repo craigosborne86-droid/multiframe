@@ -866,7 +866,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     ensureGammaLut();
 
     // Stage clocks, declared here so they outlive the blocks they are taken in.
-    int64_t tBlack = 0, tShading = 0, tDemosaic = 0;
+    int64_t tBlack = 0, tHotPixels = 0, tShading = 0, tDemosaic = 0;
 
     // Lens shading, when the camera reported a map for this capture. Raw is
     // defined as uncorrected, so without this every frame carries a stop and a
@@ -945,6 +945,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         }
     });
 
+    tHotPixels = nowMicros();
     if (hotPixelThreshold > 0.0f) {
         const long replaced = suppressHotPixels(plane.data(), width, height, hotPixelThreshold);
         if (replaced > 0) {
@@ -1070,9 +1071,9 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     });
 
     const int64_t tEnd = nowMicros();
-    LOGI("develop: black %lldms, shading %lldms, demosaic+tone %lldms, total %lldms",
-         (tShading - tBlack) / 1000, (tDemosaic - tShading) / 1000,
-         (tEnd - tDemosaic) / 1000, (tEnd - tBlack) / 1000);
+    LOGI("develop: black %lldms, hotpixels %lldms, shading %lldms, demosaic+tone %lldms, total %lldms",
+         (tHotPixels - tBlack) / 1000, (tShading - tHotPixels) / 1000,
+         (tDemosaic - tShading) / 1000, (tEnd - tDemosaic) / 1000, (tEnd - tBlack) / 1000);
 
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
@@ -1157,6 +1158,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
 
     // Written into a copy of the rows being read, since a pixel's neighbours
     // must be the original values rather than already-sharpened ones.
+    const int64_t tCopyIn = nowMicros();
     const size_t outputBytes = static_cast<size_t>(height) * stride;
     std::vector<uint8_t>& output = gScratch.bytes(outputBytes);
     std::memcpy(output.data(), base, outputBytes);
@@ -1196,15 +1198,20 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
         }
     });
 
+    const int64_t tCopyOut = nowMicros();
     std::memcpy(base, output.data(), outputBytes);
 
-    // Sharpening is its own JNI call, so it reports its own two passes. The
-    // point of splitting these at all is that "develop 900ms" says nothing
-    // about which pass to spend effort on -- the merge spent a phase aimed at
-    // the wrong half for exactly that reason.
+    // Sharpening is its own JNI call, so it reports its own passes. The point
+    // of splitting these at all is that "develop 900ms" says nothing about
+    // which pass to spend effort on -- the merge spent a phase aimed at the
+    // wrong half for exactly that reason. The two copies are timed apart from
+    // the work, because they are fifty megabytes each and nothing had ever
+    // said what they cost.
     const int64_t tEnd = nowMicros();
-    LOGI("sharpen: luma %lldms, sharpen %lldms, total %lldms",
-         (tSharpen - tLuma) / 1000, (tEnd - tSharpen) / 1000, (tEnd - tLuma) / 1000);
+    LOGI("sharpen: luma %lldms, copies %lldms, sharpen %lldms, total %lldms",
+         (tCopyIn - tLuma) / 1000,
+         ((tSharpen - tCopyIn) + (tEnd - tCopyOut)) / 1000,
+         (tCopyOut - tSharpen) / 1000, (tEnd - tLuma) / 1000);
 
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;

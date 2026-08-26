@@ -228,6 +228,11 @@ object RawBurstCapture {
         if (shading != null) {
             Log.i(TAG, "lens shading: %.2f stops of falloff".format(shading.falloffStops))
         }
+        // The colour profile and the shading map are read from the capture
+        // result rather than computed over the image, so this ought to be
+        // nothing. Timed anyway, because "ought to be nothing" is how the JPEG
+        // encode stayed hidden inside develop for as long as it did.
+        val setupMillis = System.currentTimeMillis() - t3
         // Native develop writes into the Bitmap's own pixels, so nothing here
         // touches the Java heap. Falls back to the Kotlin developer, which is
         // the implementation the unit tests cover, if native declines.
@@ -289,8 +294,10 @@ object RawBurstCapture {
         // being aimed at the wrong one, which has now happened twice.
         Log.i(
             TAG,
-            "develop breakdown: native+setup %dms, rotate %dms, encode+save %dms".format(
-                developMillis - rotateMillis - encodeMillis, rotateMillis, encodeMillis,
+            "develop breakdown: setup %dms, native %dms, rotate %dms, encode+save %dms".format(
+                setupMillis,
+                developMillis - setupMillis - rotateMillis - encodeMillis,
+                rotateMillis, encodeMillis,
             ),
         )
 
