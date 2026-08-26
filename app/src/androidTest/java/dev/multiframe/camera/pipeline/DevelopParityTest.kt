@@ -10,6 +10,7 @@ import org.junit.runner.RunWith
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.random.Random
 
 private const val TAG = "DevelopParity"
@@ -33,7 +34,7 @@ class DevelopParityTest {
     private val fixedGain = DevelopParams(exposureGain = 3.5f)
 
     /** A scene with edges, colour and noise, so every kernel branch is used. */
-    private fun scene(): BayerFrame {
+    private fun scene(width: Int = this.width, height: Int = this.height): BayerFrame {
         val rnd = Random(7)
         val data = ShortArray(width * height)
         for (y in 0 until height) {
@@ -54,6 +55,61 @@ class DevelopParityTest {
             }
         }
         return BayerFrame(width, height, data)
+    }
+
+    /** Native develop against the Kotlin one, over the interior. */
+    private fun assertDevelopParity(w: Int, h: Int, colour: ColorProfile) {
+        val frame = scene(w, h)
+        val expected = RawDeveloper.develop(frame, profile, colour, fixedGain)
+
+        val merger = NativeMerge.create(w, h, profile)
+        assertThat(merger).isNotNull()
+        val buffer = directBufferOf(frame)
+        val bitmap = merger!!.use { it.develop(buffer, colour, fixedGain) }
+        assertThat(bitmap).isNotNull()
+
+        // Rendered again with sharpening off, purely so this test can show that
+        // sharpening did something at this width. Without it the comparison
+        // below would pass just as happily on a fixture too flat to sharpen,
+        // which would make it silent about the very loop it exists to cover.
+        val unsharpened = NativeMerge.create(w, h, profile)!!.use {
+            it.develop(directBufferOf(frame), colour,
+                fixedGain.copy(sharpen = Sharpen.Params(amount = 0f)))
+        }
+        assertThat(unsharpened).isNotNull()
+        var sharpened = 0
+        for (y in 3 until h - 3) {
+            for (x in 3 until w - 3) {
+                if (bitmap!!.getPixel(x, y) != unsharpened!!.getPixel(x, y)) sharpened++
+            }
+        }
+        unsharpened!!.recycle()
+        Log.i(TAG, "sharpening moved $sharpened pixels at ${w}x$h")
+        assertThat(sharpened).isGreaterThan(0)
+
+        var worst = 0
+        var differing = 0
+        for (y in 3 until h - 3) {
+            for (x in 3 until w - 3) {
+                val a = expected[y * w + x]
+                val b = bitmap!!.getPixel(x, y)
+                var pixelWorst = 0
+                for (shift in intArrayOf(16, 8, 0)) {
+                    val da = (a shr shift) and 0xFF
+                    val db = when (shift) {
+                        16 -> Color.red(b)
+                        8 -> Color.green(b)
+                        else -> Color.blue(b)
+                    }
+                    pixelWorst = max(pixelWorst, abs(da - db))
+                }
+                if (pixelWorst > 0) differing++
+                worst = max(worst, pixelWorst)
+            }
+        }
+        bitmap!!.recycle()
+        Log.i(TAG, "develop parity at ${w}x$h: worst $worst/255, $differing pixels differing")
+        assertThat(worst).isAtMost(2)
     }
 
     private fun directBufferOf(frame: BayerFrame): ByteBuffer {
@@ -394,6 +450,38 @@ class DevelopParityTest {
      * both implementations they would still agree perfectly. This guards the
      * wiring rather than the arithmetic.
      */
+    /**
+     * The same picture, at widths that strand the sharpening vector loop.
+     *
+     * Sharpening walks a row four pixels at a time and finishes what is left
+     * one at a time. The fixture above is 64 wide, which leaves a remainder of
+     * two -- so a mistake in the one-pixel or three-pixel tail would not show
+     * there. These four widths give remainders of two, three, nought and one,
+     * which is every case the loop has.
+     *
+     * Two of them are odd, which no sensor is. That is deliberate: an even
+     * width can only ever leave a remainder of nought or two, so the odd tails
+     * are unreachable from a real frame size and would go untested for as long
+     * as the fixtures looked like sensors.
+     *
+     * The vector path is written to be bit-identical to the scalar one rather
+     * than merely close: the nine luminance values are added in the same order,
+     * lane by lane, because float addition is not associative and summing them
+     * by row -- the obvious way to vectorise this -- would produce a different
+     * picture from the Kotlin reference.
+     */
+    @Test
+    fun nativeAndKotlinDevelopAgreeAtWidthsThatStrandTheVectorLoop() {
+        assertThat(NativeMerge.isAvailable()).isTrue()
+        val colour = ColorProfile(
+            gains = floatArrayOf(1.9f, 1f, 1f, 1.6f),
+            matrix = floatArrayOf(1.7f, -0.6f, -0.1f, -0.2f, 1.5f, -0.3f, 0f, -0.4f, 1.4f),
+        )
+        for (w in intArrayOf(64, 65, 66, 67)) {
+            assertDevelopParity(w, 48, colour)
+        }
+    }
+
     @Test
     fun nativeSharpeningRunsAndRespectsItsThreshold() {
         val w = 96

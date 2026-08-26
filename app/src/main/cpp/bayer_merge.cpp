@@ -1156,62 +1156,138 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
         }
     });
 
-    // Written into a copy of the rows being read, since a pixel's neighbours
-    // must be the original values rather than already-sharpened ones.
-    const int64_t tCopyIn = nowMicros();
-    const size_t outputBytes = static_cast<size_t>(height) * stride;
-    std::vector<uint8_t>& output = gScratch.bytes(outputBytes);
-    std::memcpy(output.data(), base, outputBytes);
-
+    // Written in place, over the pixels being read.
+    //
+    // This used to go through a full copy of the image -- fifty megabytes out
+    // and fifty back -- on the grounds that a pixel's neighbours must be the
+    // original values rather than already-sharpened ones. That is true, and it
+    // is already guaranteed by something else: every neighbour this loop reads
+    // comes from `luma`, which was computed above from the untouched image and
+    // is never written again. The only pixel whose colour is read is the one
+    // being written. So the copy was guarding a hazard that cannot occur, and
+    // it was measured costing eleven milliseconds a capture to do it.
     const int64_t tSharpen = nowMicros();
     parallelBands(height, [&](int y0, int y1) {
         const int from = std::max(y0, 1);
         const int to = std::min(y1, height - 1);
         for (int y = from; y < to; ++y) {
-            uint8_t* dst = output.data() + static_cast<size_t>(y) * stride;
-            const uint8_t* src = base + static_cast<size_t>(y) * stride;
-            for (int x = 1; x < width - 1; ++x) {
+            uint8_t* row = base + static_cast<size_t>(y) * stride;
+            const float* centre = luma.data() + static_cast<size_t>(y) * width;
+            int x = 1;
+
+#if defined(__ARM_NEON)
+            // Four pixels at a time.
+            //
+            // Bit-identical to the scalar loop below, which is what makes it
+            // safe to run instead of that loop rather than beside it. Every
+            // vector add is lane-wise, so lane j performs exactly the sequence
+            // of nine additions the scalar code performs for x+j, in the same
+            // order -- and float addition being non-associative is the whole
+            // reason that order had to be preserved rather than rearranged
+            // into row sums, which is the obvious way to write this and would
+            // have produced a different picture.
+            //
+            // `vcvtaq_s32_f32` rounds to nearest with ties away from zero,
+            // which is precisely what `std::lround` does, so the rounding
+            // agrees as well.
+            const float32x4_t vThreshold = vdupq_n_f32(threshold);
+            const float32x4_t vAmount = vdupq_n_f32(amount);
+            const float32x4_t vMaxShift = vdupq_n_f32(maxShift);
+            const float32x4_t vMinShift = vdupq_n_f32(-maxShift);
+            const float32x4_t vNine = vdupq_n_f32(9.0f);
+            // Alpha is not a colour channel and takes no shift. Its lane is
+            // held back rather than shifted and repaired, because 255 plus a
+            // negative shift does not clamp back to 255.
+            const uint8x16_t alphaLanes = vreinterpretq_u8_u32(vdupq_n_u32(0xFF000000u));
+
+            for (; x + 3 <= width - 2; x += 4) {
+                const float* l = centre + x;
+                float32x4_t sum = vld1q_f32(l - width - 1);
+                sum = vaddq_f32(sum, vld1q_f32(l - width));
+                sum = vaddq_f32(sum, vld1q_f32(l - width + 1));
+                sum = vaddq_f32(sum, vld1q_f32(l - 1));
+                const float32x4_t here = vld1q_f32(l);
+                sum = vaddq_f32(sum, here);
+                sum = vaddq_f32(sum, vld1q_f32(l + 1));
+                sum = vaddq_f32(sum, vld1q_f32(l + width - 1));
+                sum = vaddq_f32(sum, vld1q_f32(l + width));
+                sum = vaddq_f32(sum, vld1q_f32(l + width + 1));
+
+                const float32x4_t detail = vsubq_f32(here, vdivq_f32(sum, vNine));
+                // Below the threshold this is noise or texture the merge just
+                // finished cleaning up. Those lanes keep their original bytes.
+                const uint32x4_t keep = vcltq_f32(vabsq_f32(detail), vThreshold);
+                const float32x4_t shift =
+                    vminq_f32(vmaxq_f32(vmulq_f32(detail, vAmount), vMinShift), vMaxShift);
+
+                uint8_t* q = row + static_cast<size_t>(x) * 4;
+                const uint8x16_t px = vld1q_u8(q);
+                const uint16x8_t lo = vmovl_u8(vget_low_u8(px));
+                const uint16x8_t hi = vmovl_u8(vget_high_u8(px));
+
+                // One float vector per pixel: its four channels, with that
+                // pixel's shift broadcast across them.
+                const float32x4_t p0 = vaddq_f32(
+                    vcvtq_f32_u32(vmovl_u16(vget_low_u16(lo))), vdupq_laneq_f32(shift, 0));
+                const float32x4_t p1 = vaddq_f32(
+                    vcvtq_f32_u32(vmovl_u16(vget_high_u16(lo))), vdupq_laneq_f32(shift, 1));
+                const float32x4_t p2 = vaddq_f32(
+                    vcvtq_f32_u32(vmovl_u16(vget_low_u16(hi))), vdupq_laneq_f32(shift, 2));
+                const float32x4_t p3 = vaddq_f32(
+                    vcvtq_f32_u32(vmovl_u16(vget_high_u16(hi))), vdupq_laneq_f32(shift, 3));
+
+                // The saturating narrows do the clamp to 0..255 on the way down.
+                const int16x8_t n0 = vcombine_s16(vqmovn_s32(vcvtaq_s32_f32(p0)),
+                                                  vqmovn_s32(vcvtaq_s32_f32(p1)));
+                const int16x8_t n1 = vcombine_s16(vqmovn_s32(vcvtaq_s32_f32(p2)),
+                                                  vqmovn_s32(vcvtaq_s32_f32(p3)));
+                const uint8x16_t shifted =
+                    vcombine_u8(vqmovun_s16(n0), vqmovun_s16(n1));
+
+                // A lane's compare result is 32 bits wide and a pixel is four
+                // bytes, so the mask lines up with the pixels with no widening
+                // at all: one comparison covers exactly one pixel's bytes.
+                const uint8x16_t original =
+                    vorrq_u8(vreinterpretq_u8_u32(keep), alphaLanes);
+                vst1q_u8(q, vbslq_u8(original, px, shifted));
+            }
+#endif
+
+            for (; x < width - 1; ++x) {
                 float sum = 0.0f;
                 for (int dy = -1; dy <= 1; ++dy) {
-                    const size_t row = static_cast<size_t>(y + dy) * width;
+                    const size_t r = static_cast<size_t>(y + dy) * width;
                     for (int dx = -1; dx <= 1; ++dx) {
-                        sum += luma[row + x + dx];
+                        sum += luma[r + x + dx];
                     }
                 }
                 const float blurred = sum / 9.0f;
-                const float detail = luma[static_cast<size_t>(y) * width + x] - blurred;
+                const float detail = centre[x] - blurred;
 
                 // Below the threshold this is noise or texture the merge just
                 // finished cleaning up.
                 if (std::fabs(detail) < threshold) continue;
 
                 const float shift = std::clamp(detail * amount, -maxShift, maxShift);
-                const uint8_t* p = src + static_cast<size_t>(x) * 4;
-                uint8_t* q = dst + static_cast<size_t>(x) * 4;
+                uint8_t* q = row + static_cast<size_t>(x) * 4;
                 // The same shift in all three channels moves brightness without
                 // moving hue; scaling per channel is what puts coloured
                 // speckle along every edge.
-                q[0] = shiftChannel(p[0], shift);
-                q[1] = shiftChannel(p[1], shift);
-                q[2] = shiftChannel(p[2], shift);
+                q[0] = shiftChannel(q[0], shift);
+                q[1] = shiftChannel(q[1], shift);
+                q[2] = shiftChannel(q[2], shift);
             }
         }
     });
 
-    const int64_t tCopyOut = nowMicros();
-    std::memcpy(base, output.data(), outputBytes);
-
     // Sharpening is its own JNI call, so it reports its own passes. The point
     // of splitting these at all is that "develop 900ms" says nothing about
     // which pass to spend effort on -- the merge spent a phase aimed at the
-    // wrong half for exactly that reason. The two copies are timed apart from
-    // the work, because they are fifty megabytes each and nothing had ever
-    // said what they cost.
+    // wrong half for exactly that reason, and this pass had never been timed
+    // at all until it turned out to be a third of the native develop.
     const int64_t tEnd = nowMicros();
-    LOGI("sharpen: luma %lldms, copies %lldms, sharpen %lldms, total %lldms",
-         (tCopyIn - tLuma) / 1000,
-         ((tSharpen - tCopyIn) + (tEnd - tCopyOut)) / 1000,
-         (tCopyOut - tSharpen) / 1000, (tEnd - tLuma) / 1000);
+    LOGI("sharpen: luma %lldms, sharpen %lldms, total %lldms",
+         (tSharpen - tLuma) / 1000, (tEnd - tSharpen) / 1000, (tEnd - tLuma) / 1000);
 
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;

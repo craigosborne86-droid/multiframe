@@ -200,6 +200,21 @@ class NativeMerge private constructor(
                 .onFailure { Log.w(TAG, "could not release develop scratch", it) }
         }
 
+        /**
+         * Sharpens a bitmap in place, without developing anything.
+         *
+         * Sharpening is otherwise reachable only through a full develop, which
+         * spends three times as long on everything else and buries the figure.
+         * It reads nothing from the accumulator, so it needs no handle -- the
+         * same reason [releaseScratch] can go through an instance that owns
+         * none.
+         */
+        internal fun sharpenInPlace(bitmap: Bitmap, params: Sharpen.Params): Boolean {
+            if (!isAvailable()) return false
+            return NativeMerge(0L, 0, 0, SensorProfile.DEFAULT)
+                .nSharpen(bitmap, params.amount, params.threshold, params.maxShift)
+        }
+
         /** Whether the native library loaded. Falls back to Kotlin if not. */
         fun isAvailable(): Boolean {
             available?.let { return it }
