@@ -1236,11 +1236,58 @@ balance across the sweep. The lock is worth doing early for a second reason: it
 is what would let a mosaic carry an exposure and an ISO instead of omitting
 them.
 
-**Measure develop on a cool phone.** The instrumentation is in and the target is
-identified, but every absolute taken so far came off a warm device with a
-gallery full of test captures. What is owed is one clean run: charged, idle,
-`DCIM/Multiframe` cleared, and the stage lines read straight out of logcat.
-Until then the phase has a diagnosis and no numbers. It is the same shape of problem -- a per-pixel kernel
+**Phase 8 has its numbers, and they point somewhere else again.** Measured at
+31.2 C, holding steady through the run, on a charged phone:
+
+    develop: black 45ms, shading 64ms, demosaic+tone 149ms, total 260ms
+    sharpen: luma 27ms, sharpen 62ms, total 89ms
+    develop breakdown: native+setup 360ms, rotate 0ms, encode+save 284ms
+
+So of the figure this log has been calling develop, the native render and
+sharpen together are about 350 ms, the setup around 110 ms, and **the JPEG
+encode and gallery publish 284 to 375 ms** -- as much as all the native
+rendering, and two and a half times the demosaic that was named as the target.
+Demosaic and tone is 149 ms of an 800 ms figure: under a fifth.
+
+One caution stands: the rotation reads zero because the test captures at zero
+degrees, and a photograph taken with the phone upright pays a full
+twelve-megapixel rotation that nothing here has measured.
+
+**The disk was not the problem, and that was worth checking rather than
+assuming.** With 42 GB free instead of 5.9, and the gallery emptied:
+
+    saveJpeg: compress+write 227ms, publish 47ms
+    saveJpeg: compress+write 264ms, publish 97ms
+    saveJpeg: compress+write 238ms, publish 44ms
+
+`encode+save` was 284-375 ms on a 98%-full disk and is 290-379 ms on an empty
+one. Freeing 36 GB moved it not at all. The cost is the JPEG compression -- some
+240 ms to encode twelve and a half megapixels at quality 95 -- against 44 to
+97 ms for the gallery publish. So the largest single item inside develop is
+neither the demosaic nor the disk: it is turning the finished bitmap into a
+JPEG, and it is larger than the demosaic and the tone curve together.
+
+**What the free disk did change was the spread.** Three shots went from
+670/532/569 ms to 608/610/621 -- the same mean, and a spread of 13 ms where it
+had been 138. This log has already argued, when develop's working buffers were
+kept between captures, that a camera which sometimes takes half a second longer
+for no visible reason is worse than one uniformly slower. A full disk was buying
+exactly that unpredictability. Three samples either side is thin evidence for a
+mean and reasonable evidence for a tenfold difference in spread.
+
+**Where that points.** The JPEG encode is not obviously wasteful -- 12.5 MP at
+52 MP/s through libjpeg-turbo is about what it costs. But it currently runs
+*after* the DNG has been written, and the two have nothing to say to each other.
+Overlapping them would hide one behind the other without making either faster,
+which is worth more than shaving the demosaic.
+
+**First-capture figures are not steady-state ones.** The first capture after an
+install measured a 1441 ms merge against 934 ms warm, which briefly looked like
+a regression. It is a cold path: retained develop buffers not yet allocated,
+caches cold, and a governor that has not ramped on an idle phone. Three
+consecutive captures settle to 130-156 ms of alignment where the warm phone gave
+176-270. Cool and warmed-up are different conditions and this log should say
+which it means. It is the same shape of problem -- a per-pixel kernel
 in one pass -- and it has a native implementation already, so the question is
 what that implementation is spending its time on rather than which language it
 is in.

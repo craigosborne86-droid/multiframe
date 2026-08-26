@@ -32,11 +32,24 @@ object ImageSaver {
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: return null
 
+        val tCompress = System.currentTimeMillis()
         resolver.openOutputStream(uri)?.use { out: OutputStream ->
             bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
         } ?: return null
+        val compressMillis = System.currentTimeMillis() - tCompress
 
-        return publish(context, uri, values, metadata, displayName)
+        // Split because "encode and save" was measured at 284-375 ms without
+        // anyone knowing which half it was -- and it was measured on a disk
+        // that was 98% full, where the write and the publish are both suspect.
+        val tPublish = System.currentTimeMillis()
+        val published = publish(context, uri, values, metadata, displayName)
+        Log.i(
+            TAG,
+            "saveJpeg: compress+write %dms, publish %dms".format(
+                compressMillis, System.currentTimeMillis() - tPublish,
+            ),
+        )
+        return published
     }
 
     /**

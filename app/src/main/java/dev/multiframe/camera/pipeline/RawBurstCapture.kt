@@ -215,7 +215,11 @@ object RawBurstCapture {
                 BayerFrame(width, height, shorts), profile, color, shading = shading,
             )
         }
+        val tRotate = System.currentTimeMillis()
         bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
+        val rotateMillis = System.currentTimeMillis() - tRotate
+
+        val tEncode = System.currentTimeMillis()
         val jpegName = "MF_${stamp}_${tag}_${captured}f.jpg"
         // Bitmap.compress writes no metadata at all, so without this every
         // photograph arrives in a library with no camera, no lens and no
@@ -231,7 +235,20 @@ object RawBurstCapture {
             ),
         ) != null
         bitmap.recycle()
+        val encodeMillis = System.currentTimeMillis() - tEncode
         val developMillis = System.currentTimeMillis() - t3
+
+        // "develop" has never only been develop. It spans the colour profile,
+        // the native render, a full-resolution rotation, the JPEG encode and
+        // the gallery publish -- and on a cool phone the native part is under
+        // half of it. Naming the parts is what stops the next optimisation
+        // being aimed at the wrong one, which has now happened twice.
+        Log.i(
+            TAG,
+            "develop breakdown: native+setup %dms, rotate %dms, encode+save %dms".format(
+                developMillis - rotateMillis - encodeMillis, rotateMillis, encodeMillis,
+            ),
+        )
 
         val parts = buildList {
             if (dngOk) add("DNG")
