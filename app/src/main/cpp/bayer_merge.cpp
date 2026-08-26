@@ -298,6 +298,31 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
     long long totalCount = 0;
     std::mutex totals;
 
+    // Two things the inner loop was recomputing twelve and a half million times
+    // an image, both of them functions of something that does not vary.
+    //
+    // The tile column depends only on x, so it is the same for every row and
+    // for every frame in the burst -- and it was costing a float division and a
+    // clamp per pixel. The noise variance depends only on the reference value
+    // at that site, through a bin index that is another float division.
+    //
+    // Neither is an approximation: each entry is the identical expression
+    // evaluated at the identical input, just evaluated once. The merge is
+    // pinned to BayerAccumulator by a parity test, and memoising is the only
+    // kind of change that test cannot be made to fail by.
+    std::vector<int> txForX(static_cast<size_t>(w));
+    for (int x = 0; x < w; ++x) {
+        txForX[static_cast<size_t>(x)] =
+            std::clamp(static_cast<int>((x / 2) / tileW), 0, tilesX - 1);
+    }
+
+    const int noiseSpan = acc->white + 1;
+    std::vector<float> noiseForValue(static_cast<size_t>(noiseSpan));
+    for (int v = 0; v < noiseSpan; ++v) {
+        noiseForValue[static_cast<size_t>(v)] =
+            acc->noiseVar[binOf(static_cast<float>(v), acc->white)];
+    }
+
     parallelBands(h, [&](int y0, int y1) {
         double localContrib = 0.0;
         long long localCount = 0;
@@ -305,20 +330,24 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
         for (int y = y0; y < y1; ++y) {
             int ty = std::clamp(static_cast<int>((y / 2) / tileH), 0, tilesY - 1);
             const size_t rowBase = static_cast<size_t>(y) * w;
+            const int tyBase = ty * tilesX;
             for (int x = 0; x < w; ++x) {
-                int tx = std::clamp(static_cast<int>((x / 2) / tileW), 0, tilesX - 1);
-                int idx = ty * tilesX + tx;
+                int idx = tyBase + txForX[static_cast<size_t>(x)];
                 // Doubling a proxy offset always yields an even shift, keeping
                 // every sample on its own colour plane.
                 int sx = x + dx[idx] * 2;
                 int sy = y + dy[idx] * 2;
                 if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
 
-                float refV = static_cast<float>(acc->reference[rowBase + x]);
+                const uint16_t refRaw = acc->reference[rowBase + x];
+                float refV = static_cast<float>(refRaw);
                 float altV = static_cast<float>(sampleAt(base, rowStride, sx, sy));
                 float d = altV - refV;
                 float d2 = d * d;
-                float n2 = acc->noiseVar[binOf(refV, acc->white)];
+                // Values above white clamp to the top bin, which is what binOf
+                // did with them, so the table's last entry answers for them.
+                float n2 = noiseForValue[
+                    static_cast<size_t>(std::min<int>(refRaw, acc->white))];
                 float wgt = (d2 <= n2) ? 1.0f : n2 / d2;
 
                 acc->sum[rowBase + x] += altV * wgt;

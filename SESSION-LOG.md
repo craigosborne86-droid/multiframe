@@ -1443,6 +1443,37 @@ and could not be brought back remotely. That is legitimate here for the reason
 already recorded: this is arithmetic on synthetic frames, framework behaviour
 rather than camera behaviour, and no timing is claimed from it.
 
+## The merge accumulation, without the divisions
+
+With the parity test finally watching it, the accumulation could be touched. It
+was doing two float divisions per pixel, twelve and a half million pixels a
+frame, for values that do not vary per pixel at all:
+
+- the tile column, `(x / 2) / tileW` clamped, which depends only on x and is
+  therefore the same for every row of every frame in the burst
+- the noise bin, `(value / (white + 1)) * bins` clamped, which depends only on
+  the reference value at that site
+
+Both became tables built once per frame. This is memoisation rather than
+optimisation: each entry is the identical expression evaluated at the identical
+input, so there is no approximation to argue about, and the parity test cannot
+be made to fail by it. Measured on the phone at around 31 C, three frames:
+
+    accumulate before:  180, 148, 190 ms
+    accumulate after:   139,  91, 106 ms
+
+The ranges do not overlap -- the slowest sample after is faster than the fastest
+before -- which is the bar this log requires before a speed claim is allowed to
+stand. Roughly a third off, for arithmetic that was never needed. Alignment sat
+unchanged at 138-167 ms beside it, which is the control: nothing about the run
+was faster in general.
+
+**What is left in there is the branch and the address arithmetic.** Within a
+run of pixels sharing a tile the displacement is constant, so the bounds test
+and the source row pointer could both be hoisted to the run rather than the
+pixel, and only then is there any point reaching for NEON. That is the next
+thing, not this one.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
