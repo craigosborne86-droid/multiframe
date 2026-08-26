@@ -111,6 +111,7 @@ import dev.multiframe.camera.pipeline.OrientationTracker
 import dev.multiframe.camera.pipeline.Attitude
 import dev.multiframe.camera.pipeline.LevelSensor
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.ui.graphics.Brush
 import dev.multiframe.camera.ui.Ink
 import dev.multiframe.camera.ui.AboutSheet
@@ -118,6 +119,7 @@ import dev.multiframe.camera.ui.GuideMode
 import dev.multiframe.camera.ui.Guides
 import dev.multiframe.camera.ui.Histogram
 import dev.multiframe.camera.ui.Peaking
+import dev.multiframe.camera.ui.SweepMap
 import dev.multiframe.camera.ui.ControlsPanel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -220,6 +222,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // Telephoto mosaic: cover this framing with a longer lens's detail.
     var sweepRequested by remember { mutableStateOf(false) }
     var sweepProgress by remember { mutableStateOf<MosaicProgress?>(null) }
+    // Read off the session rather than carried on MosaicProgress: an array
+    // inside a data class compares by identity, which would quietly make every
+    // progress update unequal to the last one for every other reader of it.
+    var sweepGrid by remember { mutableStateOf<Array<BooleanArray>?>(null) }
+    var sweepAspect by remember { mutableFloatStateOf(1f) }
     var sweepTargetLens by remember { mutableStateOf<Lens?>(null) }
 
     // Composition aids. One control cycles them rather than several toggles.
@@ -762,6 +769,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             return@LaunchedEffect
         }
 
+        // The map is drawn at the shape of the canvas being built, not the
+        // shape of the viewfinder, which during a sweep is the telephoto's.
+        sweepAspect = plan.canvasWidth.toFloat() / plan.canvasHeight
+
         busy = true
         status = "sweep: pan slowly across the scene"
         val result = withContext(Dispatchers.Default) {
@@ -772,7 +783,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     session = it,
                     settings = settings,
                     caps = c,
-                    onProgress = { p -> sweepProgress = p },
+                    onProgress = { p ->
+                        sweepProgress = p
+                        sweepGrid = it.coverageGrid()
+                    },
                     shouldContinue = { sweepRequested },
                 )
             }
@@ -782,6 +796,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             result.message, result.megapixels, result.elapsedMillis / 1000.0,
         )
         sweepProgress = null
+        sweepGrid = null
         sweepRequested = false
         // Back to the framing the user was composing with.
         lens = target
@@ -1294,6 +1309,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     .padding(horizontal = 18.dp, vertical = 14.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                sweepGrid?.let { grid ->
+                    SweepMap(
+                        grid = grid,
+                        aspect = sweepAspect,
+                        modifier = Modifier
+                            .width(132.dp)
+                            .padding(bottom = 12.dp),
+                    )
+                }
                 Text(
                     text = "${progress.placed} tiles",
                     color = Color.White,

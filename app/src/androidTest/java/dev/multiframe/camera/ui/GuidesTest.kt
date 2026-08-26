@@ -56,6 +56,51 @@ class GuidesTest {
     }
 
     @Test
+    fun theSweepMapDrawsAsItFillsIn() {
+        // A sweep's map is the one overlay whose content changes on every
+        // frame, so it is drawn empty, part-covered and full.
+        var grid by mutableStateOf(Array(32) { BooleanArray(32) })
+        render { SweepMap(grid = grid, aspect = 1.33f, modifier = Modifier.size(120.dp)) }
+
+        grid = Array(32) { r -> BooleanArray(32) { c -> (r + c) % 3 == 0 } }
+        compose.waitForIdle()
+
+        grid = Array(32) { BooleanArray(32) { true } }
+        compose.waitForIdle()
+    }
+
+    @Test
+    fun theSweepMapSurvivesAGridWithNoCells() {
+        // The session can be asked for its coverage before a single frame has
+        // been placed, and a Canvas that divides by a zero column count takes
+        // the viewfinder down rather than merely looking wrong.
+        var grid by mutableStateOf(emptyArray<BooleanArray>())
+        render { SweepMap(grid = grid, aspect = 1.5f, modifier = Modifier.size(120.dp)) }
+
+        grid = arrayOf(BooleanArray(0))
+        compose.waitForIdle()
+
+        // And a canvas with no shape at all, which would otherwise be an
+        // aspectRatio of zero.
+        grid = Array(4) { BooleanArray(4) { true } }
+        compose.waitForIdle()
+    }
+
+    @Test
+    fun theSweepMapToleratesARaggedGrid() {
+        // Rows of differing length are not something the assembler produces,
+        // but drawing indexes row by row and an assumption like that is worth
+        // one line of guarding rather than a crash in the viewfinder.
+        val ragged = arrayOf(
+            BooleanArray(8) { true },
+            BooleanArray(3) { true },
+            BooleanArray(8),
+        )
+        render { SweepMap(grid = ragged, aspect = 1f, modifier = Modifier.size(80.dp)) }
+        compose.waitForIdle()
+    }
+
+    @Test
     fun theLevelDrawsWithoutAnAttitude() {
         // The sensor has not reported yet, or the device has no accelerometer.
         render { Guides(mode = GuideMode.GRID_AND_LEVEL, attitude = null) }

@@ -15,6 +15,9 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import dev.multiframe.camera.pipeline.Attitude
 import kotlin.math.abs
 import kotlin.math.min
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.unit.dp
 
 /** What composition aids are showing. Cycled by one control rather than several. */
 enum class GuideMode {
@@ -193,6 +196,66 @@ fun Peaking(
             dstSize = androidx.compose.ui.unit.IntSize(
                 size.width.toInt(), size.height.toInt(),
             ),
+        )
+    }
+}
+
+/**
+ * Where the sweep has been, and where it has not.
+ *
+ * A sweep tells the photographer how much is covered and, until now, nothing
+ * about *where* -- which is the one thing a guided capture has to answer. The
+ * assembler has tracked this on a 32x32 grid all along, with a comment saying
+ * it was for drawing the sweep guide; nothing ever drew it.
+ *
+ * It is a map rather than an overlay on the viewfinder, and that distinction is
+ * the whole design. During a sweep the preview shows the *telephoto*, which
+ * sees a small fraction of the canvas being built -- so cells drawn across the
+ * frame would appear to say "this part of what you are looking at is covered",
+ * which is not what they mean. Drawn small, at the canvas's own shape, they say
+ * what they actually are: the finished picture, filling in.
+ */
+@Composable
+fun SweepMap(
+    grid: Array<BooleanArray>,
+    aspect: Float,
+    modifier: Modifier = Modifier,
+) {
+    val rows = grid.size
+    if (rows == 0) return
+    val columns = grid[0].size
+    if (columns == 0) return
+    // A canvas with no shape to speak of would divide by zero below.
+    val shape = if (aspect.isFinite() && aspect > 0.01f) aspect else 1f
+
+    Canvas(modifier = modifier.aspectRatio(shape)) {
+        val cellW = size.width / columns
+        val cellH = size.height / rows
+
+        for (r in 0 until rows) {
+            val row = grid[r]
+            for (c in 0 until minOf(columns, row.size)) {
+                val topLeft = Offset(c * cellW, r * cellH)
+                val cell = Size(cellW, cellH)
+                if (row[c]) {
+                    drawRect(color = Ink.Bone, topLeft = topLeft, size = cell)
+                } else {
+                    drawRect(
+                        color = Color(0x1AFFFFFF),
+                        topLeft = topLeft,
+                        size = cell,
+                    )
+                }
+            }
+        }
+
+        // An outline, so an empty map still reads as a frame waiting to be
+        // filled rather than as nothing at all.
+        drawRect(
+            color = Ink.Hairline,
+            topLeft = Offset.Zero,
+            size = size,
+            style = Stroke(width = 1.dp.toPx()),
         )
     }
 }

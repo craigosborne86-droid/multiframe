@@ -1229,12 +1229,31 @@ passing an assertion that it was greater than zero.
 
 ## Next step
 
-**Finish the mosaic.** Registration, planning, compositing and writing the
-result out are done and tested; what remains is orchestration rather than
-algorithm — guided capture with a coverage grid, and locking exposure and white
-balance across the sweep. The lock is worth doing early for a second reason: it
-is what would let a mosaic carry an exposure and an ISO instead of omitting
-them.
+**The mosaic is finished.** Registration, planning, compositing, writing the
+result out, locking exposure and white balance across the sweep, and now the
+guide. Two of those were already built and listed here as outstanding, which is
+its own small lesson about roadmaps: `lockForSweep` pins exposure, white balance
+and focus and `MosaicCapture` has been calling it all along.
+
+What was genuinely missing was the guide. The assembler has tracked coverage on
+a 32x32 grid from the beginning, under a comment saying it was for drawing the
+sweep guide, and nothing ever drew it — so a sweep could tell the photographer
+how much was covered and nothing whatever about *where*, which is the one
+question a guided capture exists to answer.
+
+It is drawn as a map rather than as an overlay on the viewfinder, and that
+distinction is the design. During a sweep the preview shows the telephoto,
+which sees a small fraction of the canvas being built; cells drawn across the
+frame would appear to say "this part of what you are looking at is covered",
+which is not what they mean. Drawn small, at the canvas's own aspect ratio, they
+say what they are: the finished picture, filling in. Three Compose tests cover
+it, including the empty and ragged grids that would otherwise divide by zero or
+index past a row and take the viewfinder down with them.
+
+**What remains on the mosaic is a judgement, not a feature:** nobody has swept a
+real scene with it yet. Every claim about stitching rests on synthetic frames
+cut from a generated scene, which is the right way to test the algorithm and no
+substitute for pointing it at a building.
 
 **Phase 8 has its numbers, and they point somewhere else again.** Measured at
 31.2 C, holding steady through the run, on a charged phone:
@@ -1249,9 +1268,43 @@ encode and gallery publish 284 to 375 ms** -- as much as all the native
 rendering, and two and a half times the demosaic that was named as the target.
 Demosaic and tone is 149 ms of an 800 ms figure: under a fifth.
 
-One caution stands: the rotation reads zero because the test captures at zero
-degrees, and a photograph taken with the phone upright pays a full
-twelve-megapixel rotation that nothing here has measured.
+**The rotation is measured now, and it is not small.** Every capture test asked
+for zero degrees, and `OrientationTracker` hands the bitmap straight back at
+zero -- so the rotation had never run under test at all, while a phone held
+upright is the ordinary case rather than the exception:
+
+    flat:     native+setup 472ms, rotate   1ms, encode+save 350ms
+    upright:  native+setup 281ms, rotate 232ms, encode+save 346ms
+    sizes (4080, 3072) -> (3072, 4080)
+
+**232 ms on every upright photograph, absent from every figure in this log.**
+The swapped dimensions are worth having in their own right: they confirm the
+pixels really are turned rather than merely tagged, which is what earns the
+orientation tag of "normal" the file carries.
+
+**An obvious fix that was not one.** `Bitmap.createBitmap` was being asked to
+filter, and a quarter turn maps each pixel exactly onto another pixel, so there
+is nothing between samples to interpolate. Turning filtering off measured
+296 ms against the filtered 232 -- no better, and pointing the wrong way. Skia
+evidently takes the same path for an axis-aligned rotation whichever flag it is
+given, and the difference is this device's ordinary run-to-run spread. Reverted,
+because a change with no evidence behind it is worse than no change.
+
+**What to do about it is genuinely open**, and the obvious answer is not
+obviously right. Folding the quarter turn into the native develop's output
+indexing sounds free -- the render already writes into a bitmap, so write into a
+transposed one -- but a transposed write scatters across fifty megabytes instead
+of running along it, and a cache-hostile store pattern can cost more than the
+separate pass it replaces. Doing it properly means a blocked transpose, and Skia
+is likely already doing something of the sort. Any version of this has to be
+measured against 232 ms rather than assumed to beat it.
+
+The alternative is to not rotate at all: leave the pixels in the sensor's
+orientation and write an EXIF orientation tag, which is what every camera does
+and what the DNG already carries. That is not an optimisation but a change to
+what the file *is* -- it trades 232 ms for a dependence on the viewer honouring
+the tag, and this app currently rotates precisely so that it does not have to.
+Worth deciding deliberately rather than for speed.
 
 **The disk was not the problem, and that was worth checking rather than
 assuming.** With 42 GB free instead of 5.9, and the gallery emptied:
@@ -1314,10 +1367,7 @@ a regression. It is a cold path: retained develop buffers not yet allocated,
 caches cold, and a governor that has not ramped on an idle phone. Three
 consecutive captures settle to 130-156 ms of alignment where the warm phone gave
 176-270. Cool and warmed-up are different conditions and this log should say
-which it means. It is the same shape of problem -- a per-pixel kernel
-in one pass -- and it has a native implementation already, so the question is
-what that implementation is spending its time on rather than which language it
-is in.
+which it means.
 
 **Vulkan is not next, and the reason is on the record.** It was next while the
 merge was assumed to be dominated by accumulation. Accumulation is 335 ms.
@@ -1355,6 +1405,12 @@ were the whole story.
       able to update the listing
 - [ ] Complete the Play Data safety form (required even though nothing is
       collected)
-- [ ] Trademark search on "Multiframe" — the name is descriptive, so weak as a
-      trademark, and *MultiFrames* (plural) exists on Play in another category
+- [x] Trademark sighting on "Multiframe" — descriptive, *MultiFrames* exists on
+      Play in unrelated categories, and there is a live-looking US registration
+      (serial 74107359, engineering analysis software). Recorded in
+      [NAMES.md](NAMES.md), which already recommends *Coadd* instead
+- [ ] Proper clearance search on the **chosen** name, which is a different job:
+      the USPTO database directly, the registers for any market that matters,
+      and an attorney. What has been done is web searching, and it is labelled
+      as such
 - [ ] Store screenshots, content rating, developer verification

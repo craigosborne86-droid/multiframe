@@ -518,6 +518,70 @@ class ZslStreamDeviceTest {
         }
     }
 
+    /** Decodes just the dimensions of the last saved image. */
+    private fun lastSavedSize(): Pair<Int, Int>? {
+        val shot = RecentCapture.latest(context) ?: return null
+        val options = android.graphics.BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        context.contentResolver.openFileDescriptor(shot.uri, "r").use { descriptor ->
+            android.graphics.BitmapFactory.decodeFileDescriptor(
+                descriptor!!.fileDescriptor, null, options,
+            )
+        }
+        return if (options.outWidth > 0) options.outWidth to options.outHeight else null
+    }
+
+    /**
+     * What an upright photograph costs, and whether it is actually upright.
+     *
+     * Every other capture test asks for zero rotation, and `OrientationTracker`
+     * hands the bitmap straight back at zero -- so the rotation has never run
+     * in a test, and a phone held upright is the ordinary case rather than the
+     * exception. It allocates a second full-resolution bitmap and transforms
+     * into it, which is 50 MB and a pass over twelve and a half megapixels that
+     * no measurement in the log has ever included.
+     */
+    @Test
+    fun anUprightCaptureIsRotatedAndPaysForIt() {
+        val s = openStream() ?: return
+        stream = s
+        assertThat(waitForFrames(s, 8)).isTrue()
+
+        val flat = runBlocking {
+            ZslCapture.captureAndMerge(context, s, 4, rotationDegrees = 0)
+        }
+        assertThat(flat.savedJpeg).isNotNull()
+        val flatSize = lastSavedSize()
+
+        // The ring has to refill, or the second shot merges fewer frames and
+        // the two are not comparable.
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (s.readyFrames() < 4 && System.nanoTime() < deadline) {
+            Thread.sleep(20)
+        }
+
+        val upright = runBlocking {
+            ZslCapture.captureAndMerge(context, s, 4, rotationDegrees = 90)
+        }
+        assertThat(upright.savedJpeg).isNotNull()
+        val uprightSize = lastSavedSize()
+
+        Log.i(
+            TAG,
+            "develop flat ${flat.developMillis}ms vs upright ${upright.developMillis}ms, " +
+                "sizes $flatSize -> $uprightSize",
+        )
+
+        // The pixels are turned, not merely tagged: the app writes an
+        // orientation of "normal" precisely because it has already rotated
+        // them, so a quarter turn has to swap the saved dimensions.
+        assertThat(flatSize).isNotNull()
+        assertThat(uprightSize).isNotNull()
+        assertThat(uprightSize!!.first).isEqualTo(flatSize!!.second)
+        assertThat(uprightSize.second).isEqualTo(flatSize.first)
+    }
+
     @Test
     fun theStreamShutsDownCleanly() {
         val s = openStream() ?: return

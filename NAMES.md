@@ -5,6 +5,24 @@ trademark examiner's word for "unregistrable"), and *MultiFrames* already
 exists on Play. A descriptive name also undersells the thing — it names the
 mechanism, not the result.
 
+There is also a registration, which this document did not previously record.
+**MULTIFRAME**, US serial 74107359, filed 19 October 1990 by Formation Design
+Systems Pty Ltd, for "computer programs and instruction manuals sold therewith
+in the field of engineering analysis" — structural analysis software that is
+still sold. The field is not photography, so it is not necessarily fatal on its
+own; both are Class 9 software, which is the part an examiner would weigh. It is
+one more reason not to fight for a name that was already the weaker choice.
+
+**What has and has not been checked.** The above came from ordinary web search,
+and the Play developer *Multiframes* publishes in unrelated categories with no
+camera app. That is a sighting exercise, not a clearance search: it did not
+query the USPTO database directly, and covered no register outside the US.
+Nothing here should be relied on for a filing decision — a real clearance on
+whichever name is chosen wants the USPTO search proper, the equivalent registers
+for any market that matters, and an attorney. The searching done for **Coadd**
+turned up no conflicts, which is encouraging and is not the same as none
+existing.
+
 ## What the name has to do
 
 The product argument is narrower than "computational camera". It is:

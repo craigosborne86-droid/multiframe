@@ -100,11 +100,14 @@ to tell the user this in the interface rather than let them discover it.
 | Match verification | Done | Brown-Lowe criterion; refuses noise and repeated patterns |
 | Capture planning and geometry | Done | 12 unit tests |
 | Native compositing canvas with feathered blending | Done | 8 device tests; seam step 1/255 |
-| **Guided capture UI** | **Not built** | — |
+| Guided capture map | Done | 3 Compose tests; coverage drawn at canvas shape |
 | Exposure, white balance and focus locking | Done | `lockForSweep`; a device test asserts the stream is handed back |
 | Writing the result out | Done | 3 device tests; compresses from the canvas's own pages |
 
-The hard half is done. What remains is orchestration rather than algorithm.
+Every piece of it is built. What has not happened is the part no table can
+record: nobody has swept a real scene with it. The stitching is tested against
+synthetic frames cut from a generated image, which is the right way to test the
+algorithm and no substitute for pointing it at a building.
 
 ## How the capture should work
 
