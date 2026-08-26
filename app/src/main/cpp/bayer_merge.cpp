@@ -298,62 +298,99 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
     long long totalCount = 0;
     std::mutex totals;
 
-    // Two things the inner loop was recomputing twelve and a half million times
-    // an image, both of them functions of something that does not vary.
+    // The alignment is per tile, not per pixel, so a row crosses only sixty-odd
+    // displacements on the way across an image four thousand pixels wide. The
+    // loop below walks those runs rather than the pixels, because everything
+    // the displacement decides is decided once for the whole run:
     //
-    // The tile column depends only on x, so it is the same for every row and
-    // for every frame in the burst -- and it was costing a float division and a
-    // clamp per pixel. The noise variance depends only on the reference value
-    // at that site, through a bin index that is another float division.
+    //  - the source row. `sy` depends on the tile's vertical shift alone, so
+    //    the row address -- which was costing a 64-bit multiply by the stride
+    //    at every pixel -- is computed once, and a run that lands above or
+    //    below the frame is skipped whole rather than pixel by pixel.
+    //  - the horizontal bounds. `sx = x + shift` is in the frame exactly while
+    //    x is in `[-shift, w - shift)`, so intersecting that with the run turns
+    //    four compares and a branch per pixel into two clamps per run.
+    //  - the count of contributing pixels, which is then the length of what is
+    //    left rather than an increment per pixel.
     //
-    // Neither is an approximation: each entry is the identical expression
-    // evaluated at the identical input, just evaluated once. The merge is
-    // pinned to BayerAccumulator by a parity test, and memoising is the only
-    // kind of change that test cannot be made to fail by.
-    std::vector<int> txForX(static_cast<size_t>(w));
+    // The tile column is a run boundary rather than a table now. It was being
+    // memoised into `txForX` and looked up per pixel; grouping the equal values
+    // it held gives the same answers and stops looking them up at all.
+    struct Run {
+        int x0;
+        int x1;
+        int tx;
+    };
+    std::vector<Run> runs;
     for (int x = 0; x < w; ++x) {
-        txForX[static_cast<size_t>(x)] =
-            std::clamp(static_cast<int>((x / 2) / tileW), 0, tilesX - 1);
+        const int tx = std::clamp(static_cast<int>((x / 2) / tileW), 0, tilesX - 1);
+        if (!runs.empty() && runs.back().tx == tx) {
+            runs.back().x1 = x + 1;
+        } else {
+            runs.push_back({x, x + 1, tx});
+        }
     }
 
-    const int noiseSpan = acc->white + 1;
+    // The noise variance depends only on the reference value at the site,
+    // through a bin index that costs a float division, so it is a table built
+    // once a frame. Not an approximation: each entry is the identical
+    // expression evaluated at the identical input.
+    const int white = acc->white;
+    const int noiseSpan = white + 1;
     std::vector<float> noiseForValue(static_cast<size_t>(noiseSpan));
     for (int v = 0; v < noiseSpan; ++v) {
         noiseForValue[static_cast<size_t>(v)] =
-            acc->noiseVar[binOf(static_cast<float>(v), acc->white)];
+            acc->noiseVar[binOf(static_cast<float>(v), white)];
     }
+
+    const float* noise = noiseForValue.data();
+    const uint16_t* refPlane = acc->reference.data();
+    float* sumPlane = acc->sum.data();
+    float* weightPlane = acc->weight.data();
 
     parallelBands(h, [&](int y0, int y1) {
         double localContrib = 0.0;
         long long localCount = 0;
 
         for (int y = y0; y < y1; ++y) {
-            int ty = std::clamp(static_cast<int>((y / 2) / tileH), 0, tilesY - 1);
+            const int ty = std::clamp(static_cast<int>((y / 2) / tileH), 0, tilesY - 1);
             const size_t rowBase = static_cast<size_t>(y) * w;
             const int tyBase = ty * tilesX;
-            for (int x = 0; x < w; ++x) {
-                int idx = tyBase + txForX[static_cast<size_t>(x)];
+            const uint16_t* refRow = refPlane + rowBase;
+            float* sumRow = sumPlane + rowBase;
+            float* weightRow = weightPlane + rowBase;
+
+            for (const Run& run : runs) {
+                const int idx = tyBase + run.tx;
                 // Doubling a proxy offset always yields an even shift, keeping
                 // every sample on its own colour plane.
-                int sx = x + dx[idx] * 2;
-                int sy = y + dy[idx] * 2;
-                if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+                const int shiftX = dx[idx] * 2;
+                const int sy = y + dy[idx] * 2;
+                if (sy < 0 || sy >= h) continue;
 
-                const uint16_t refRaw = acc->reference[rowBase + x];
-                float refV = static_cast<float>(refRaw);
-                float altV = static_cast<float>(sampleAt(base, rowStride, sx, sy));
-                float d = altV - refV;
-                float d2 = d * d;
-                // Values above white clamp to the top bin, which is what binOf
-                // did with them, so the table's last entry answers for them.
-                float n2 = noiseForValue[
-                    static_cast<size_t>(std::min<int>(refRaw, acc->white))];
-                float wgt = (d2 <= n2) ? 1.0f : n2 / d2;
+                const int xEnd = std::min(run.x1, w - shiftX);
+                const int xStart = std::max(run.x0, -shiftX);
+                if (xStart >= xEnd) continue;
 
-                acc->sum[rowBase + x] += altV * wgt;
-                acc->weight[rowBase + x] += wgt;
-                localContrib += wgt;
-                ++localCount;
+                const uint8_t* src = base + static_cast<size_t>(sy) * rowStride +
+                                     static_cast<size_t>(xStart + shiftX) * 2;
+                for (int x = xStart; x < xEnd; ++x, src += 2) {
+                    const uint16_t refRaw = refRow[x];
+                    const float refV = static_cast<float>(refRaw);
+                    const float altV = static_cast<float>(
+                        static_cast<uint16_t>(src[0] | (src[1] << 8)));
+                    const float d = altV - refV;
+                    const float d2 = d * d;
+                    // Values above white clamp to the top bin, which is what
+                    // binOf did with them, so the last entry answers for them.
+                    const float n2 = noise[static_cast<size_t>(std::min<int>(refRaw, white))];
+                    const float wgt = (d2 <= n2) ? 1.0f : n2 / d2;
+
+                    sumRow[x] += altV * wgt;
+                    weightRow[x] += wgt;
+                    localContrib += wgt;
+                }
+                localCount += xEnd - xStart;
             }
         }
         std::lock_guard<std::mutex> guard(totals);
