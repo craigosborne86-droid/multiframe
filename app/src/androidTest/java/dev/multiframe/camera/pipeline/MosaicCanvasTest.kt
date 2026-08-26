@@ -1,13 +1,17 @@
 package dev.multiframe.camera.pipeline
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.util.Log
+import android.os.ParcelFileDescriptor
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 import kotlin.math.abs
 
 private const val TAG = "MosaicCanvas"
@@ -206,5 +210,101 @@ class MosaicCanvasTest {
 
         assertThat(touched).isGreaterThan(500_000)
         tile.recycle()
+    }
+
+    // ------------------------------------------------------------------
+    // Writing the result out
+
+    /** A file to write into, and its descriptor, in the app's own cache. */
+    private fun scratch(name: String): File =
+        File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, name)
+            .apply { delete() }
+
+    private fun MosaicCanvas.writeTo(file: File): MosaicCanvas.Written? =
+        ParcelFileDescriptor.open(
+            file,
+            ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_READ_WRITE,
+        ).use { compressTo(it.fd) }
+
+    @Test
+    fun theWrittenImageIsCroppedToWhatWasCovered() {
+        // A hand-held sweep never covers the whole canvas, and JPEG has no
+        // alpha to keep the rest transparent -- so writing the canvas would
+        // frame a small result in a large black rectangle.
+        val c = MosaicCanvas.create(400, 300)!!
+        canvas = c
+        val tile = solidTile(100, 80, Color.rgb(200, 60, 40))
+        assertThat(c.addTile(tile, Homography.translation(150.0, 100.0), feather = 4f))
+            .isGreaterThan(0)
+        tile.recycle()
+
+        val file = scratch("mosaic_crop.jpg")
+        val written = c.writeTo(file)
+
+        assertThat(written).isNotNull()
+        Log.i(TAG, "wrote ${written!!.width}x${written.height} into ${file.length()} bytes")
+        // The tile's own footprint, not the canvas.
+        assertThat(abs(written.width - 100)).isAtMost(2)
+        assertThat(abs(written.height - 80)).isAtMost(2)
+
+        val decoded = BitmapFactory.decodeFile(file.absolutePath)
+        assertThat(decoded).isNotNull()
+        assertThat(decoded.width).isEqualTo(written.width)
+        assertThat(decoded.height).isEqualTo(written.height)
+
+        // And it is the picture, not a black rectangle of the right size.
+        val centre = decoded.getPixel(decoded.width / 2, decoded.height / 2)
+        assertThat(abs(Color.red(centre) - 200)).isAtMost(8)
+        assertThat(abs(Color.green(centre) - 60)).isAtMost(8)
+        assertThat(abs(Color.blue(centre) - 40)).isAtMost(8)
+        decoded.recycle()
+        file.delete()
+    }
+
+    @Test
+    fun anEmptyCanvasWritesNothingRatherThanBlack() {
+        // Nothing was ever swept. A file of black pixels would be worse than no
+        // file, because it looks like a photograph that failed silently.
+        val c = MosaicCanvas.create(200, 200)!!
+        canvas = c
+        val file = scratch("mosaic_empty.jpg")
+
+        assertThat(c.writeTo(file)).isNull()
+        assertThat(file.length()).isEqualTo(0)
+
+        // And the canvas survived the attempt: nothing was collapsed, because
+        // there was nothing to collapse. A sweep that has covered nothing yet
+        // is not a finished one.
+        val tile = solidTile(50, 50, Color.rgb(10, 220, 30))
+        assertThat(c.addTile(tile, Homography.translation(20.0, 20.0), feather = 4f))
+            .isGreaterThan(0)
+        tile.recycle()
+        file.delete()
+    }
+
+    @Test
+    fun aWrittenCanvasIsFinished() {
+        // The accumulator is collapsed into pixels in its own memory to avoid a
+        // second allocation, so the weights are gone afterwards. Everything
+        // that depends on them has to say so rather than read the pixels back
+        // as though they were still accumulator values.
+        val c = MosaicCanvas.create(200, 160)!!
+        canvas = c
+        val tile = solidTile(80, 60, Color.rgb(120, 180, 90))
+        c.addTile(tile, Homography.translation(40.0, 30.0), feather = 4f)
+
+        val file = scratch("mosaic_consumed.jpg")
+        assertThat(c.writeTo(file)).isNotNull()
+
+        assertThat(c.addTile(tile, Homography.translation(10.0, 10.0), feather = 4f))
+            .isEqualTo(0)
+        assertThat(c.coverage()).isEqualTo(0f)
+        val out = Bitmap.createBitmap(200, 160, Bitmap.Config.ARGB_8888)
+        assertThat(c.renderInto(out)).isFalse()
+        assertThat(c.writeTo(scratch("mosaic_twice.jpg"))).isNull()
+
+        out.recycle()
+        tile.recycle()
+        file.delete()
     }
 }

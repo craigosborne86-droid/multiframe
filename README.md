@@ -31,7 +31,8 @@ spanning **235 ms** against 5.6 seconds for sequential capture.
 gradient-corrected demosaic, colour from the sensor's own calibration rather
 than the vendor's rendering matrix, a filmic tone curve, and restrained capture
 sharpening. Each stage exists in Kotlin and C++, pinned together by a parity
-test that holds them to 0/255.
+test that holds them to 0/255 — and the burst aligner to an identical
+displacement field across 3024 tiles.
 
 **Every lens.** All five physical cameras, labelled in millimetres because that
 is what tells a photographer what the frame will look like.
@@ -39,6 +40,11 @@ is what tells a photographer what the frame will look like.
 **Exposure that uses the burst.** Averaging N frames improves signal-to-noise by
 sqrt(N), which is `0.5 * log2(N)` stops of exposure that can be given up to
 protect highlights. Eight frames buys 1.5 stops for nothing.
+
+**Files that say how they were taken.** `Bitmap.compress` writes no metadata at
+all, so the JPEG gets camera, lens, exposure, ISO, aperture and date written
+from the same capture result the DNG's metadata comes from — including the frame
+count, which is the one thing about these files no other tag records.
 
 **Super-resolution by telephoto mosaic.** Sweep the 110mm across the 24mm
 framing and stitch: 263 MP from 7×7 tiles, with no invented detail. See
@@ -50,8 +56,8 @@ See [BUILD.md](BUILD.md). Short version:
 
     export JAVA_HOME="$HOME/Library/Java/JavaVirtualMachines/jdk-21.0.12.1+1/Contents/Home"
     ./gradlew :app:assembleDebug
-    ./gradlew :app:testDebugUnitTest          # 320 tests, no device
-    ./gradlew :app:connectedDebugAndroidTest  # 80 tests, needs a device
+    ./gradlew :app:testDebugUnitTest          # 332 tests, no device
+    ./gradlew :app:connectedDebugAndroidTest  # 81 tests, needs a device
 
 ## How the code is arranged
 
@@ -60,8 +66,9 @@ Everything of consequence is in `app/src/main/java/dev/multiframe/camera/pipelin
 | Area | Files |
 |---|---|
 | Capture | `ZslRawStream`, `RawRing`, `ZslCapture`, `RawBurstCapture` |
-| Merge | `bayer_merge.cpp`, `NativeMerge`, `Aligner`, `BayerMerger` |
+| Merge | `bayer_merge.cpp`, `NativeMerge`, `Aligner`, `Align.cpp`, `BayerMerger` |
 | Develop | `Demosaic`, `ToneCurve`, `ColorScience`, `LensShading`, `HotPixels`, `Sharpen`, `Defringe` |
+| Output | `ImageSaver`, `ExifWriter`, `RecentCapture` |
 | Decisions | `ZslPolicy`, `ExposureStrategy`, `CaptureMode`, `MemoryPressure` |
 | Mosaic | `Homography`, `FeatureMatcher`, `MosaicPlanner`, `MosaicAssembler`, `MosaicRefiner`, `Mosaic.cpp` |
 
@@ -87,8 +94,13 @@ a *defocused* frame as sharper, a demosaic that was destroying 43% of fine
 detail, a ratio test that kept precisely its worst matches, and two performance
 claims that had to be withdrawn for sitting inside the measurement noise.
 
-**A note on what is verified.** The algorithms and the live camera path are
-tested on real hardware. The interface is not — the development device has been
-locked throughout, so the viewfinder, gestures and overlays compile and their
-logic is covered, but nobody has watched the app run. The thirteen Compose tests
-report as skipped rather than passing for exactly that reason.
+**A note on what is verified.** All 81 device tests run on the phone — a Pixel
+9 Pro XL on Android 17 — with none skipped *provided the screen is awake*,
+including the fourteen Compose tests
+that spent most of this project's life reporting as skipped, because an activity
+behind a keyguard never resumes and the development device was locked.
+
+An emulator is kept for working without the phone. It settles anything that is
+framework behaviour rather than camera behaviour, and it is never used for a
+timing: every number in the log is measured on the device, where it means
+something.

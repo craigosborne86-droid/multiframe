@@ -136,13 +136,20 @@ data class ManualSettings(
         if (focusDiopters <= 0.01f) "INF" else "%.2fm".format(1f / focusDiopters)
 
     companion object {
+        /**
+         * White balance presets, named the way a photographer names them.
+         *
+         * These were abbreviated to fit a chip -- "TUNG", "FLUO", "CLOUD" --
+         * which let a layout constraint decide the vocabulary. The row scrolls,
+         * so it never needed to.
+         */
         val AWB_LABELS = linkedMapOf(
-            CameraMetadata.CONTROL_AWB_MODE_AUTO to "AUTO",
-            CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT to "TUNG",
-            CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT to "FLUO",
-            CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT to "SUN",
-            CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT to "CLOUD",
-            CameraMetadata.CONTROL_AWB_MODE_SHADE to "SHADE",
+            CameraMetadata.CONTROL_AWB_MODE_AUTO to "Auto",
+            CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT to "Tungsten",
+            CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT to "Fluorescent",
+            CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT to "Daylight",
+            CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT to "Cloudy",
+            CameraMetadata.CONTROL_AWB_MODE_SHADE to "Shade",
         )
     }
 }

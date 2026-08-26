@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <thread>
 #include <vector>
 
@@ -83,6 +84,13 @@ inline uint16_t sampleAt(const uint8_t* base, int rowStrideBytes, int x, int y) 
  * more of them. The bands still have to be large enough that claiming one costs
  * nothing next to doing it.
  */
+/** Microseconds on a monotonic clock, for stage timing. */
+inline int64_t nowMicros() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
+}
+
 void parallelBands(int height, const std::function<void(int, int)>& body) {
     const unsigned hw = std::thread::hardware_concurrency();
     int threads = static_cast<int>(std::max(2u, hw));
@@ -606,6 +614,31 @@ inline float sCurve(float x, float amount) {
     return c + amount * (s - c);
 }
 
+/**
+ * The whole display chain as one table.
+ *
+ * `toByte(renderDisplay(encodeSrgb(v)))` is a pure function of a single float,
+ * and `encodeSrgb` already quantises its input to one of [kGammaLutSize]
+ * indices. So the gamma lookup, black point, S-curve, scale and round collapse
+ * into a single byte lookup on that same index.
+ *
+ * This is exact rather than approximate, which is the only reason it is worth
+ * doing: the entry is built by evaluating the identical functions at the
+ * identical point the old path would have evaluated them at, so every input
+ * produces the byte it produced before. It cannot drift from the Kotlin the
+ * parity test holds it to, because it has not changed the arithmetic -- only
+ * how many times it is performed. Four thousand evaluations instead of thirty
+ * seven million.
+ */
+struct DisplayLut {
+    uint8_t bytes[kGammaLutSize];
+
+    uint8_t operator()(float v) const {
+        v = std::clamp(v, 0.0f, 1.0f);
+        return bytes[static_cast<int>(v * (kGammaLutSize - 1))];
+    }
+};
+
 /** Black point then S-curve, applied after the gamma encode. */
 inline float renderDisplay(float encoded, const ToneParams& t) {
     float v = encoded;
@@ -613,6 +646,12 @@ inline float renderDisplay(float encoded, const ToneParams& t) {
         v = std::max((v - t.blackPoint) / (1.0f - t.blackPoint), 0.0f);
     }
     return std::clamp(sCurve(v, t.contrast), 0.0f, 1.0f);
+}
+
+void buildDisplayLut(DisplayLut& lut, const ToneParams& t) {
+    for (int i = 0; i < kGammaLutSize; ++i) {
+        lut.bytes[i] = toByte(renderDisplay(gGammaLut[i], t));
+    }
 }
 
 }  // namespace
@@ -672,6 +711,9 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         jfloatArray jshading, jint shadingColumns, jint shadingRows,
         jfloat hotPixelThreshold) {
     ensureGammaLut();
+
+    // Stage clocks, declared here so they outlive the blocks they are taken in.
+    int64_t tBlack = 0, tShading = 0, tDemosaic = 0;
 
     // Lens shading, when the camera reported a map for this capture. Raw is
     // defined as uncorrected, so without this every frame carries a stop and a
@@ -737,6 +779,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     // white balance are applied, so the comparison happens in the sensor's own
     // domain -- which is what lets the Kotlin fallback, which has no plane to
     // work on and corrects the CFA in place, arrive at the same answer.
+    tBlack = nowMicros();
     parallelBands(height, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
             const int rowParity = (y & 1) * 2;
@@ -758,6 +801,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     }
 
     // Then shading and white balance, on the corrected values.
+    tShading = nowMicros();
     parallelBands(height, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
             const int rowParity = (y & 1) * 2;
@@ -773,6 +817,13 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         }
     });
 
+    // Built once for this capture's tone parameters, then read by every band.
+    // On the stack rather than in a global: two develops on different threads
+    // would otherwise be writing the same table while reading it.
+    DisplayLut display;
+    buildDisplayLut(display, tone);
+
+    tDemosaic = nowMicros();
     parallelBands(height, [&](int y0, int y1) {
         float acc[3];
         int cnt[3];
@@ -857,13 +908,18 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
 
                 uint8_t* q = row + static_cast<size_t>(x) * 4;
                 // RGBA_8888 is byte order R,G,B,A in memory.
-                q[0] = toByte(renderDisplay(encodeSrgb(r), tone));
-                q[1] = toByte(renderDisplay(encodeSrgb(g), tone));
-                q[2] = toByte(renderDisplay(encodeSrgb(b), tone));
+                q[0] = display(r);
+                q[1] = display(g);
+                q[2] = display(b);
                 q[3] = 255;
             }
         }
     });
+
+    const int64_t tEnd = nowMicros();
+    LOGI("develop: black %lldms, shading %lldms, demosaic+tone %lldms, total %lldms",
+         (tShading - tBlack) / 1000, (tDemosaic - tShading) / 1000,
+         (tEnd - tDemosaic) / 1000, (tEnd - tBlack) / 1000);
 
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
@@ -935,6 +991,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
     // and not the managed heap.
     std::lock_guard<std::mutex> scratchGuard(gScratchLock);
     std::vector<float>& luma = gScratch.floats(static_cast<size_t>(width) * height);
+    const int64_t tLuma = nowMicros();
     parallelBands(height, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
             const uint8_t* row = base + static_cast<size_t>(y) * stride;
@@ -951,6 +1008,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
     std::vector<uint8_t>& output = gScratch.bytes(outputBytes);
     std::memcpy(output.data(), base, outputBytes);
 
+    const int64_t tSharpen = nowMicros();
     parallelBands(height, [&](int y0, int y1) {
         const int from = std::max(y0, 1);
         const int to = std::min(y1, height - 1);
@@ -986,6 +1044,15 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
     });
 
     std::memcpy(base, output.data(), outputBytes);
+
+    // Sharpening is its own JNI call, so it reports its own two passes. The
+    // point of splitting these at all is that "develop 900ms" says nothing
+    // about which pass to spend effort on -- the merge spent a phase aimed at
+    // the wrong half for exactly that reason.
+    const int64_t tEnd = nowMicros();
+    LOGI("sharpen: luma %lldms, sharpen %lldms, total %lldms",
+         (tSharpen - tLuma) / 1000, (tEnd - tSharpen) / 1000, (tEnd - tLuma) / 1000);
+
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
 }

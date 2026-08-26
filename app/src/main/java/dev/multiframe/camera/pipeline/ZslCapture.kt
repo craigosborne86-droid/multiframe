@@ -78,21 +78,55 @@ object ZslCapture {
             // instant the user actually pressed the shutter.
             val refBuffer = burst.frames.buffer(0) ?: error("reference slot unreadable")
             m.setReference(refBuffer, stride)
-            val refPyramid = Aligner.buildPyramid(m.lumaProxy(refBuffer, stride))
+            val refProxy = m.lumaProxy(refBuffer, stride)
+            // Only built when the native search is unavailable: it needs the
+            // pyramid, and native builds its own.
+            val refPyramid by lazy { Aligner.buildPyramid(refProxy) }
             captured = 1
+
+            // Split out because the single "merge" figure bundles native
+            // accumulation together with alignment, and alignment runs on the
+            // JVM. Optimising the total without knowing the ratio would be
+            // guessing at which half to spend the effort on.
+            var proxyNanos = 0L
+            var pyramidNanos = 0L
+            var alignNanos = 0L
+            var accumulateNanos = 0L
 
             for (i in 1 until burst.count) {
                 onProgress("merging ${i + 1}/${burst.count}")
                 val buffer = burst.frames.buffer(i) ?: continue
-                val field = Aligner.align(
-                    refPyramid,
-                    Aligner.buildPyramid(m.lumaProxy(buffer, stride)),
-                    tilesX, tilesY,
-                )
+
+                var mark = System.nanoTime()
+                val proxy = m.lumaProxy(buffer, stride)
+                proxyNanos += System.nanoTime() - mark
+
+                mark = System.nanoTime()
+                val field = Aligner.alignNative(refProxy, proxy, tilesX, tilesY)
+                    ?: run {
+                        val pyramid = Aligner.buildPyramid(proxy)
+                        pyramidNanos += System.nanoTime() - mark
+                        mark = System.nanoTime()
+                        Aligner.align(refPyramid, pyramid, tilesX, tilesY)
+                    }
+                alignNanos += System.nanoTime() - mark
+
+                mark = System.nanoTime()
                 m.addFrame(buffer, stride, field)
+                accumulateNanos += System.nanoTime() - mark
+
                 captured++
             }
             mergeMillis = System.currentTimeMillis() - t0
+
+            Log.i(
+                TAG,
+                ("merge breakdown over ${captured - 1} frames: proxy %dms, " +
+                    "pyramid %dms, align %dms, accumulate %dms").format(
+                    proxyNanos / 1_000_000, pyramidNanos / 1_000_000,
+                    alignNanos / 1_000_000, accumulateNanos / 1_000_000,
+                ),
+            )
 
             val spanMillis = burst.frames.spanNs / 1_000_000
             // Slots go back to the pool the moment the pixels have been read,
@@ -120,6 +154,7 @@ object ZslCapture {
                 captureMillis = 0,
                 mergeMillis = mergeMillis,
                 tag = "zsl",
+                lens = stream.lens,
                 handoverMicros = handoverMicros,
                 burstSpanMillis = spanMillis,
                 streamStats = statsAfter.toString(),

@@ -21,7 +21,15 @@ class MosaicCanvas private constructor(
 
     private var closed = false
 
+    /** Set once the accumulator has been collapsed into pixels and written. */
+    private var consumed = false
+
     val megapixels: Double get() = width.toDouble() * height / 1_000_000.0
+
+    /** What a save actually put on disk. */
+    data class Written(val width: Int, val height: Int) {
+        val megapixels: Double get() = width.toDouble() * height / 1_000_000.0
+    }
 
     /**
      * Projects one developed tile onto the canvas.
@@ -49,8 +57,36 @@ class MosaicCanvas private constructor(
      * sweep can be cropped to what was actually shot.
      */
     fun renderInto(bitmap: Bitmap): Boolean {
-        if (closed) return false
+        if (closed || consumed) return false
         return nRenderInto(handle, bitmap)
+    }
+
+    /**
+     * Writes the covered region straight down [fd] as a JPEG, consuming the
+     * canvas.
+     *
+     * The alternative was a Bitmap of the whole canvas: 320 MB at 80 megapixels
+     * on top of the 610 MB the canvas already holds, on a phone that had 1.4 GB
+     * free -- which is why [MosaicSession] carried an `OutOfMemoryError` branch
+     * that returned no photograph at all. The pixels are collapsed in place
+     * into the canvas's own memory, four bytes a pixel over the accumulator's
+     * eight, and the compressor writes to the descriptor in pieces. Nothing of
+     * image size is allocated.
+     *
+     * Returns what was actually written, which is the covered bounding box
+     * rather than the canvas: a hand-held sweep does not cover a rectangle, and
+     * JPEG has no alpha to keep the rest honest.
+     *
+     * The canvas is finished afterwards. Saving is the last thing a sweep does.
+     */
+    fun compressTo(fd: Int, quality: Int = QUALITY): Written? {
+        if (closed || consumed) return null
+        val packed = nCompressTo(handle, fd, quality)
+        // Zero means nothing had been swept, and the canvas was never touched;
+        // a sweep that has not covered anything yet is not a finished one.
+        consumed = packed != 0L
+        if (packed <= 0L) return null
+        return Written((packed ushr 32).toInt(), (packed and 0xFFFFFFFFL).toInt())
     }
 
     override fun close() {
@@ -65,8 +101,17 @@ class MosaicCanvas private constructor(
     private external fun nAddTile(h: Long, tile: Bitmap, transform: DoubleArray, feather: Float): Long
     private external fun nCoverage(h: Long): Float
     private external fun nRenderInto(h: Long, bitmap: Bitmap): Boolean
+    private external fun nCompressTo(h: Long, fd: Int, quality: Int): Long
 
     companion object {
+        /**
+         * Quality for a mosaic write.
+         *
+         * The same number [ImageSaver] uses. This is the same photograph as any
+         * other the app produces, only written by a different route.
+         */
+        const val QUALITY = 95
+
         /**
          * Allocates a canvas, or null when the device cannot afford one.
          *

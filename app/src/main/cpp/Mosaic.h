@@ -66,6 +66,38 @@ public:
      */
     void Render(uint8_t* out, int outStride) const;
 
+    /**
+     * The bounding box of every pixel any tile reached.
+     *
+     * A sweep is never a neat rectangle: the canvas is sized for the whole
+     * plan, and a hand-held pan covers a ragged part of it. Writing the full
+     * canvas therefore frames the result in black, which is exactly what the
+     * transparent uncovered pixels were meant to avoid -- and JPEG has no
+     * alpha to carry them. Returns false when nothing was covered.
+     */
+    bool CoveredBounds(int* x, int* y, int* w, int* h) const;
+
+    /**
+     * Collapses the region [x,y,w,h] into packed RGBA8888 at the start of the
+     * canvas's own memory, consuming the accumulator.
+     *
+     * The result is four bytes a pixel against the accumulator's eight, so it
+     * fits inside the mapping that already exists and the write pointer always
+     * trails the read pointer. That is the entire point: an 80 MP result
+     * otherwise needs a 320 MB buffer alongside the 610 MB canvas, and this
+     * phone had 1.4 GB free.
+     *
+     * Nothing can be composited or measured afterwards -- the weights are gone.
+     * One shot, which is what saving is.
+     */
+    bool Flatten(int x, int y, int w, int h);
+
+    /** The flattened pixels. Meaningful only after a successful Flatten. */
+    const void* pixels() const { return data_; }
+
+    /** Whether the accumulator has been consumed. */
+    bool flattened() const { return flattened_; }
+
 private:
     MosaicCanvas() = default;
 
@@ -74,6 +106,7 @@ private:
 
     uint16_t* data_ = nullptr;
     size_t bytes_ = 0;
+    bool flattened_ = false;
     int width_ = 0;
     int height_ = 0;
 };

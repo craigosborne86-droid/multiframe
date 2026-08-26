@@ -62,7 +62,7 @@ fun AboutSheet(onDismiss: () -> Unit) {
 
         Text(
             text = stringResource(R.string.about_dismiss),
-            color = Color(0xFF4A9EFF),
+            color = Ink.Amber,
             fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier
@@ -80,7 +80,7 @@ fun AboutSheet(onDismiss: () -> Unit) {
 private fun Section(title: String, body: String) {
     Text(
         text = title.uppercase(),
-        color = Color(0xFF4A9EFF),
+        color = Ink.Amber,
         fontSize = 10.sp,
         fontFamily = FontFamily.Monospace,
         modifier = Modifier.padding(bottom = 6.dp),

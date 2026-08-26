@@ -5,6 +5,7 @@ add_library(multiframe SHARED
     bayer_merge.cpp
     RingBuffer.cpp
     Mosaic.cpp
+    Align.cpp
 )
 
 target_compile_options(multiframe PRIVATE

@@ -459,6 +459,65 @@ class ZslStreamDeviceTest {
         assertThat(slowest.toDouble()).isLessThan(fastest * 1.4)
     }
 
+    /**
+     * A saved photograph carries its own metadata.
+     *
+     * The first thing anyone does with a picture they care about is look at how
+     * it was taken, and Bitmap.compress writes nothing at all -- so this checks
+     * the tags survive the round trip into a real file rather than merely that
+     * the formatting functions work.
+     */
+    @Test
+    fun theSavedJpegCarriesItsExif() {
+        val s = openStream() ?: return
+        stream = s
+        assertThat(waitForFrames(s, 10)).isTrue()
+
+        val result = runBlocking {
+            ZslCapture.captureAndMerge(context, s, 4, rotationDegrees = 0)
+        }
+        assertThat(result.savedJpeg).isNotNull()
+
+        val shot = RecentCapture.latest(context)
+        assertThat(shot).isNotNull()
+        assertThat(shot!!.isRaw).isFalse()
+
+        context.contentResolver.openFileDescriptor(shot.uri, "r").use { descriptor ->
+            assertThat(descriptor).isNotNull()
+            val exif = android.media.ExifInterface(descriptor!!.fileDescriptor)
+            val software = exif.getAttribute(android.media.ExifInterface.TAG_SOFTWARE)
+            val description =
+                exif.getAttribute(android.media.ExifInterface.TAG_IMAGE_DESCRIPTION)
+            val exposure = exif.getAttribute(android.media.ExifInterface.TAG_EXPOSURE_TIME)
+            @Suppress("DEPRECATION")
+            val iso = exif.getAttribute(android.media.ExifInterface.TAG_ISO_SPEED_RATINGS)
+            val focal = exif.getAttribute(android.media.ExifInterface.TAG_FOCAL_LENGTH)
+            val equivalent =
+                exif.getAttribute(android.media.ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM)
+
+            Log.i(
+                TAG,
+                "exif: software=$software exposure=$exposure iso=$iso " +
+                    "focal=$focal equiv=$equivalent | $description",
+            )
+
+            assertThat(software).isEqualTo(ExifWriter.SOFTWARE)
+            // The description is the only record that this was a merge rather
+            // than a single frame at the same settings.
+            assertThat(description).contains("frames merged")
+            assertThat(exposure).isNotNull()
+            assertThat(iso).isNotNull()
+            assertThat(focal).isNotNull()
+            // From the catalogue rather than a literal, so this says the same
+            // thing on a phone whose main camera is not a 24mm.
+            assertThat(equivalent).isEqualTo(s.lens.equivalent35mm.toString())
+            // The pixels are already upright, so a rotation here would turn the
+            // picture a second time in every viewer.
+            assertThat(exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, -1))
+                .isEqualTo(android.media.ExifInterface.ORIENTATION_NORMAL)
+        }
+    }
+
     @Test
     fun theStreamShutsDownCleanly() {
         val s = openStream() ?: return

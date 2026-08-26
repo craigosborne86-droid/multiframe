@@ -56,7 +56,18 @@ class ColorCalibrationDeviceTest {
      * which happens when the test process is not allowed camera access.
      */
     private fun captureOneResult(cameraId: String): Pair<TotalCaptureResult, CameraCharacteristics>? {
-        val characteristics = manager.getCameraCharacteristics(cameraId)
+        // A camera can be advertised and still not exist. An emulator lists id
+        // 0 with no device behind it, and asking for its characteristics throws
+        // rather than returning nothing -- which is the same answer as a camera
+        // that cannot be opened, and deserves the same treatment: there is no
+        // capture to be had here, and the test proves nothing rather than
+        // failing falsely.
+        val characteristics = try {
+            manager.getCameraCharacteristics(cameraId)
+        } catch (e: IllegalArgumentException) {
+            Log.i(TAG, "camera $cameraId cannot be described: ${e.message}")
+            return null
+        }
         val thread = HandlerThread("calib").apply { start() }
         val handler = Handler(thread.looper)
         val reader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, 2)

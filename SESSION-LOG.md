@@ -208,8 +208,9 @@ which proved raw *was* being delivered, the opposite of my first reading.
   path, with frames ~870 ms apart over a 5.6 s window. Phase 6 replaces this
   with a streaming ring on hardware that allows it; this remains the fallback,
   and remains too slow for moving subjects.
-- **The merge is now the bottleneck at 1884 ms**, which is what Phase 7
-  addresses.
+- **The merge was the bottleneck at 1884 ms.** Phase 7 took it to 934 ms for a
+  six-frame burst by moving alignment to C++; develop, at around 900 ms, is now
+  the largest single term in a capture.
 - **The YUV path still exists** alongside the raw path, at 3.1 MP with assumed
   BT.601 range and sRGB gamma.
 - **Portability is tested against simulated capability profiles**, not real
@@ -797,8 +798,10 @@ mid-sweep, Brown-Lowe match verification, capture planning, and a native
 compositing canvas whose feathered seam measures a 1/255 step across a
 deliberate 40-code brightness difference.
 
-**Not built:** guided capture UI, locking exposure across the sweep, tiled output
-for very large canvases.
+**Not built:** guided capture UI. Exposure, white balance and focus locking
+turned out to be built already -- `lockForSweep` pins all three, `MosaicCapture`
+calls it, and a device test asserts the stream is handed back afterwards. The
+status table had simply never been updated.
 
 **The limitation, which is honest and not fixable:** hand-held panning rotates
 about the wrist rather than the lens, translating the camera a few centimetres.
@@ -809,7 +812,368 @@ with depth.
 
 ---
 
+## Metadata: what the photograph says about itself
+
+Every JPEG this app had written until now carried none. `Bitmap.compress`
+writes no metadata at all, and the proof files show it: JFIF, an ICC profile,
+and no APP1 segment anywhere in the file. No camera, no lens, no exposure, no
+date beyond the filesystem's. For an app whose argument is that it produces a
+photographer's result, that is the first thing anyone would look for and not
+find.
+
+`ExifWriter` puts make, model, software, date, exposure, ISO, aperture, focal
+length and 35mm equivalent onto the saved file, taken from the same
+`TotalCaptureResult` the DNG's metadata comes from. Every field is optional,
+because every one of them is optional in Camera2: a device that reports no
+aperture gets a photograph with no aperture tag rather than a plausible wrong
+one. The DNG needs none of this -- `DngCreator` wrote it already.
+
+**The tags want inconsistent forms, and say nothing when they are given the
+wrong one.** Found by probing a real file rather than by reasoning about the
+documentation, which says nothing about it:
+
+| Tag | Kept | Discarded |
+|---|---|---|
+| `TAG_EXPOSURE_TIME` | `"0.004"` | `"4/1000"` |
+| `TAG_F_NUMBER` | `"1.7"` | `"170/100"` |
+| `TAG_FOCAL_LENGTH` | `"690/100"` | `"6.9"` |
+
+Two of the three want a decimal and the third wants a rational; a value in the
+other form is dropped silently rather than rejected. `ExifRoundTripTest` pins
+all three, so an Android release that makes them consistent fails a test instead
+of quietly emptying the tags again.
+
+**Written before the file is published, not after.** MediaStore scans a pending
+item at the moment its pending flag clears and fills its own columns -- date
+taken, orientation, exposure -- from what the file holds then. Tags added after
+that are in the file and missing from the columns a gallery actually reads,
+which looks from the outside exactly like not writing them. So the writing
+happens inside `ImageSaver`, between the compress and the publish, rather than
+at the call site where it started.
+
+**The orientation tag has to say "normal".** The pixels are rotated upright
+before the file is written, so recording the device's rotation here as well
+would turn the picture a second time in every viewer that honours the tag.
+
+**The description carries the frame count.** "8 frames merged" is the one thing
+about these files that no other tag records: a merged burst and a single frame
+at the same settings are otherwise indistinguishable in a library.
+
+The 35mm equivalent comes from the lens catalogue rather than the capture
+result, which reports only the physical focal length -- so both raw paths, ZSL
+and sequential, now carry the lens that took the picture down to the writer.
+
+**Confirmed on Android 16, then on Android 17 hardware.** The table above is no
+longer an inherited claim. The probe held on API 36 in an emulator, and then the
+whole path was exercised on the Pixel 9 Pro XL on Android 17 -- a newer OS than
+any measurement in this log had been taken on.
+
+The proof is a photograph rather than an assertion. Read back off a file the
+phone produced through a real shutter press:
+
+    ImageDescription       Multiframe: 4 frames merged, 24mm, 1/30, ISO 1410
+    Make / Model           Google / Pixel 9 Pro XL
+    Software               Multiframe
+    Orientation            1
+    DateTimeOriginal       2026:08:25 21:54:13
+    ExposureTime           0.0335          (1/30)
+    ISOSpeedRatings        1410
+    FNumber                1.68
+    FocalLength            6.9
+    FocalLengthIn35mmFilm  24
+
+`FocalLength` is the one that mattered. The app writes it as `690/100`, and the
+device log confirms it reads back as `focal=690/100` -- the rational form
+surviving exactly as the format table predicted. Written as a decimal it would
+have been dropped in silence, and every photograph would have carried no focal
+length at all.
+
+---
+
+## The mosaic could not save its own result
+
+The sweep worked and the file did not. `MosaicSession.save` rendered the canvas
+into a `Bitmap` of the same dimensions and handed that to the saver, which at
+the planner's default 80 MP cap is a 320 MB allocation on top of the 610 MB the
+canvas already holds, on a phone with 1.4 GB free. The code knew: it carried an
+`OutOfMemoryError` branch whose comment said tiled writing was the answer and
+was not built yet, and whose behaviour was to return no photograph at all.
+
+The fix is to stop producing a second copy. `AndroidBitmap_compress` -- in the
+NDK since API 30, against a minSdk of 33 -- takes a plain pixel pointer and a
+write callback rather than a `Bitmap`, so it can compress from memory the app
+already owns and hand back the JPEG in pieces to be written straight down a
+descriptor.
+
+That leaves the format difference: the canvas is eight bytes a pixel (16-bit
+RGB plus an accumulated weight) and the compressor wants four (packed RGBA). So
+the accumulator is collapsed **in place**. The output is half the width of its
+input, so the write pointer always trails the read pointer within the same
+mapping, and the whole pixel is read into locals before anything is written --
+which matters at exactly one address, the origin of an uncropped canvas, where
+the read and the write are the same four bytes.
+
+Peak cost of saving an 80 MP mosaic: 610 MB before, 610 MB after. The 320 MB
+copy is simply gone, and so is the branch that gave up.
+
+Measured on the phone, saving a sweep from a real canvas:
+
+    flattened 1877x1412 from 5645x4250 canvas, 10 MB in place
+    wrote 1877x1412 (2.7 MP) at quality 95
+
+The canvas was 24 megapixels -- 192 MB of accumulator -- and the write allocated
+nothing. The old path would have asked for a 24 MP `Bitmap`, 96 MB, on top of
+it. The file that came off the device carries `Multiframe: 1 tile stitched,
+24mm`, with no exposure tag, which is what a mosaic is supposed to say.
+
+**It does not raise the ceiling, and saying otherwise would be the easy lie.**
+263 MP is out of reach because *compositing* it needs a 2 GB canvas, not because
+of how it was written. What this changes is that the result the phone can hold
+is now one it can also save.
+
+**The canvas is consumed by saving.** Collapsing in place destroys the weights,
+so coverage, compositing and rendering all have to refuse afterwards rather than
+read pixels back as though they were still accumulator values. That is honest
+for this pipeline -- `save` is called once, at the end of the sweep, and the
+session is closed immediately after -- and there is a test that every one of
+those operations says no.
+
+**The output is cropped to what was actually covered.** A hand-held sweep does
+not cover a rectangle. Uncovered pixels were already transparent so a caller
+could crop, but nobody was cropping, and JPEG has no alpha -- so the result
+would have been framed in black. The write now finds the covered bounding box
+first, and an empty canvas produces no file rather than a black one, on the
+grounds that a black photograph looks like one that failed silently.
+
+**What the file says it is.** A mosaic's tiles are not merged frames -- the
+opposite trade, resolution across a scene rather than signal-to-noise at one
+framing -- so the description says "49 tiles stitched" and the lens recorded is
+the *target* framing rather than the telephoto that swept it: the photograph has
+a 24mm field of view, whatever took it. Exposure and ISO are omitted entirely,
+because the tiles were shot under whatever the meter decided at the time and
+there is no single honest number. Locking exposure across the sweep is what
+would earn those tags.
+
+---
+
+## An emulator, and what it is allowed to prove
+
+The development phone has been locked throughout, and for a long stretch there
+was no phone attached at all. An arm64 AVD closes most of that gap on an Apple
+Silicon host: the app's own `arm64-v8a` build runs natively, and the screen is
+unlocked, which is the one condition the Compose tests could never get.
+
+**On the phone: 74 device tests, 0 failures, 0 skipped, in 1m52s.** Everything
+in the suite now runs on the hardware it was written for, including the fourteen
+Compose tests, because the screen was unlocked for the first time.
+
+On the emulator beforehand: **74 tests, 0 skipped, 1 failure** -- and the failure
+was the emulator rather than the app: `getCameraCharacteristics` for "unknown device 0", a camera
+the framework advertises with nothing behind it. That test now returns null and
+skips in that situation, the same answer it already gave for a camera it cannot
+open.
+
+Two results worth having:
+
+**The fourteen Compose tests ran, and passed.** Every previous run reported them
+skipped, because an activity behind a keyguard never resumes and `setContent`
+produces nothing. The viewfinder controls, the guides, the level and the
+histogram have now rendered and answered questions about their own hierarchy.
+Nobody has still *watched* the app run -- that needs the phone -- but "compiles
+and is covered in principle" has become "renders and behaves".
+
+**The EXIF format asymmetry is confirmed**, which retires the one claim in this
+log that rested on a measurement nobody could re-run.
+
+What an emulator is **not** allowed to settle here, and the reason the numbers
+in this log stay phone-measured: **anything timed.** The ring's 30 fps copy
+budget, the merge at 812 ms, the develop, the 59 microsecond handover -- those
+are claims about a particular phone. Measuring them on a virtual machine on a
+Mac and writing them down would replace measurement with fiction, which is
+precisely the failure this log exists to avoid. Nor does it cover the camera
+path: there is no RAW-capable virtual camera, so those tests bail out by design.
+
+---
+
+## The interface, looked at for the first time
+
+With the emulator up, the app could finally be *seen* rather than only tested,
+and the verdict from the first look was that it read as a prototype. It did.
+Everything in it was a function-first decision by something that had never been
+viewed, which is exactly what the history would predict.
+
+What was actually signalling it:
+
+**Every control was the same chip.** Nine identical pills doing five different
+jobs -- persistent modes, cycling values, panel toggles, one-shot actions and
+navigation. That is the shape a UI takes when each capability got a chip as it
+landed. Left alone for now: fixing it means restructuring, and this pass was
+deliberately visual.
+
+**The palette was nobody's choice.** The active state was Material's default
+blue, over a photograph. A saturated hue in the corner of the eye changes how
+the colours under it are judged, which is the one thing an app whose argument is
+neutrality cannot afford. Replaced with a rule instead of a colour: **selection
+is shown by weight, not by hue** -- an active control is filled bone, an
+inactive one is a dark pane with a hairline -- which leaves exactly one accent,
+spent only on numbers and live readings, where an instrument has always spent
+it.
+
+**Monospace was doing two jobs at once.** It said "instrument" and "unfinished"
+simultaneously. Now labels are set in a UI face and mono is kept for the
+numbers, which is the convention the About sheet had already arrived at on its
+own.
+
+**The controls floated on the photograph.** White chips over a bright sky are
+unreadable, and a row of them on bare image reads as a debug overlay. A gradient
+scrim at top and bottom gives them somewhere to sit without putting a bar across
+the frame -- and it makes the chip that runs off the edge look deliberate, which
+it is, because the row scrolls.
+
+**The status bar sat inside the frame.** A clock and a battery meter are telling
+you about the phone while you are trying to look at the picture. Hidden, and it
+returns on a swipe.
+
+**The vocabulary was internal.** `1us-300ms` is what the Camera2 key says;
+`1/1000000-1/3` is what a photographer reads. `focus 0-20.0D` is exactly right
+and answers nothing; `focus to 5 cm` answers "can I get close to this?". And the
+white balance presets were abbreviated to `TUNG`, `FLUO`, `CLOUD` -- a layout
+constraint deciding the vocabulary, in a row that scrolls and never needed it.
+
+**One thing that looked like a defect and was not.** The shutter appeared to
+have a green ring. It is the photograph, seen through the gap between the ring
+and the disc, which is what a shutter button has always looked like.
+
+Still unexplained, and probably not the app: on the emulator the preview does
+not fill the frame and the uncovered area is white rather than black, despite
+the window background, the theme and now the root composable all being black.
+The likeliest reading is the emulated camera's surface, since a `SurfaceView` is
+a hole punched through the window. It needs the phone to settle.
+
+---
+
+## Phase 7 — the merge, and what was actually slow
+
+The plan of record said Vulkan: the merge is the bottleneck, and
+`AHardwareBuffer` earns its place over mmap because it imports into a GPU
+pipeline without a copy. Before writing any of it, the number got taken apart.
+
+`mergeMillis` had been reporting one figure for two very different things.
+Alignment runs on the JVM, on a luma proxy; accumulation runs in C++. Both sat
+inside the same timer. Split, on a Pixel 9 Pro XL over five frames:
+
+    proxy 71ms    pyramid 19ms    align 2858ms    accumulate 295ms
+
+**Alignment was 83% of the merge. The native accumulation the GPU plan was
+aimed at was 9%.** Moving the accumulate to Vulkan and succeeding perfectly
+would have taken a 3427 ms merge to about 3130 ms.
+
+The inner loop is a sum of absolute differences over 8-bit samples, which is the
+one kernel ARM has a dedicated instruction family for -- `UABD` and `UABAL` do
+sixteen bytes at a time, where the JVM was doing one. So the search moved to
+C++, and the Kotlin stayed as the reference implementation, which is the
+arrangement the develop stage has always used.
+
+    align       2858ms -> 345ms      8.3x
+    merge       3427ms ->  934ms     3.7x
+    whole shot  4313ms -> 1966ms     2.2x
+
+The ranges do not overlap and the change is far outside this device's
+run-to-run spread, which is the bar a claim here has to clear. Alignment and
+accumulation are now within 10 ms of each other, so the next honest target is
+whichever grows first, not whichever was named first.
+
+**Parity is exact, not approximate.** Both are integer searches over the same
+costs, so anything short of an identical field means a decision changed
+somewhere -- and a tolerance would hide exactly the tie-breaking and
+edge-clamping mistakes that are the likely way to get this wrong. The test
+covers a flat scene, where every candidate ties and only the iteration order
+decides, and a negative shift, where reads clamp to the edge pixel. 3024 tiles,
+zero differing.
+
+**What this does not do:** it does not touch the develop stage, which at ~900 ms
+is now the single largest term in a capture. And it does not make the GPU idea
+wrong -- it makes it premature. `AHardwareBuffer` is worth revisiting when
+something on the GPU is worth 300 ms.
+
+---
+
+## Phase 8, opened — and "develop" turns out not to be develop
+
+The same first move as Phase 7: split the number before spending anything on
+it. It found the same shape of problem twice in a row.
+
+`developMillis` does not time the develop. It spans the colour profile, the
+shading map, the native develop, a full twelve-megapixel **bitmap rotation**,
+**JPEG encoding**, the EXIF write and the MediaStore publish. Everything from
+raw buffer to a file in the gallery, reported under the name of one stage in the
+middle of it.
+
+The native stages, instrumented per pass:
+
+    develop:  black 98ms   shading 77ms   demosaic+tone 519ms   total 695ms
+    sharpen:  luma 51ms    sharpen 86ms                         total 138ms
+
+833 ms of native work against a reported 1528 ms, so roughly 700 ms of what has
+been called "develop" all along is rotation, JPEG and gallery I/O. **The
+demosaic and tone pass is 62% of the actual develop**, and is the honest target
+if the pass is worth optimising at all.
+
+**Nothing is claimed from that 1528 ms figure.** The same run reported the DNG
+write at 966 ms against 123 ms earlier for identical code -- an eight-fold swing
+in pure file I/O -- with the battery at 25% and the device warm from a solid
+stretch of burst capture and hundreds of test photographs left in the gallery
+for MediaStore to scan. The per-pass proportions are believable because they are
+ratios taken inside one pass of one run; the absolutes are not, and this log has
+withdrawn claims for less.
+
+**Where that leaves the phase.** The measurement stands: demosaic and tone is
+the target inside develop, and the largest single cost in a capture may well not
+be develop at all but the JPEG encode that has been hiding inside its timer.
+Both want a cool phone and an empty gallery before a number goes in this log.
+
+### One change that needed no stopwatch to justify
+
+Reading that pass turned up something worth doing on correctness grounds alone.
+`toByte(renderDisplay(encodeSrgb(v)))` is a pure function of a single float, and
+`encodeSrgb` already quantises its input to one of 4096 indices. So the gamma
+lookup, the black point, the S-curve, the scale and the round all collapse into
+a single byte lookup on that same index.
+
+It is **exact, not approximate**, which is the only reason it is worth doing
+here: each entry is built by evaluating the identical functions at the identical
+point the old path would have evaluated them at. The arithmetic has not changed,
+only how often it is performed -- four thousand evaluations per capture instead
+of thirty-seven million. The parity test agrees to the bit:
+
+    native vs Kotlin develop: worst 0/255, mean 0.000
+
+The table is built on the stack rather than in a global, because two develops on
+different threads would otherwise write the same table while reading it.
+
+**No speed claim is attached to it.** It removes work that provably was being
+done, and how much that is worth on a cool phone is a measurement nobody has
+taken yet.
+
+---
+
 ## Mistakes made and corrected, second block
+
+**A wide load one byte past the end of the world.** The native alignment search
+crashed the instrumentation process with `SIGSEGV` on a *read*, at a
+page-aligned address. The de-interleaving load used at the finest level reads
+thirty-two bytes to gather sixteen even-indexed samples; the last byte is
+discarded, but it is still read, and when the final sample of a plane is also
+its final byte that read is one past the allocation. The luma proxy is 2040x1536
+-- 3,133,440 bytes, **exactly 765 pages** -- so its buffer ends flush against a
+page boundary and the overread lands on an unmapped one.
+
+The parity test had passed. Its plane was 320x256, which leaves slack after it,
+so the same illegal read sat harmlessly inside the same page. A test at a
+convenient size proved the search was *correct* and said nothing about whether
+it was *legal*, and the two are not the same property. There is now a parity
+case at the real proxy dimensions, which is the size at which this can be
+caught.
 
 **A verification rule that punished good scenes.** Match verification used a
 fixed inlier ratio, which is the intuitive choice and is wrong: it gets *harder*
@@ -865,18 +1229,49 @@ passing an assertion that it was greater than zero.
 
 ## Next step
 
-**Finish the mosaic.** Registration, planning and compositing are done and
-tested; what remains is orchestration rather than algorithm — guided capture
-with a coverage grid, locking exposure and white balance across the sweep, and
-tiled output for canvases too large to render in one piece.
+**Finish the mosaic.** Registration, planning, compositing and writing the
+result out are done and tested; what remains is orchestration rather than
+algorithm — guided capture with a coverage grid, and locking exposure and white
+balance across the sweep. The lock is worth doing early for a second reason: it
+is what would let a mosaic carry an exposure and an ISO instead of omitting
+them.
 
-**Then Vulkan.** The merge is the bottleneck at 1884 ms, and this is where
-`AHardwareBuffer` finally earns its place over mmap: it imports into Vulkan
-without a copy, which mmap'd pages cannot.
+**Measure develop on a cool phone.** The instrumentation is in and the target is
+identified, but every absolute taken so far came off a warm device with a
+gallery full of test captures. What is owed is one clean run: charged, idle,
+`DCIM/Multiframe` cleared, and the stage lines read straight out of logcat.
+Until then the phase has a diagnosis and no numbers. It is the same shape of problem -- a per-pixel kernel
+in one pass -- and it has a native implementation already, so the question is
+what that implementation is spending its time on rather than which language it
+is in.
 
-Still outstanding from Phase 6: the shutter has never been pressed on a live ZSL
-stream, so the handover, merge and DNG output from ring frames are untested on
-hardware.
+**Vulkan is not next, and the reason is on the record.** It was next while the
+merge was assumed to be dominated by accumulation. Accumulation is 335 ms.
+`AHardwareBuffer` still imports into a GPU pipeline without a copy, and that
+still matters -- when there is something on the GPU worth the crossing.
+
+**Phase 6 is closed.** The shutter has now been pressed on a live ZSL stream on
+the phone, which had been outstanding since Phase 6 was written. The stream came
+up on the 24mm at 4080x3072, 30.0 fps with `stall=0.0ms`, a twelve-slot ring
+holding 287 MB of native memory, and the handover took **141 microseconds for
+four frames over a 101 ms span**. Both the DNG and the JPEG were written from
+ring frames, and both are on the device.
+
+**The handover is not one number, and quoting it as one was the mistake.**
+Twelve samples across the day's runs, in microseconds:
+
+    50  56  58  60  71  79  135  237  237  320  415  517
+
+The README's 59 us is real and reproducible -- it sits in the fast cluster --
+but it is the good end of a distribution with a tail an order of magnitude
+longer. The slow samples are the first captures after a stream comes up.
+
+This log has already argued, about the ring's frame copy, that a worst case
+decides whether frames drop and a mean does not. The same applies here: what
+decides whether the shutter feels instant is the 517, not the 50. These were
+taken under a test harness rather than the app, so the tail may partly belong
+to the harness -- but "59 microseconds" should not be repeated as though it
+were the whole story.
 
 ## Outstanding for release
 

@@ -106,7 +106,8 @@ MosaicCanvas::~MosaicCanvas() {
 
 long MosaicCanvas::AddTile(const uint8_t* rgba, int tileWidth, int tileHeight,
                            int tileStride, const double* h, float feather) {
-    if (data_ == nullptr || rgba == nullptr || tileWidth <= 0 || tileHeight <= 0) return 0;
+    if (data_ == nullptr || flattened_) return 0;
+    if (rgba == nullptr || tileWidth <= 0 || tileHeight <= 0) return 0;
 
     double inverse[9];
     if (!invert3x3(h, inverse)) return 0;
@@ -199,7 +200,7 @@ long MosaicCanvas::AddTile(const uint8_t* rgba, int tileWidth, int tileHeight,
 }
 
 float MosaicCanvas::Coverage() const {
-    if (data_ == nullptr) return 0.0f;
+    if (data_ == nullptr || flattened_) return 0.0f;
     const size_t pixels = static_cast<size_t>(width_) * height_;
     size_t covered = 0;
     for (size_t i = 0; i < pixels; ++i) {
@@ -209,7 +210,7 @@ float MosaicCanvas::Coverage() const {
 }
 
 void MosaicCanvas::Render(uint8_t* out, int outStride) const {
-    if (data_ == nullptr || out == nullptr) return;
+    if (data_ == nullptr || flattened_ || out == nullptr) return;
     for (int y = 0; y < height_; ++y) {
         const uint16_t* src = data_ + static_cast<size_t>(y) * width_ * kChannels;
         uint8_t* dst = out + static_cast<size_t>(y) * outStride;
@@ -231,6 +232,83 @@ void MosaicCanvas::Render(uint8_t* out, int outStride) const {
     }
 }
 
+bool MosaicCanvas::CoveredBounds(int* x, int* y, int* w, int* h) const {
+    if (data_ == nullptr || flattened_ || x == nullptr || y == nullptr ||
+        w == nullptr || h == nullptr) {
+        return false;
+    }
+
+    int minX = width_;
+    int minY = height_;
+    int maxX = -1;
+    int maxY = -1;
+    for (int row = 0; row < height_; ++row) {
+        const uint16_t* src = data_ + static_cast<size_t>(row) * width_ * kChannels;
+        int rowMin = -1;
+        int rowMax = -1;
+        for (int col = 0; col < width_; ++col) {
+            if (src[static_cast<size_t>(col) * kChannels + 3] == 0) continue;
+            if (rowMin < 0) rowMin = col;
+            rowMax = col;
+        }
+        if (rowMin < 0) continue;
+        if (row < minY) minY = row;
+        maxY = row;
+        if (rowMin < minX) minX = rowMin;
+        if (rowMax > maxX) maxX = rowMax;
+    }
+
+    if (maxX < 0 || maxY < 0) return false;
+    *x = minX;
+    *y = minY;
+    *w = maxX - minX + 1;
+    *h = maxY - minY + 1;
+    return true;
+}
+
+bool MosaicCanvas::Flatten(int x, int y, int w, int h) {
+    if (data_ == nullptr || flattened_) return false;
+    if (w <= 0 || h <= 0 || x < 0 || y < 0) return false;
+    if (x + w > width_ || y + h > height_) return false;
+
+    auto* out = reinterpret_cast<uint8_t*>(data_);
+    size_t o = 0;
+    for (int row = 0; row < h; ++row) {
+        const uint16_t* src =
+            data_ + (static_cast<size_t>(y + row) * width_ + x) * kChannels;
+        for (int col = 0; col < w; ++col) {
+            // The whole pixel is read before anything is written: at the origin
+            // of an uncropped canvas the read and write addresses are the same
+            // one, and everywhere after it the write trails by four bytes a
+            // pixel. That is what makes writing into the source safe.
+            const uint16_t r = src[0];
+            const uint16_t g = src[1];
+            const uint16_t b = src[2];
+            const uint16_t weight = src[3];
+            src += kChannels;
+
+            if (weight == 0) {
+                // Nothing reached here. Black rather than transparent, because
+                // the destination is JPEG and JPEG has no alpha -- the crop is
+                // what keeps these to the ragged edge of a real sweep.
+                out[o] = out[o + 1] = out[o + 2] = 0;
+                out[o + 3] = 0;
+            } else {
+                out[o] = static_cast<uint8_t>(std::clamp(r / 257, 0, 255));
+                out[o + 1] = static_cast<uint8_t>(std::clamp(g / 257, 0, 255));
+                out[o + 2] = static_cast<uint8_t>(std::clamp(b / 257, 0, 255));
+                out[o + 3] = 255;
+            }
+            o += 4;
+        }
+    }
+
+    flattened_ = true;
+    LOGI("flattened %dx%d from %dx%d canvas, %.0f MB in place",
+         w, h, width_, height_, o / (1024.0 * 1024.0));
+    return true;
+}
+
 }  // namespace multiframe
 
 // ---------------------------------------------------------------------------
@@ -238,12 +316,36 @@ void MosaicCanvas::Render(uint8_t* out, int outStride) const {
 // ---------------------------------------------------------------------------
 
 #include <android/bitmap.h>
+#include <android/data_space.h>
+#include <cerrno>
 
 using multiframe::MosaicCanvas;
 
 namespace {
 inline MosaicCanvas* canvasOf(jlong handle) {
     return reinterpret_cast<MosaicCanvas*>(handle);
+}
+
+/**
+ * Sink for the compressor, which hands over the JPEG in pieces as it produces
+ * them rather than all at once. Writing each piece straight to the descriptor
+ * is what keeps the encoded image out of memory as well as the decoded one.
+ */
+bool writeToDescriptor(void* context, const void* data, size_t size) {
+    const int fd = static_cast<int>(reinterpret_cast<intptr_t>(context));
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    while (size > 0) {
+        const ssize_t written = write(fd, bytes, size);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            LOGW("write to descriptor failed: %d", errno);
+            return false;
+        }
+        if (written == 0) return false;
+        bytes += written;
+        size -= static_cast<size_t>(written);
+    }
+    return true;
 }
 }  // namespace
 
@@ -315,6 +417,48 @@ Java_dev_multiframe_camera_pipeline_MosaicCanvas_nRenderInto(
     canvas->Render(static_cast<uint8_t*>(pixels), static_cast<int>(info.stride));
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_multiframe_camera_pipeline_MosaicCanvas_nCompressTo(
+        JNIEnv*, jobject, jlong handle, jint fd, jint quality) {
+    MosaicCanvas* canvas = canvasOf(handle);
+    if (canvas == nullptr || fd < 0) return -1;
+
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+    // Zero and negative mean different things to the caller: nothing was ever
+    // covered and the canvas is untouched, against the canvas having been
+    // collapsed into pixels and the write failing anyway. Only the second one
+    // ends the canvas.
+    if (!canvas->CoveredBounds(&x, &y, &w, &h)) {
+        LOGW("nothing covered, no image to write");
+        return 0;
+    }
+    if (!canvas->Flatten(x, y, w, h)) return -1;
+
+    AndroidBitmapInfo info{};
+    info.width = static_cast<uint32_t>(w);
+    info.height = static_cast<uint32_t>(h);
+    info.stride = static_cast<uint32_t>(w) * 4;
+    info.format = ANDROID_BITMAP_FORMAT_RGBA_8888;
+    info.flags = 0;
+
+    // Compresses from the canvas's own pages. No Bitmap, so nothing of image
+    // size is allocated to write an image the phone could not otherwise hold.
+    const int result = AndroidBitmap_compress(
+        &info, ADATASPACE_SRGB, canvas->pixels(),
+        ANDROID_BITMAP_COMPRESS_FORMAT_JPEG, quality,
+        reinterpret_cast<void*>(static_cast<intptr_t>(fd)), writeToDescriptor);
+
+    if (result != ANDROID_BITMAP_RESULT_SUCCESS) {
+        LOGW("compress failed: %d", result);
+        return -1;
+    }
+    LOGI("wrote %dx%d (%.1f MP) at quality %d", w, h, w * h / 1e6, quality);
+    return (static_cast<jlong>(w) << 32) | static_cast<jlong>(h);
 }
 
 }  // extern "C"

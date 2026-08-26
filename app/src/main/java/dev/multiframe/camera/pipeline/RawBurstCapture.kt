@@ -69,6 +69,7 @@ object RawBurstCapture {
         captureResult: TotalCaptureResult?,
         frameCount: Int,
         rotationDegrees: Int,
+        lens: Lens? = null,
         onProgress: (String) -> Unit,
     ): RawBurstResult {
         val profile = SensorProfile.from(characteristics)
@@ -82,7 +83,7 @@ object RawBurstCapture {
         }
 
         var merger: NativeMerge? = null
-        var refPyramid: List<Plane>? = null
+        var refProxy: Plane? = null
         var tilesX = 0
         var tilesY = 0
         var captured = 0
@@ -107,15 +108,19 @@ object RawBurstCapture {
                             tilesX = max(1, m.proxyWidth / TILE_TARGET)
                             tilesY = max(1, m.proxyHeight / TILE_TARGET)
                             m.setReference(buffer, stride)
-                            refPyramid = Aligner.buildPyramid(m.lumaProxy(buffer, stride))
+                            refProxy = m.lumaProxy(buffer, stride)
                         } else {
-                            // Alignment runs on the small luma proxy in Kotlin,
-                            // reusing the aligner that is already under test.
-                            val field = Aligner.align(
-                                refPyramid!!,
-                                Aligner.buildPyramid(m.lumaProxy(buffer, stride)),
-                                tilesX, tilesY,
-                            )
+                            // Alignment runs on the small luma proxy. Native
+                            // where it can, which is where nearly all of the
+                            // merge's time used to go; the Kotlin behind it is
+                            // the reference the parity test holds it to.
+                            val proxy = m.lumaProxy(buffer, stride)
+                            val field = Aligner.alignNative(refProxy!!, proxy, tilesX, tilesY)
+                                ?: Aligner.align(
+                                    Aligner.buildPyramid(refProxy!!),
+                                    Aligner.buildPyramid(proxy),
+                                    tilesX, tilesY,
+                                )
                             m.addFrame(buffer, stride, field)
                         }
                         mergeMillis += System.currentTimeMillis() - t0
@@ -145,6 +150,7 @@ object RawBurstCapture {
                 context, m, mergedBuffer, m.width, m.height, profile,
                 characteristics, captureResult, rotationDegrees,
                 frameCount, captured, stats, captureMillis, mergeMillis,
+                lens = lens,
             )
         } finally {
             merger?.close()
@@ -169,6 +175,7 @@ object RawBurstCapture {
         captureMillis: Long,
         mergeMillis: Long,
         tag: String = "merged",
+        lens: Lens? = null,
         handoverMicros: Long = 0,
         burstSpanMillis: Long = 0,
         streamStats: String? = null,
@@ -210,7 +217,19 @@ object RawBurstCapture {
         }
         bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
         val jpegName = "MF_${stamp}_${tag}_${captured}f.jpg"
-        val jpegOk = ImageSaver.saveJpeg(context, bitmap, jpegName) != null
+        // Bitmap.compress writes no metadata at all, so without this every
+        // photograph arrives in a library with no camera, no lens and no
+        // exposure. The DNG needs none of it -- DngCreator has already written
+        // full metadata from the same capture result.
+        val jpegOk = ImageSaver.saveJpeg(
+            context, bitmap, jpegName,
+            metadata = ExifWriter.from(
+                result = captureResult,
+                characteristics = characteristics,
+                lens = lens,
+                frames = captured,
+            ),
+        ) != null
         bitmap.recycle()
         val developMillis = System.currentTimeMillis() - t3
 

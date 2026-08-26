@@ -130,30 +130,49 @@ class MosaicSession private constructor(
     fun save(context: Context, name: String): String? {
         if (closed || assembler.placed.isEmpty()) return null
 
-        val bitmap = try {
-            Bitmap.createBitmap(canvas.width, canvas.height, Bitmap.Config.ARGB_8888)
-        } catch (e: OutOfMemoryError) {
-            // The canvas fits in native memory but its rendered form may not
-            // fit anywhere. Tiled writing is the answer and is not built yet,
-            // so this fails honestly rather than taking the process down.
-            Log.e(TAG, "mosaic too large to render in one piece", e)
-            return null
+        // Not through a Bitmap. The canvas is 610 MB at the default cap and its
+        // rendered form would be another 320 MB, which is why this used to
+        // carry an OutOfMemoryError branch that returned no photograph at all.
+        // The canvas compresses out of its own pages instead.
+        var written: MosaicCanvas.Written? = null
+        val uri = ImageSaver.saveJpegFrom(context, name, metadata = describe()) { fd ->
+            written = canvas.compressTo(fd)
+            written != null
         }
 
-        if (!canvas.renderInto(bitmap)) {
-            bitmap.recycle()
+        val size = written
+        if (uri == null || size == null) {
+            Log.e(TAG, "mosaic could not be written")
             return null
         }
-        val uri = ImageSaver.saveJpeg(context, bitmap, name)
-        bitmap.recycle()
         Log.i(
             TAG,
-            "mosaic saved: ${assembler.placed.size} tiles, %.0f MP, coverage %.2f".format(
-                canvas.megapixels, assembler.coverage,
+            ("mosaic saved: ${assembler.placed.size} tiles, %.0f MP written " +
+                "from a %.0f MP canvas, coverage %.2f").format(
+                size.megapixels, canvas.megapixels, assembler.coverage,
             ),
         )
-        return if (uri != null) name else null
+        return name
     }
+
+    /**
+     * What the file says about itself.
+     *
+     * The lens recorded is the *target* framing rather than the lens that shot
+     * the tiles: the photograph has a 24mm field of view, whatever swept it.
+     *
+     * Exposure and ISO are left out entirely. The tiles were taken under
+     * whatever the meter decided at the time, so there is no single honest
+     * number to record -- and this module's rule is no tag rather than a wrong
+     * one. Locking exposure across the sweep is what would earn them.
+     */
+    private fun describe() = ExifWriter.from(
+        result = null,
+        characteristics = null,
+        lens = plan.targetLens,
+        frames = assembler.placed.size,
+        kind = CaptureKind.MOSAIC,
+    )
 
     override fun close() {
         if (closed) return

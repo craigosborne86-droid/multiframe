@@ -1,5 +1,9 @@
 package dev.multiframe.camera.pipeline
 
+import android.util.Log
+
+private const val TAG = "Multiframe"
+
 /**
  * Per-tile translation offsets for one alternate frame, expressed at full
  * resolution. Tiles are a fixed grid so offsets propagate trivially between
@@ -162,6 +166,55 @@ object Aligner {
 
         return AlignmentField(tilesX, tilesY, dx, dy)
     }
+
+    /**
+     * The same search, in native code, or null where that is not available.
+     *
+     * Measured on a Pixel 9 Pro XL, this search was 2858 ms of a 3427 ms merge
+     * across five frames -- 83% of it -- while the native accumulation it is
+     * grouped with under one "merge" figure was 295 ms. The inner loop is a sum
+     * of absolute differences over bytes, which ARM has dedicated instructions
+     * for and the JVM does one byte at a time.
+     *
+     * The Kotlin above stays as the reference implementation. It is what the
+     * unit tests cover and what [AlignerParityTest] holds this to, in the same
+     * arrangement the develop stage already uses.
+     */
+    fun alignNative(
+        refProxy: Plane,
+        altProxy: Plane,
+        tilesX: Int,
+        tilesY: Int,
+    ): AlignmentField? {
+        if (!NativeMerge.isAvailable()) return null
+        if (refProxy.width != altProxy.width || refProxy.height != altProxy.height) return null
+        if (tilesX <= 0 || tilesY <= 0) return null
+
+        val count = tilesX * tilesY
+        val dx = IntArray(count)
+        val dy = IntArray(count)
+        val ok = try {
+            nAlign(
+                refProxy.data, altProxy.data, refProxy.width, refProxy.height,
+                tilesX, tilesY, dx, dy,
+            )
+        } catch (e: Throwable) {
+            Log.w(TAG, "native align failed, using Kotlin", e)
+            false
+        }
+        return if (ok) AlignmentField(tilesX, tilesY, dx, dy) else null
+    }
+
+    private external fun nAlign(
+        ref: ByteArray,
+        alt: ByteArray,
+        width: Int,
+        height: Int,
+        tilesX: Int,
+        tilesY: Int,
+        outDx: IntArray,
+        outDy: IntArray,
+    ): Boolean
 
     /** Sum of absolute differences, abandoning early once [ceiling] is exceeded. */
     private fun tileCost(

@@ -20,7 +20,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.multiframe.camera.pipeline.CameraCapabilities
@@ -28,8 +31,8 @@ import dev.multiframe.camera.pipeline.ManualSettings
 import kotlin.math.ln
 import kotlin.math.exp
 
-private val Accent = Color(0xFF4A9EFF)
-private val PanelBg = Color(0xDD0A0E12)
+private val Accent = Ink.Amber
+private val PanelBg = Ink.Panel
 
 @Composable
 fun ControlsPanel(
@@ -48,10 +51,9 @@ fun ControlsPanel(
     ) {
         Text(
             text = caps.summary(),
-            color = Color(0xFF8A97A5),
-            fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.padding(bottom = 10.dp),
+            color = Ink.Muted,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(bottom = 12.dp),
         )
 
         Row(modifier = Modifier.padding(bottom = 6.dp)) {
@@ -143,9 +145,9 @@ private fun LabelledSlider(
     ) {
         Text(
             label,
-            color = Color(0xFF8A97A5),
-            fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
+            color = Ink.Muted,
+            fontSize = 11.sp,
+            letterSpacing = 0.3.sp,
             modifier = Modifier.width(62.dp),
         )
         Slider(
@@ -155,7 +157,7 @@ private fun LabelledSlider(
             colors = SliderDefaults.colors(
                 thumbColor = Accent,
                 activeTrackColor = Accent,
-                inactiveTrackColor = Color(0xFF2A3138),
+    inactiveTrackColor = Color(0x33FFFFFF),
             ),
             modifier = Modifier
                 .weight(1f)
@@ -163,8 +165,8 @@ private fun LabelledSlider(
         )
         Text(
             valueText,
-            color = Color.White,
-            fontSize = 11.sp,
+            color = Ink.Amber,
+            fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier
                 .width(64.dp)
@@ -177,14 +179,19 @@ private fun LabelledSlider(
 private fun Toggle(label: String, active: Boolean, onClick: () -> Unit) {
     Text(
         text = label,
-        color = if (active) Color(0xFF06121F) else Color.White,
-        fontSize = 10.sp,
-        fontFamily = FontFamily.Monospace,
+        color = if (active) Ink.OnBone else Ink.Bone,
+        fontSize = 11.sp,
+        letterSpacing = 0.3.sp,
+        fontWeight = FontWeight.Medium,
         modifier = Modifier
             .padding(end = 6.dp)
-            .background(if (active) Accent else Color(0xFF1C2229), RoundedCornerShape(14.dp))
+            .background(if (active) Ink.Bone else Ink.Pane, RoundedCornerShape(14.dp))
+            .then(
+                if (active) Modifier
+                else Modifier.border(BorderStroke(1.dp, Ink.Hairline), RoundedCornerShape(14.dp))
+            )
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 11.dp, vertical = 7.dp)
             .semantics { contentDescription = label },
     )
 }

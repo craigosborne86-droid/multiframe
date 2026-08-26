@@ -1,9 +1,13 @@
 package dev.multiframe.camera.pipeline
 
+import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.media.ExifInterface
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import org.junit.After
 import org.junit.Test
@@ -117,6 +121,65 @@ class MosaicSessionTest {
 
         assertThat(placed).isAtLeast(7)
         assertThat(progress.coverage).isGreaterThan(0.1f)
+    }
+
+    private val context: Context
+        get() = InstrumentationRegistry.getInstrumentation().targetContext
+
+    @Test
+    fun aSweepSavesAPhotographThatSaysWhatItIs() {
+        // The end of the whole feature: a sweep that produces a file, cropped
+        // to what was covered, carrying metadata that describes a stitch rather
+        // than a merge. Saving used to render the canvas into a Bitmap of the
+        // same size, which at the planner's real canvas sizes is the allocation
+        // this app cannot make.
+        val s = MosaicSession.start(plan(), tile, tile)!!
+        session = s
+
+        var placed = 0
+        for ((dx, dy) in listOf(0 to 0, 160 to 0, 160 to 160, 0 to 160)) {
+            val result = s.offer(tileAt(200 + dx, 200 + dy), proxyAt(200 + dx, 200 + dy), 1f)
+            if (result is OfferResult.Placed) placed++
+        }
+        assertThat(placed).isAtLeast(2)
+
+        val name = "MF_mosaic_test_${System.currentTimeMillis()}_${placed}t.jpg"
+        assertThat(s.save(context, name)).isEqualTo(name)
+
+        val shot = RecentCapture.latest(context)
+        assertThat(shot).isNotNull()
+        assertThat(shot!!.displayName).isEqualTo(name)
+
+        context.contentResolver.openFileDescriptor(shot.uri, "r").use { descriptor ->
+            val exif = ExifInterface(descriptor!!.fileDescriptor)
+            val description = exif.getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION)
+            Log.i(TAG, "mosaic exif: $description")
+
+            assertThat(exif.getAttribute(ExifInterface.TAG_SOFTWARE))
+                .isEqualTo(ExifWriter.SOFTWARE)
+            // Stitched, not merged: the opposite trade, and the description is
+            // the only place the difference is recorded.
+            assertThat(description).contains("$placed tiles stitched")
+            // Deliberately absent. The tiles were shot under whatever the meter
+            // decided at the time, so there is no one honest number to give.
+            assertThat(exif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME)).isNull()
+        }
+
+        context.contentResolver.openFileDescriptor(shot.uri, "r").use { descriptor ->
+            val decoded = BitmapFactory.decodeFileDescriptor(descriptor!!.fileDescriptor)
+            assertThat(decoded).isNotNull()
+            Log.i(
+                TAG,
+                "saved ${decoded.width}x${decoded.height} from a " +
+                    "${s.plan.canvasWidth}x${s.plan.canvasHeight} canvas",
+            )
+            // Cropped to the covered region rather than framed in black.
+            assertThat(decoded.width).isLessThan(s.plan.canvasWidth)
+            assertThat(decoded.height).isLessThan(s.plan.canvasHeight)
+            decoded.recycle()
+        }
+
+        context.contentResolver.delete(shot.uri, null, null)
     }
 
     @Test

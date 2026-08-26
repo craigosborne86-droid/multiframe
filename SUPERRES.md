@@ -34,6 +34,19 @@ The canvas is the sobering part. 263 MP costs 2 GB of working memory, on a
 phone that had 1.4 GB free. So the planner carries a cap that preserves framing
 while reducing area, defaulting to 80 MP at 610 MB.
 
+Writing the result used to cost that again. Saving went through a `Bitmap` of
+the whole canvas -- 320 MB at the default cap, on top of the 610 MB the canvas
+already held -- and `MosaicSession.save` carried an `OutOfMemoryError` branch
+that returned no photograph at all when it failed. It now compresses out of the
+canvas's own pages: the accumulator is collapsed in place into packed RGBA,
+four bytes a pixel over the eight it replaces, and the JPEG goes down a file
+descriptor in pieces as the compressor produces it. Nothing image-sized is
+allocated to save an image.
+
+That does not raise the ceiling -- the canvas is still what the phone cannot
+afford, and 263 MP still needs 2 GB to composite into. It means the result the
+phone *can* hold is one it can also write.
+
 ## Why it works: the mathematics is exact
 
 For a camera **rotating about its optical centre**, the mapping between any two
@@ -88,8 +101,8 @@ to tell the user this in the interface rather than let them discover it.
 | Capture planning and geometry | Done | 12 unit tests |
 | Native compositing canvas with feathered blending | Done | 8 device tests; seam step 1/255 |
 | **Guided capture UI** | **Not built** | — |
-| **Exposure and white balance locking across the sweep** | **Not built** | — |
-| **Tiled output writing for very large canvases** | **Not built** | — |
+| Exposure, white balance and focus locking | Done | `lockForSweep`; a device test asserts the stream is handed back |
+| Writing the result out | Done | 3 device tests; compresses from the canvas's own pages |
 
 The hard half is done. What remains is orchestration rather than algorithm.
 

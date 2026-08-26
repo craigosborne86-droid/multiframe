@@ -92,7 +92,7 @@ class PortabilityTest {
         )
         assertThat(fixedIsp.canDisableNoiseReduction()).isFalse()
         assertThat(fixedIsp.canDisableEdgeEnhancement()).isFalse()
-        assertThat(fixedIsp.summary()).contains("NR:fixed")
+        assertThat(fixedIsp.summary()).contains("fixed noise reduction")
     }
 
     @Test
@@ -129,7 +129,7 @@ class PortabilityTest {
         assertThat(s.manualExposureActive(basic)).isFalse()
         assertThat(basic.hasIsoRange).isFalse()
         assertThat(basic.hasExposureRange).isFalse()
-        assertThat(basic.summary()).contains("auto-only")
+        assertThat(basic.summary()).contains("Auto only")
     }
 
     @Test

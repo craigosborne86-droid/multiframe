@@ -6,6 +6,7 @@ import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.ImageCapture
+import kotlin.math.roundToInt
 
 /**
  * What the attached camera can actually do, read at runtime.
@@ -73,14 +74,41 @@ data class CameraCapabilities(
         get() = exposureMinNs != null && exposureMaxNs != null && exposureMaxNs > exposureMinNs
 
     fun summary(): String = buildString {
-        append(if (hasManualSensor) "manual" else "auto-only")
-        if (isoMin != null && isoMax != null) append("  ISO $isoMin-$isoMax")
+        append(if (hasManualSensor) "Manual" else "Auto only")
+        if (isoMin != null && isoMax != null) append("  \u00b7  ISO $isoMin\u2013$isoMax")
         if (exposureMinNs != null && exposureMaxNs != null) {
-            append("  ${exposureMinNs / 1000}us-${exposureMaxNs / 1_000_000}ms")
+            append("  \u00b7  ${shutterLabel(exposureMinNs)}\u2013${shutterLabel(exposureMaxNs)}")
         }
-        if (hasManualFocus) append("  focus 0-%.1fD".format(minFocusDiopters))
-        if (!canDisableNoiseReduction()) append("  NR:fixed")
-        if (supportsDng) append("  DNG") else if (supportsRaw) append("  RAW(no DNG)")
+        if (hasManualFocus && minFocusDiopters > 0f) {
+            append("  \u00b7  focus to ${closestFocusLabel()}")
+        }
+        if (!canDisableNoiseReduction()) append("  \u00b7  fixed noise reduction")
+        if (supportsDng) append("  \u00b7  DNG") else if (supportsRaw) append("  \u00b7  raw, no DNG")
+    }
+
+    /**
+     * An exposure time the way a photographer says it.
+     *
+     * The Camera2 keys are nanoseconds and this used to print them as given --
+     * "1us-300ms" -- which is the sensor's vocabulary rather than the reader's.
+     * A shutter speed is a fraction of a second.
+     */
+    private fun shutterLabel(nanoseconds: Long): String {
+        val seconds = nanoseconds / 1_000_000_000.0
+        return if (seconds >= 0.4) "%.1fs".format(seconds)
+        else "1/${(1.0 / seconds).roundToInt()}"
+    }
+
+    /**
+     * Closest focus as a distance rather than in dioptres.
+     *
+     * "0-20.0D" is exactly right and means nothing at a glance; five
+     * centimetres is the same fact in a form that answers "can I get close to
+     * this?".
+     */
+    private fun closestFocusLabel(): String {
+        val metres = 1f / minFocusDiopters
+        return if (metres < 1f) "%.0f cm".format(metres * 100) else "%.1f m".format(metres)
     }
 
     companion object {

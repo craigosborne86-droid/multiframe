@@ -70,6 +70,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -109,6 +110,9 @@ import dev.multiframe.camera.pipeline.Merger
 import dev.multiframe.camera.pipeline.OrientationTracker
 import dev.multiframe.camera.pipeline.Attitude
 import dev.multiframe.camera.pipeline.LevelSensor
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.graphics.Brush
+import dev.multiframe.camera.ui.Ink
 import dev.multiframe.camera.ui.AboutSheet
 import dev.multiframe.camera.ui.GuideMode
 import dev.multiframe.camera.ui.Guides
@@ -807,6 +811,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .fillMaxSize()
+            .background(Ink.Ground)
             .onSizeChanged { viewSize = it }
             .pointerInput(zslStream, camera, caps) {
                 detectTapGestures { offset ->
@@ -921,11 +926,36 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             )
         }
 
+        // Ground for the controls, and only for the controls. Chips floating
+        // directly on the photograph are unreadable over a bright sky and read
+        // as a debug overlay over anything else; a gradient gives the row
+        // somewhere to sit without putting a bar across the frame. It also
+        // makes the chip that runs off the edge look deliberate, which it is --
+        // the row scrolls.
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .height(156.dp)
+                .background(
+                    Brush.verticalGradient(listOf(Color(0xA6000000), Color.Transparent)),
+                ),
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(232.dp)
+                .background(
+                    Brush.verticalGradient(listOf(Color.Transparent, Color(0xB8000000))),
+                ),
+        )
+
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = 8.dp),
+                .padding(top = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(
@@ -1017,6 +1047,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                         characteristics = characteristics!!,
                                         captureResult = lastCaptureResult.get(),
                                         frameCount = burstFrames,
+                                        // The equivalent focal length is the
+                                        // catalogue's to know, not the capture
+                                        // result's.
+                                        lens = lens,
                                         rotationDegrees = caps?.let {
                                             orientation.captureRotation(it.sensorOrientation)
                                         } ?: 0,
@@ -1268,7 +1302,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 )
                 Text(
                     text = "%.0f%% covered".format(progress.coverage * 100),
-                    color = Color(0xFF4A9EFF),
+                    color = Ink.Amber,
                     fontSize = 13.sp,
                     fontFamily = FontFamily.Monospace,
                 )
@@ -1352,9 +1386,10 @@ private fun LensChip(
     Column(
         modifier = Modifier
             .padding(horizontal = 4.dp)
-            .background(
-                if (selected) Color(0xFF4A9EFF) else Color(0xCC000000),
-                RoundedCornerShape(18.dp),
+            .background(if (selected) Ink.Bone else Ink.Pane, RoundedCornerShape(18.dp))
+            .then(
+                if (selected) Modifier
+                else Modifier.border(1.dp, Ink.Hairline, RoundedCornerShape(18.dp))
             )
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp)
@@ -1363,7 +1398,7 @@ private fun LensChip(
     ) {
         Text(
             text = lens.label,
-            color = if (selected) Color(0xFF06121F) else Color.White,
+            color = if (selected) Ink.OnBone else Ink.Bone,
             fontSize = 13.sp,
             fontFamily = FontFamily.Monospace,
         )
@@ -1378,19 +1413,24 @@ private fun LensChip(
 
 @Composable
 private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
+    // Mono was doing the work of saying "instrument" and saying "unfinished" at
+    // the same time. A label is a label; the mono is kept for the numbers,
+    // which is where an instrument has always used it.
     Text(
         text = label,
-        color = if (active) Color(0xFF06121F) else Color.White,
-        fontSize = 11.sp,
-        fontFamily = FontFamily.Monospace,
+        color = if (active) Ink.OnBone else Ink.Bone,
+        fontSize = 12.sp,
+        letterSpacing = 0.4.sp,
+        fontWeight = FontWeight.Medium,
         modifier = Modifier
             .padding(horizontal = 4.dp)
-            .background(
-                if (active) Color(0xFF4A9EFF) else Color(0xCC000000),
-                RoundedCornerShape(20.dp),
+            .background(if (active) Ink.Bone else Ink.Pane, RoundedCornerShape(20.dp))
+            .then(
+                if (active) Modifier
+                else Modifier.border(1.dp, Ink.Hairline, RoundedCornerShape(20.dp))
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp)
+            .padding(horizontal = 13.dp, vertical = 8.dp)
             .semantics { contentDescription = label },
     )
 }
@@ -1400,10 +1440,14 @@ private fun ShutterButton(busy: Boolean, modifier: Modifier = Modifier, onClick:
     Box(
         modifier = modifier
             .size(76.dp)
-            .border(width = 3.dp, color = Color.White, shape = CircleShape)
+            .border(
+                width = 3.dp,
+                color = if (busy) Ink.Amber else Ink.Bone,
+                shape = CircleShape,
+            )
             .padding(6.dp)
             .clip(CircleShape)
-            .background(if (busy) Color(0xFF4A9EFF) else Color.White)
+            .background(if (busy) Ink.Amber else Ink.Bone)
             .clickable(enabled = !busy, onClick = onClick)
             .semantics { contentDescription = "Shutter" },
     )
