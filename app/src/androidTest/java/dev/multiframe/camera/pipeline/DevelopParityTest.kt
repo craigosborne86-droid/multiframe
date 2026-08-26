@@ -65,6 +65,117 @@ class DevelopParityTest {
         return buffer
     }
 
+    /**
+     * A larger scene, for the merge.
+     *
+     * The develop fixtures are 64x48, which is too small to merge honestly: the
+     * noise estimator samples every eighth pixel and bins by brightness, and at
+     * that size it has about three samples a bin and falls back to its floor --
+     * a trap this log has already been caught by once. At 320x240 it has real
+     * statistics, and the tile grid is 5x3 rather than the degenerate 1x1.
+     */
+    private fun mergeScene(w: Int, h: Int, seed: Int): BayerFrame {
+        val rnd = Random(seed)
+        val data = ShortArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val colour = profile.cfaPattern[(y and 1) * 2 + (x and 1)]
+                val base = 200 + 300 * kotlin.math.sin(x * 0.02) * kotlin.math.cos(y * 0.03)
+                val tint = when (colour) {
+                    0 -> 1.15f
+                    2 -> 0.80f
+                    else -> 1.0f
+                }
+                val v = base * tint + rnd.nextInt(-40, 40)
+                data[y * w + x] = v.toInt().coerceIn(64, 1023).toShort()
+            }
+        }
+        return BayerFrame(w, h, data)
+    }
+
+    /** The same scene displaced, which is what a hand-held burst produces. */
+    private fun shiftedFrame(src: BayerFrame, sx: Int, sy: Int): BayerFrame {
+        val out = ShortArray(src.width * src.height)
+        for (y in 0 until src.height) {
+            val ay = (y + sy).coerceIn(0, src.height - 1)
+            for (x in 0 until src.width) {
+                val ax = (x + sx).coerceIn(0, src.width - 1)
+                out[y * src.width + x] = src.data[ay * src.width + ax]
+            }
+        }
+        return BayerFrame(src.width, src.height, out)
+    }
+
+    /**
+     * The merge itself, native against Kotlin.
+     *
+     * This was the gap. Develop, sharpening, shading and alignment are each
+     * pinned to a Kotlin reference; the accumulation at the centre of the app
+     * was not, and the only thing comparing the two implementations was a test
+     * of the noise figure they report rather than the pixels they produce.
+     *
+     * Both merge the same pair of frames. The displacement is handed to the
+     * native side rather than recomputed, because the two aligners already
+     * agree exactly and this test is about the accumulation, not the search.
+     */
+    @Test
+    fun nativeAndKotlinMergeAgree() {
+        val w = 320
+        val h = 240
+        val reference = mergeScene(w, h, 11)
+        val alternate = shiftedFrame(reference, 4, 2)
+
+        val kotlinMerger = BayerAccumulator(w, h, profile)
+        kotlinMerger.setReference(reference)
+        kotlinMerger.add(alternate)
+        val (kotlinFrame, kotlinStats) = kotlinMerger.finish()
+
+        val native = NativeMerge.create(w, h, profile)
+        assertThat(native).isNotNull()
+        val stride = w * 2
+        val refBuffer = directBufferOf(reference)
+        val altBuffer = directBufferOf(alternate)
+
+        native!!.setReference(refBuffer, stride)
+        val tilesX = maxOf(1, native.proxyWidth / 32)
+        val tilesY = maxOf(1, native.proxyHeight / 32)
+        val field = Aligner.align(
+            Aligner.buildPyramid(native.lumaProxy(refBuffer, stride)),
+            Aligner.buildPyramid(native.lumaProxy(altBuffer, stride)),
+            tilesX, tilesY,
+        )
+        native.addFrame(altBuffer, stride, field)
+        val (mergedBuffer, nativeStats) = native.finish()
+
+        val nativeData = ShortArray(w * h)
+        mergedBuffer.rewind()
+        mergedBuffer.asShortBuffer().get(nativeData)
+
+        var worst = 0
+        var differing = 0
+        for (i in nativeData.indices) {
+            val a = nativeData[i].toInt() and 0xFFFF
+            val b = kotlinFrame.data[i].toInt() and 0xFFFF
+            val delta = kotlin.math.abs(a - b)
+            if (delta != 0) differing++
+            if (delta > worst) worst = delta
+        }
+        Log.i(
+            TAG,
+            "merge parity: worst $worst, $differing of ${nativeData.size} differing; " +
+                "native sigma %.2f vs kotlin %.2f".format(
+                    nativeStats.estimatedSigmaAtMid, kotlinStats.estimatedSigmaAtMid,
+                ),
+        )
+
+        native.close()
+        assertThat(nativeStats.framesMerged).isEqualTo(kotlinStats.framesMerged)
+        // Both accumulate the same float sums in the same order and divide at
+        // the end, so anything above a rounding step means the two are doing
+        // different arithmetic rather than the same arithmetic differently.
+        assertThat(worst).isAtMost(1)
+    }
+
     @Test
     fun nativeAndKotlinDevelopAgree() {
         assertThat(NativeMerge.isAvailable()).isTrue()

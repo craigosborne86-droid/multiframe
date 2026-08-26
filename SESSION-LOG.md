@@ -1417,6 +1417,32 @@ taken under a test harness rather than the app, so the tail may partly belong
 to the harness -- but "59 microseconds" should not be repeated as though it
 were the whole story.
 
+## The merge had no parity test
+
+Develop, sharpening, lens shading and alignment are each pinned to a Kotlin
+reference. The accumulation at the centre of the app was not. The only thing
+comparing the two implementations was a test of the *noise figure* they report,
+which says nothing about the pixels they produce -- so the native merge could
+have drifted from `BayerAccumulator` in any direction and nothing would have
+noticed.
+
+It has not drifted: worst difference of one code out of 65535, which is the
+rounding step where two float sums are truncated to integers, and the noise
+figures agree. But that was luck rather than design, and it is now a test.
+
+Two things it had to get right to be worth anything. The scene is 320x240, not
+the 64x48 the develop fixtures use: the noise estimator samples every eighth
+pixel and bins by brightness, and at 64x48 it has about three samples a bin and
+falls back to its floor -- this log has been caught by exactly that before, and
+a parity test running against two floors agreeing proves nothing. And the tile
+grid at that size is 5x3 rather than the degenerate 1x1, so the per-tile
+displacement path is actually exercised.
+
+**Run on the emulator, not the phone**, which had dropped off wireless debugging
+and could not be brought back remotely. That is legitimate here for the reason
+already recorded: this is arithmetic on synthetic frames, framework behaviour
+rather than camera behaviour, and no timing is claimed from it.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
