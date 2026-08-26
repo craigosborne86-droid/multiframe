@@ -34,7 +34,7 @@ APK lands in `~/Library/Caches/MultiframeBuild/app/outputs/apk/debug/`.
 ## Tests
 
     ./gradlew :app:testDebugUnitTest          # 332 tests, no device needed
-    ./gradlew :app:connectedDebugAndroidTest  # 92 tests, needs a device or emulator
+    ./gradlew :app:connectedDebugAndroidTest  # 95 tests, needs a device or emulator
 
 ## Emulator, for when no phone is attached
 
@@ -88,7 +88,7 @@ are claims about a phone; measuring them here would quietly replace measurements
 with fiction.
 
 On the emulator the suite is one short: `ColorCalibrationDeviceTest` skips for
-want of a camera. On a phone with a camera, and with the screen awake, all 92
+want of a camera. On a phone with a camera, and with the screen awake, all 95
 run — a locked screen skips the fourteen Compose tests by design, which is the
 mechanism working rather than a failure.
 

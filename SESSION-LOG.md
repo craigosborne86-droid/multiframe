@@ -10,7 +10,7 @@ Indigo demonstrates on iPhone; original code, name, icon and UI throughout.
 - Package: `dev.multiframe.camera` (final — cannot change after publication)
 - Target device for development: Pixel 9 Pro XL (`komodo`), Android 17 / API 37
 - ~21,000 lines across 95 Kotlin files and 6 native files
-- 320 JVM unit tests and 80 on-device tests (67 running, 13 awaiting an unlocked screen)
+- 332 JVM unit tests and 95 on-device tests
 
 ---
 
@@ -1473,6 +1473,136 @@ run of pixels sharing a tile the displacement is constant, so the bounds test
 and the source row pointer could both be hoisted to the run rather than the
 pixel, and only then is there any point reaching for NEON. That is the next
 thing, not this one.
+
+## The accumulation, run by run instead of pixel by pixel
+
+The last entry left this as the next thing: within a run of pixels sharing a
+tile the displacement is constant, so the bounds test and the source row pointer
+could both be hoisted to the run rather than the pixel. That is now done, and it
+is worth about a quarter of the accumulation -- but the measurement took four
+attempts, and three of them would have given the wrong answer.
+
+**What moved.** The alignment is per tile, so a 4080-pixel row crosses only
+sixty-odd displacements. The loop now walks those runs. Within one, `sy` is
+fixed, so the source row address -- a 64-bit multiply by the stride at every
+pixel -- is computed once, and a run that falls outside the frame is skipped
+whole. `sx = x + shift` is inside the frame exactly while x is in
+`[-shift, w - shift)`, so intersecting that with the run turns four compares and
+a branch per pixel into two clamps per run. The contributing pixel count is then
+the length of what is left rather than an increment. And the tile column, which
+the previous entry had memoised into a table and looked up per pixel, is a run
+boundary now and is not looked up at all.
+
+**On real captures, three alternating installs each:**
+
+    old, per frame:  64.3, 72.0, 72.6 ms
+    new, per frame:  50.0, 51.7, 58.7 ms
+
+Non-overlapping, on real camera frames through `ZslCapture`, which is the same
+quantity every accumulate figure in this log has been. 71.3 ms a frame to 51.7,
+about 28% off. A synthetic burst harness, alternated four times each, agrees:
+328 ms to 254 for a seven-frame burst, run medians 322-335 against 252-255.
+
+### The measurement was harder than the change
+
+Three harnesses gave three answers, and only the last one was measuring the
+loop.
+
+**Nine samples said there was no effect.** The first A/B -- nine samples, two
+alternations -- reported the median accumulate moving 60 ms to 58, a 3%
+difference inside noise, and by this log's own rule that is a negative result to
+be reverted. It was wrong. Twenty-five samples and four alternations on the same
+two binaries found 21%. The phone's run-to-run spread is a factor of two, so the
+median of nine still moved by a quarter between two runs of the *identical*
+binary. A null result is only evidence when the measurement could have seen the
+effect, and this log should say what its harness could resolve before it reports
+that something changed nothing.
+
+**Wireless installs were part of the problem.** Alternating the two builds meant
+a three-minute, 68 MB install between them, and the phone's thermal state drifts
+over three minutes. Pushing both APKs to `/data/local/tmp` once and installing
+from the device's own storage costs about twenty seconds, so the two builds run
+under conditions that have barely moved. That is the difference between four
+alternations and one.
+
+**The first control was measuring garbage collection.** An unchanged pass timed
+alongside the samples is meant to show whether the machine itself got slower.
+`lumaProxy` was the obvious candidate and the wrong one: it allocates a 6 MB
+plane per call, so it got steadily slower through a run while nothing else did.
+`setReference` replaced it -- unchanged native code, allocating nothing,
+sweeping the same buffers through the same band scheduler.
+
+**And the benchmark was measuring the phone giving up.** Timed back to back, the
+accumulation cost 60 ms a frame where a real capture logs under 20. Full-frame
+accumulations run without pause leave the memory system saturated in a way the
+real loop never sees, because a capture spends twenty milliseconds aligning
+between one frame and the next. Once the harness did the proxy and the alignment
+in between -- untimed, but done -- its samples went from a factor-of-two spread
+to 242-275 ms across twelve bursts. A benchmark that removes the gaps is not
+measuring the same loop.
+
+**What the control was worth in the end.** It confirmed the phone was in the
+same state for both builds and it caught the run where it was not. It did not
+sharpen the final comparison: at twelve samples of a ten-millisecond sweep its
+own noise is larger than the drift it was there to remove. It earns its place as
+a check, not as a divisor.
+
+### Where the parity test was weak, and is not now
+
+The merge parity test hands both implementations one displacement, shared by
+every tile. That cannot catch the mistake this change could most easily have
+made: the run boundaries are the old per-pixel tile lookup, grouped, and a
+boundary drawn one pixel out would take a pixel's displacement from its
+neighbour. With one displacement across the image, the neighbour's is the same
+and the error is invisible.
+
+So `BayerAccumulator` grew an `add(frame, field)` overload -- the native side has
+always taken the search and the accumulation apart, and splitting the Kotlin one
+the same way lets a test hand both the same displacements, including
+displacements no aligner would return. `nativeAndKotlinMergeAgreeOnAVaryingField`
+uses a field that changes tile to tile, pushes runs off each edge, and puts one
+tile clean outside the frame. Zero differing pixels of 76800, and the mean
+contribution agrees to four decimals -- which is the part that matters, because
+it only agrees if the same pixels were *skipped* as well as the same arithmetic
+done on the ones that were not.
+
+### The phone as an instrument, and what it did to the suite
+
+Over an afternoon of this the device degraded: memory fell to 1.2 GB free with
+swap nearly exhausted, and battery temperature rose from 31 to 39 C. The
+synthetic harness, which had been reporting a 254 ms burst, reported 466 with
+the identical binary. Nothing about the code had changed.
+
+`ZslStreamDeviceTest.repeatedCapturesTakeAConsistentTime` failed in the final
+full run, asserting that the slowest of three develops is within 1.4x the
+fastest and getting 902 against 580. It failed on the **old** build too, in the
+same conditions, which is what makes it a statement about the phone rather than
+the change -- and it is a test about develop, which this change does not touch.
+It is the same symptom the full disk produced earlier in this log: the spread
+goes first.
+
+The suite is otherwise green: 332 unit tests, and 95 device tests of which 94
+pass in this state.
+
+### What is left in the loop
+
+Two things, in the order they are worth trying:
+
+- **`sum` and `weight` are separate planes**, so every pixel touches two cache
+  lines 50 MB apart and the loop keeps four streams per thread going at once.
+  Interleaving them into one plane of pairs would halve the streams and put both
+  values a pixel needs on one line. It touches `nSetReference` and `nFinish` as
+  well, so it is a larger change than this one.
+- **NEON**, which is now finally worth reaching for: the run loop is a flat span
+  of pixels with no branch in it.
+
+And one thing about the harness itself: `MergeSpeedDeviceTest` aligns on the JVM
+where a capture takes the native path, which is 44 MB of garbage a burst that
+gets collected on the same cores as the accumulation being timed. That is why it
+reads high. Swapping it for `alignNative` was tried and could not be evaluated,
+because by then the phone was short of memory and the samples ranged over a
+factor of six. It should be done on a phone that has just been rebooted, and the
+figures above re-taken with it.
 
 ## Outstanding for release
 

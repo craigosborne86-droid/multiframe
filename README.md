@@ -57,7 +57,7 @@ See [BUILD.md](BUILD.md). Short version:
     export JAVA_HOME="$HOME/Library/Java/JavaVirtualMachines/jdk-21.0.12.1+1/Contents/Home"
     ./gradlew :app:assembleDebug
     ./gradlew :app:testDebugUnitTest          # 332 tests, no device
-    ./gradlew :app:connectedDebugAndroidTest  # 92 tests, needs a device
+    ./gradlew :app:connectedDebugAndroidTest  # 95 tests, needs a device
 
 ## How the code is arranged
 
@@ -94,7 +94,7 @@ a *defocused* frame as sharper, a demosaic that was destroying 43% of fine
 detail, a ratio test that kept precisely its worst matches, and two performance
 claims that had to be withdrawn for sitting inside the measurement noise.
 
-**A note on what is verified.** All 92 device tests run on the phone — a Pixel
+**A note on what is verified.** All 95 device tests run on the phone — a Pixel
 9 Pro XL on Android 17 — with none skipped *provided the screen is awake*,
 including the fourteen Compose tests
 that spent most of this project's life reporting as skipped, because an activity
