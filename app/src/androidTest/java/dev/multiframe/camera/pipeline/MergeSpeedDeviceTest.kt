@@ -158,6 +158,8 @@ class MergeSpeedDeviceTest {
                     "; min ${c.first()}ms median ${c[BURSTS / 2]}ms max ${c.last()}ms",
             )
 
+            DeviceKind.warnIfNotAPhone(TAG)
+
             val contribution = m.finish().second.meanContribution
             Log.i(TAG, "mean contribution %.4f".format(contribution))
             // The control resets the accumulation before every burst, so the
@@ -167,9 +169,15 @@ class MergeSpeedDeviceTest {
             // contributed and below one because some were rejected.
             assertThat(contribution).isGreaterThan(0f)
             assertThat(contribution).isLessThan(1f)
-            // Not a budget. A phone does this in a fraction of a second and an
-            // emulator takes far longer; what this catches is the loop having
-            // stopped being a loop over pixels at all.
+            // Not a budget, and deliberately loose enough that no machine
+            // fails it: what this catches is the loop having stopped being a
+            // loop over pixels at all.
+            //
+            // It used to say an emulator takes far longer. Measured, it does
+            // not -- an arm64 image on Apple silicon has the host's cores and
+            // memory bandwidth, and runs some of these passes ten times faster
+            // than the phone. That is why the rule is that no timing comes from
+            // it, and why the warning above is in the log beside the figure.
             assertThat(a.first()).isGreaterThan(0)
             assertThat(a.first()).isLessThan(30_000)
         }

@@ -90,6 +90,7 @@ class SharpenSpeedDeviceTest {
             "sharpen at ${width}x$height: median ${times[ROUNDS / 2]}ms, " +
                 "${times.first()}-${times.last()}ms over $ROUNDS rounds",
         )
+        DeviceKind.warnIfNotAPhone(TAG)
 
         // Not a regression threshold on the number, which would fail on a warm
         // phone for reasons that have nothing to do with the code. Only that

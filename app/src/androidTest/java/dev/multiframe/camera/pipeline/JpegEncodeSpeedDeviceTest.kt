@@ -101,6 +101,7 @@ class JpegEncodeSpeedDeviceTest {
                 100.0 * (stripBytes - frameworkBytes) / frameworkBytes,
             ),
         )
+        DeviceKind.warnIfNotAPhone(TAG)
 
         bitmap.recycle()
         // Deliberately weak. The whole point of the strip encoder is that it is
