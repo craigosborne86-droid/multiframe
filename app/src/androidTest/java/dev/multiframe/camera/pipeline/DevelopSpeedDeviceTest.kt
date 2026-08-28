@@ -51,11 +51,29 @@ private const val TAG = "DevelopSpeed"
  *    Running it with the app's own Activity in the foreground made it slower,
  *    not faster, because the preview then competes for the same cores.
  *
- * So this is a **comparison instrument, not a source of absolute figures.**
- * Alternated between two builds it resolves a change of a few per cent: three
- * consecutive runs of the same binary gave medians of 406, 414 and 415 ms. The
- * capture path remains the authority on what a capture actually costs, and any
- * figure quoted as what a photograph pays should come from there.
+ * So this is a **comparison instrument, not a source of absolute figures**, and
+ * a blunter one than it first appeared. Three consecutive runs of one binary
+ * gave medians of 406, 414 and 415 ms, which looked like two per cent -- but
+ * those three runs shared one install, and an A/B comparison cannot. Reinstall
+ * between runs and the same binary measured against itself gives per-round
+ * medians of 188, 193, 232 and 486 against 201, 191, 478 and 222. **It
+ * manufactures differences of two and a half times out of nothing.**
+ *
+ * What follows from that:
+ *
+ *  * **Run an A/A before believing an A/B.** Install the same APK under two
+ *    names and compare them. If the instrument separates those, it will
+ *    separate anything.
+ *  * **Alternate the order**, not only the builds. A fixed order -- always
+ *    installing A before B within a round -- produced a clean-looking 79 ms
+ *    difference that vanished when the same change was built and measured
+ *    directly.
+ *  * **Trust separation, not medians.** The one result that survived everything
+ *    here was total separation: forty samples of each build with no overlap at
+ *    all, reproduced under balanced ordering.
+ *
+ * The capture path remains the authority on what a capture actually costs, and
+ * any figure quoted as what a photograph pays should come from there.
  */
 @RunWith(AndroidJUnit4::class)
 class DevelopSpeedDeviceTest {

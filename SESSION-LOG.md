@@ -1988,6 +1988,109 @@ things, which is the fifth time this log has arrived at that sentence.
 
 102 device tests pass, 332 unit tests pass.
 
+## Splitting the render, and an instrument that lied
+
+The handover asked for two things: a rested capture reading of the shipped
+build, and a split of `demosaic+tone` before optimising it. Both were done. One
+of them produced an answer; the other produced a lesson about the instrument
+that is worth more.
+
+### The rested reading
+
+Two days later, on a phone at 32 C and fully charged:
+
+    develop breakdown: setup 6ms, native 271ms, rotate 0ms, encode+save 165ms
+      render 227ms, sharpen 37ms
+        black 14ms, hotpixels 27ms, shading 38ms, demosaic+tone 146ms
+
+The handover predicted "about 260 ms of native develop, but that is arithmetic,
+not a measurement". Measured: 271. The sharpening pass, 93 ms before the last
+session's work, is 37.
+
+Only the second shot of the first run is worth quoting. The first is cold, the
+third had a spike, and every subsequent run drifted upward as the phone warmed:
+nine more captures taken immediately afterwards gave a median render of 315 ms.
+**A phone that has been idle gives one good capture and then stops being a
+rested phone.**
+
+### The tone stage is about half of the biggest thing in the develop
+
+`demosaic+tone` cannot be split with a timer, because it is one fused loop. So
+it was split with an ablation build: keep the demosaic, write its output
+straight out so the compiler cannot delete it, and remove the colour matrix,
+the exposure gain, the rendering curve and the display lookup.
+
+    demosaic+tone, forty samples each, balanced ordering, four rounds
+    with tone     median 199 ms, per-round 201, 198, 192, 202
+    demosaic only median 109 ms, per-round 108, 106, 112, 242
+
+So the tone stage is roughly 90 ms against the demosaic's 109. That is the
+fifth time this log has split a bundle and found the half nobody suspected was
+worth attacking -- the demosaic is not most of `demosaic+tone`.
+
+(These are harness figures, which run high. On the rested capture the same stage
+is 146 ms, so the real split is nearer 80 and 66.)
+
+### Everything finer than that was wrong
+
+Three more ablations were built to split the tone stage: matrix and exposure,
+the rendering curve, the display lookup. They reported the colour matrix at 6
+ms, the rendering curve at 129, the desaturation at nothing, and
+`shoulderCurve`'s `std::exp` at **79 ms** -- which would have made a single
+library call the largest identifiable operation in the develop.
+
+That was a satisfying story and it was false.
+
+`std::exp` was replaced with an inline series -- the usual 2^n times exp(f)
+decomposition, checked on the host at a worst relative error of 3.3e-6 across
+the whole domain the shoulder reaches, which is a sixteenth of an output byte.
+The parity test still reported worst 0/255, and a deliberately broken version of
+it (degree one instead of degree five) was rejected at worst 3/255, so the test
+had real power over the path. Everything about the change was sound.
+
+**It made no difference at all.** Balanced against the shipping build over four
+rounds: 186 ms against 181.
+
+### The instrument was manufacturing the difference
+
+The finer ablations had all been run in a fixed order -- always build A, then B,
+then C, then D within each round. Re-running one pair with the order alternated
+made the 79 ms evaporate.
+
+So the harness was tested against itself. The same APK, installed under two
+names, alternated four rounds:
+
+    head   per-round medians 188, 193, 232, 486
+    headB  per-round medians 201, 191, 478, 222
+
+**Two and a half times, out of nothing.** The three-runs-of-406-414-415
+repeatability recorded last session was real and irrelevant: those three runs
+shared one install, and an A/B comparison cannot. The reinstall is what
+introduces the variance, and every comparison has to pay it.
+
+Three rules came out of this, and they are in the harness's own documentation:
+
+  * **Run an A/A before believing an A/B.** If the instrument can separate a
+    binary from itself, it can separate anything.
+  * **Alternate the order, not only the builds.**
+  * **Trust separation, not medians.** The tone result survived because forty
+    samples of each build did not overlap at all, twice, under balanced
+    ordering. The 79 ms did not survive anything.
+
+The inline exponential is reverted. It is arithmetically defensible, well
+tested, and buys nothing measurable, which makes it the fifth experiment this
+log has backed out rather than kept on faith.
+
+### What this leaves
+
+The tone stage is worth attacking and the exponential inside it is not the
+reason. What remains unattributed is the 90 ms itself: the colour matrix, the
+maxima and branches of the rendering curve, and the display lookup. Splitting
+those needs a better instrument than the one that exists, and the first job is
+to give the harness an A/A that passes.
+
+102 device tests pass, 332 unit tests pass.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
