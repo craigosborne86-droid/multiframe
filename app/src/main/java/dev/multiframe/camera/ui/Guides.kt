@@ -70,7 +70,7 @@ fun Guides(
     Box(modifier = modifier.fillMaxSize()) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             if (mode.showsGrid) {
-                val line = Color(0x33FFFFFF)
+                val line = Ink.Guide
                 for (i in 1..2) {
                     val x = size.width * i / 3f
                     val y = size.height * i / 3f
@@ -91,7 +91,7 @@ fun Guides(
                 // A ring says "pointing straight at the ground" without
                 // pretending to know which way up that is.
                 drawCircle(
-                    color = Color(0x66FFFFFF),
+                    color = Ink.GuideStrong,
                     radius = span * 0.16f,
                     center = Offset(centreX, centreY),
                     style = Stroke(width = 2f),
@@ -101,11 +101,11 @@ fun Guides(
 
             // Green only when it is actually level, so the colour carries the
             // information rather than merely decorating.
-            val colour = if (attitude.isLevel) Color(0xFF6FE39A) else Color(0xCCFFFFFF)
+            val colour = if (attitude.isLevel) Ink.Level else Ink.GuideBright
 
             // The fixed reference the moving line is judged against.
             drawLine(
-                Color(0x44FFFFFF),
+                Ink.GuideMid,
                 Offset(centreX - span * 0.2f, centreY),
                 Offset(centreX + span * 0.2f, centreY),
                 strokeWidth = 2f,
@@ -153,7 +153,7 @@ fun Histogram(
             val height = size.height * kotlin.math.sqrt(count.toFloat() / peak)
             val clipping = index == bins.size - 1 && count > 0
             drawRect(
-                color = if (clipping) Color(0xFFFF6B6B) else Color(0xBBFFFFFF),
+                color = if (clipping) Ink.Clipping else Ink.GuideText,
                 topLeft = Offset(index * barWidth, size.height - height),
                 size = androidx.compose.ui.geometry.Size(
                     width = barWidth.coerceAtLeast(1f),
@@ -181,7 +181,7 @@ fun Peaking(
     maskWidth: Int,
     maskHeight: Int,
     modifier: Modifier = Modifier,
-    colour: Color = Color(0xFFFFCC33),
+    colour: Color = Ink.Amber,
 ) {
     if (mask == null || maskWidth <= 0 || maskHeight <= 0) return
     if (mask.size < maskWidth * maskHeight) return
@@ -255,7 +255,7 @@ fun SweepMap(
                     drawRect(color = Ink.Bone, topLeft = topLeft, size = cell)
                 } else {
                     drawRect(
-                        color = Color(0x1AFFFFFF),
+                        color = Ink.GuideFaint,
                         topLeft = topLeft,
                         size = cell,
                     )

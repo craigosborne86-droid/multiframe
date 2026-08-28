@@ -157,7 +157,7 @@ private fun LabelledSlider(
             colors = SliderDefaults.colors(
                 thumbColor = Accent,
                 activeTrackColor = Accent,
-    inactiveTrackColor = Color(0x33FFFFFF),
+                inactiveTrackColor = Ink.Guide,
             ),
             modifier = Modifier
                 .weight(1f)

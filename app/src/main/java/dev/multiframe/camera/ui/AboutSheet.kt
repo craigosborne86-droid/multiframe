@@ -34,7 +34,7 @@ fun AboutSheet(onDismiss: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xF2070A0D))
+            .background(Ink.Sheet)
             .clickable(onClick = onDismiss)
             .systemBarsPadding()
             .verticalScroll(rememberScrollState())
@@ -49,7 +49,7 @@ fun AboutSheet(onDismiss: () -> Unit) {
         )
         Text(
             text = "version ${BuildConfig.VERSION_NAME}",
-            color = Color(0xFF8A97A5),
+            color = Ink.SheetMuted,
             fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier.padding(top = 2.dp, bottom = 20.dp),
@@ -68,7 +68,7 @@ fun AboutSheet(onDismiss: () -> Unit) {
             modifier = Modifier
                 .padding(top = 24.dp)
                 .fillMaxWidth()
-                .background(Color(0xFF161C22), RoundedCornerShape(8.dp))
+                .background(Ink.SheetCode, RoundedCornerShape(8.dp))
                 .clickable(onClick = onDismiss)
                 .padding(14.dp)
                 .semantics { contentDescription = "Close" },
@@ -87,7 +87,7 @@ private fun Section(title: String, body: String) {
     )
     Text(
         text = body,
-        color = Color(0xFFD4DDE6),
+        color = Ink.SheetBody,
         fontSize = 13.sp,
         modifier = Modifier.padding(bottom = 20.dp),
     )

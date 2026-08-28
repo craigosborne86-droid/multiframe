@@ -922,13 +922,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         if (settings.manualFocus && focusScore > 0f) {
             Text(
                 text = "FOCUS %.0f".format(focusScore * 1000),
-                color = Color(0xFFFFCC33),
+                color = Ink.Amber,
                 fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .padding(start = 16.dp)
-                    .background(Color(0xCC000000), RoundedCornerShape(6.dp))
+                    .background(Ink.Readout, RoundedCornerShape(6.dp))
                     .padding(horizontal = 8.dp, vertical = 5.dp),
             )
         }
@@ -940,7 +940,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     .align(Alignment.BottomStart)
                     .padding(start = 14.dp, bottom = 130.dp)
                     .size(width = 132.dp, height = 44.dp)
-                    .background(Color(0x66000000), RoundedCornerShape(4.dp))
+                    .background(Ink.Faint, RoundedCornerShape(4.dp))
                     .padding(3.dp),
             )
         }
@@ -957,7 +957,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 .fillMaxWidth()
                 .height(156.dp)
                 .background(
-                    Brush.verticalGradient(listOf(Color(0xA6000000), Color.Transparent)),
+                    Brush.verticalGradient(listOf(Ink.ScrimTop, Color.Transparent)),
                 ),
         )
         Box(
@@ -966,7 +966,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 .fillMaxWidth()
                 .height(232.dp)
                 .background(
-                    Brush.verticalGradient(listOf(Color.Transparent, Color(0xB8000000))),
+                    Brush.verticalGradient(listOf(Color.Transparent, Ink.ScrimBottom)),
                 ),
         )
 
@@ -1113,7 +1113,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier
                         .padding(top = 8.dp)
-                        .background(Color(0xCC000000), RoundedCornerShape(6.dp))
+                        .background(Ink.Readout, RoundedCornerShape(6.dp))
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                 )
             }
@@ -1282,7 +1282,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 y = (point.y - RETICLE_PX / 2).toDp(),
                             )
                             .size(RETICLE_PX.toDp())
-                            .border(1.5.dp, Color(0xFFFFCC33), RoundedCornerShape(4.dp))
+                            .border(1.5.dp, Ink.Amber, RoundedCornerShape(4.dp))
                             .semantics { contentDescription = "Focus point" },
                     )
                 }
@@ -1298,7 +1298,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(end = 16.dp)
-                    .background(Color(0xCC000000), RoundedCornerShape(6.dp))
+                    .background(Ink.Readout, RoundedCornerShape(6.dp))
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
         }
@@ -1307,7 +1307,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .background(Color(0xAA000000), RoundedCornerShape(10.dp))
+                    .background(Ink.Dialogue, RoundedCornerShape(10.dp))
                     .padding(horizontal = 18.dp, vertical = 14.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -1334,7 +1334,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 )
                 Text(
                     text = "pan slowly",
-                    color = Color(0x99FFFFFF),
+                    color = Ink.Subtle,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.padding(top = 6.dp),
@@ -1362,7 +1362,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     .padding(start = 24.dp, bottom = 44.dp)
                     .size(54.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .border(1.5.dp, Color(0x66FFFFFF), RoundedCornerShape(8.dp))
+                    .border(1.5.dp, Ink.Edge, RoundedCornerShape(8.dp))
                     .clickable(enabled = !busy) {
                         lastShot?.let { shot ->
                             // Handed to whatever the user views photographs
@@ -1430,7 +1430,7 @@ private fun LensChip(
         )
         Text(
             text = lens.zoomLabel,
-            color = if (selected) Color(0xCC06121F) else Color(0x99FFFFFF),
+            color = if (selected) Ink.OnBoneMuted else Ink.Subtle,
             fontSize = 9.sp,
             fontFamily = FontFamily.Monospace,
         )
