@@ -58,6 +58,44 @@ class AppSettingsTest {
     }
 
     @Test
+    fun `the timer and the guides are remembered too`() {
+        val original = AppSettings(timerSeconds = 10, guides = "GRID_AND_LEVEL")
+        val restored = AppSettings.decode(original.encode())
+        assertThat(restored.timerSeconds).isEqualTo(10)
+        assertThat(restored.guides).isEqualTo("GRID_AND_LEVEL")
+    }
+
+    /**
+     * A timer delay the control cannot cycle back out of would strand the user
+     * on it: the cycle is off, three, ten, and anything else has no next.
+     */
+    @Test
+    fun `a timer delay the control cannot reach falls back to off`() {
+        assertThat(AppSettings.decode(mapOf(AppSettings.KEY_TIMER to "7")).timerSeconds)
+            .isEqualTo(0)
+        assertThat(AppSettings.decode(mapOf(AppSettings.KEY_TIMER to "-3")).timerSeconds)
+            .isEqualTo(0)
+        for (valid in AppSettings.TIMER_DELAYS) {
+            assertThat(
+                AppSettings.decode(mapOf(AppSettings.KEY_TIMER to valid.toString())).timerSeconds
+            ).isEqualTo(valid)
+        }
+    }
+
+    /**
+     * Zero shutter lag is the headline of this camera; defaulting it off made
+     * the app feel slower than it is.
+     */
+    @Test
+    fun `zero shutter lag is on out of the box`() {
+        assertThat(AppSettings().zslEnabled).isTrue()
+        assertThat(AppSettings.decode(emptyMap()).zslEnabled).isTrue()
+        // And a stored preference still wins over the default.
+        assertThat(AppSettings.decode(mapOf(AppSettings.KEY_ZSL to "false")).zslEnabled)
+            .isFalse()
+    }
+
+    @Test
     fun `nothing stored gives the defaults`() {
         val restored = AppSettings.decode(emptyMap())
 

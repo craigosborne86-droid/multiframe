@@ -34,12 +34,27 @@ import kotlin.math.exp
 private val Accent = Ink.Amber
 private val PanelBg = Ink.Panel
 
+/**
+ * The manual controls, and everything else you set once.
+ *
+ * The division against the row over the viewfinder is deliberate: that row is
+ * what a photographer changes between shots, and this is what they set and
+ * leave. `A/B` and `GUARD` live here for that reason -- neither is touched
+ * while composing, and in the row they were pushing things that are off the
+ * edge of the screen.
+ */
 @Composable
 fun ControlsPanel(
     settings: ManualSettings,
     caps: CameraCapabilities?,
     onChange: (ManualSettings) -> Unit,
     modifier: Modifier = Modifier,
+    abMode: Boolean = false,
+    onAbMode: (Boolean) -> Unit = {},
+    /** Null where there is no zero-shutter-lag stream to guard highlights for. */
+    highlightGuard: Boolean? = null,
+    onHighlightGuard: (Boolean) -> Unit = {},
+    onReset: (() -> Unit)? = null,
 ) {
     if (caps == null) return
 
@@ -127,6 +142,35 @@ fun ControlsPanel(
                     }
                 }
             }
+        }
+
+        Row(modifier = Modifier.padding(top = 10.dp)) {
+            // Writes both the merged and the unmerged version of the same
+            // burst, which is the demonstration of what this camera is for --
+            // and not something anyone changes shot to shot.
+            Toggle("A/B ${if (abMode) "ON" else "OFF"}", abMode) { onAbMode(!abMode) }
+            highlightGuard?.let { on ->
+                Toggle("GUARD ${if (on) "ON" else "OFF"}", on) { onHighlightGuard(!on) }
+            }
+        }
+
+        onReset?.let { reset ->
+            // Somewhere to get back to from wherever the controls have ended
+            // up. A camera you hand to someone else needs one of these, and
+            // without it the only way back is to reinstall.
+            Text(
+                text = "RESET ALL SETTINGS",
+                color = Ink.Muted,
+                fontSize = 11.sp,
+                letterSpacing = 0.4.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .padding(top = 14.dp)
+                    .border(BorderStroke(1.dp, Ink.Hairline), RoundedCornerShape(14.dp))
+                    .clickable(onClick = reset)
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .semantics { contentDescription = "Reset all settings" },
+            )
         }
     }
 }

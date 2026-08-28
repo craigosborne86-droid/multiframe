@@ -70,7 +70,61 @@ class ControlsPanelTest {
         return { state.value }
     }
 
+    /** The panel with everything that moved into it from the row over the picture. */
+    private fun showFull(): Pair<() -> Boolean, () -> Int> {
+        val ab = mutableStateOf(false)
+        val resets = mutableStateOf(0)
+        compose.setContent {
+            Box(modifier = Modifier.fillMaxSize()) {
+                ControlsPanel(
+                    settings = ManualSettings(),
+                    caps = fullyCapable,
+                    onChange = {},
+                    abMode = ab.value,
+                    onAbMode = { ab.value = it },
+                    highlightGuard = true,
+                    onReset = { resets.value++ },
+                )
+            }
+        }
+        compose.assumeRendered()
+        return { ab.value } to { resets.value }
+    }
+
     // ------------------------------------------------------------------
+
+    /**
+     * A camera handed to someone else needs a way back. Without this the only
+     * route out of a set of controls someone has been playing with is to
+     * reinstall the app.
+     */
+    @Test
+    fun thereIsAWayBackToTheDefaults() {
+        val (_, resets) = showFull()
+        compose.onNodeWithContentDescription("Reset all settings").performClick()
+        assertThat(resets()).isEqualTo(1)
+    }
+
+    /**
+     * These two moved out of the row over the viewfinder, which was nine long
+     * and showed two and a half on a phone. Neither is touched while composing.
+     */
+    @Test
+    fun theSettingsThatMovedOutOfTheRowAreHere() {
+        val (ab, _) = showFull()
+        compose.onNodeWithContentDescription("GUARD ON").assertIsDisplayed()
+        compose.onNodeWithContentDescription("A/B OFF").performClick()
+        assertThat(ab()).isTrue()
+    }
+
+    /** No zero-shutter-lag stream, nothing to guard highlights for. */
+    @Test
+    fun theGuardIsAbsentWhereThereIsNoStreamToGuard() {
+        show(fullyCapable)
+        compose.onNodeWithContentDescription("GUARD ON").assertDoesNotExist()
+        compose.onNodeWithContentDescription("GUARD OFF").assertDoesNotExist()
+    }
+
 
     @Test
     fun aCapableCameraGetsTheManualControls() {

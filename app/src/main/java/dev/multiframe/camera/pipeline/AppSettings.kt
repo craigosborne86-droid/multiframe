@@ -17,8 +17,17 @@ data class AppSettings(
     val lensId: String? = null,
     val mergeEnabled: Boolean = true,
     val highlightGuard: Boolean = true,
-    val zslEnabled: Boolean = false,
+    /**
+     * On by default. Zero shutter lag is the headline of this camera -- the
+     * frames already exist when the button is pressed -- and defaulting it off
+     * made the app feel slower than it is, for no benefit but a smaller ring.
+     */
+    val zslEnabled: Boolean = true,
     val captureMode: CaptureMode = CaptureMode.AUTO,
+    /** Self-timer delay in seconds; zero is off. */
+    val timerSeconds: Int = 0,
+    /** Which composition guides are drawn, by [dev.multiframe.camera.ui.GuideMode] name. */
+    val guides: String = "OFF",
 ) {
 
     /**
@@ -43,6 +52,8 @@ data class AppSettings(
         KEY_GUARD to highlightGuard.toString(),
         KEY_ZSL to zslEnabled.toString(),
         KEY_MODE to captureMode.name,
+        KEY_TIMER to timerSeconds.toString(),
+        KEY_GUIDES to guides,
     ) + (lensId?.let { mapOf(KEY_LENS to it) } ?: emptyMap())
 
     companion object {
@@ -60,8 +71,13 @@ data class AppSettings(
         const val KEY_GUARD = "guard"
         const val KEY_ZSL = "zsl"
         const val KEY_MODE = "mode"
+        const val KEY_TIMER = "timer"
+        const val KEY_GUIDES = "guides"
 
         private const val PREFERENCES = "multiframe.settings"
+
+        /** The delays the timer control cycles through, including off. */
+        val TIMER_DELAYS = setOf(0, 3, 10)
 
         /**
          * Rebuilds from stored strings.
@@ -103,6 +119,13 @@ data class AppSettings(
                 captureMode = stored[KEY_MODE]?.let { name ->
                     CaptureMode.entries.firstOrNull { it.name == name }
                 } ?: defaults.captureMode,
+                // A self-timer that forgets is worse than none, because you
+                // find out by missing the shot. Clamped to the delays the
+                // control can actually cycle to, so a stored value from
+                // anywhere else cannot strand it.
+                timerSeconds = int(KEY_TIMER, defaults.timerSeconds)
+                    .takeIf { it in TIMER_DELAYS } ?: defaults.timerSeconds,
+                guides = stored[KEY_GUIDES]?.takeIf { it.isNotBlank() } ?: defaults.guides,
             )
         }
 

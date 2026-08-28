@@ -212,8 +212,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var scene by remember { mutableStateOf<SceneAnalysis?>(null) }
 
     // Self-timer, and the last shot taken.
-    var timerSeconds by remember { mutableIntStateOf(0) }
+    var timerSeconds by remember { mutableIntStateOf(restored.timerSeconds) }
     var countdown by remember { mutableIntStateOf(0) }
+    // Held so the self-timer can be called off. Only the countdown is
+    // cancellable: once frames are captured the work is a few long native
+    // calls with nowhere to suspend, and a control that appears to do nothing
+    // for several seconds is worse than not offering one.
+    var captureJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var lastShot by remember { mutableStateOf<RecentShot?>(null) }
     var thumbnail by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
 
@@ -235,7 +240,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var sweepTargetLens by remember { mutableStateOf<Lens?>(null) }
 
     // Composition aids. One control cycles them rather than several toggles.
-    var guides by remember { mutableStateOf(GuideMode.OFF) }
+    var guides by remember {
+        mutableStateOf(
+            GuideMode.entries.firstOrNull { it.name == restored.guides } ?: GuideMode.OFF
+        )
+    }
     val level = remember { LevelSensor(context) }
     var attitude by remember { mutableStateOf<Attitude?>(null) }
     var histogram by remember { mutableStateOf<IntArray?>(null) }
@@ -813,6 +822,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(
         settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, captureMode,
+        timerSeconds, guides,
     ) {
         AppSettings.save(
             context,
@@ -824,6 +834,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 highlightGuard = highlightGuard,
                 zslEnabled = zslWanted,
                 captureMode = captureMode,
+                timerSeconds = timerSeconds,
+                guides = guides.name,
             ),
         )
     }
@@ -1159,6 +1171,26 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     settings = settings,
                     caps = caps,
                     onChange = { settings = it },
+                    abMode = abMode,
+                    onAbMode = { if (!busy) abMode = it },
+                    highlightGuard = if (zslStream != null) highlightGuard else null,
+                    onHighlightGuard = { if (!busy) highlightGuard = it },
+                    onReset = {
+                        // Back to what the app ships with. The save effect above
+                        // is watching every one of these, so persisting it needs
+                        // no separate step.
+                        val fresh = AppSettings()
+                        settings = fresh.manual
+                        burstFrames = fresh.burstFrames
+                        mergeEnabled = fresh.mergeEnabled
+                        highlightGuard = fresh.highlightGuard
+                        zslWanted = fresh.zslEnabled
+                        captureMode = fresh.captureMode
+                        timerSeconds = fresh.timerSeconds
+                        guides = GuideMode.OFF
+                        abMode = false
+                        status = "settings reset"
+                    },
                 )
             }
 
@@ -1174,9 +1206,19 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
             ShutterButton(
                 busy = busy,
+                counting = countdown > 0,
                 modifier = Modifier.padding(top = 12.dp, bottom = 28.dp),
                 onClick = {
-                    if (busy || countdown > 0) return@ShutterButton
+                    if (countdown > 0) {
+                        // Called off before anything was locked.
+                        captureJob?.cancel()
+                        captureJob = null
+                        countdown = 0
+                        busy = false
+                        status = "timer cancelled"
+                        return@ShutterButton
+                    }
+                    if (busy) return@ShutterButton
 
                     // Zero shutter lag: the frames already exist, so this press
                     // locks them rather than starting a capture.
@@ -1191,12 +1233,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         val rot = caps?.let {
                             orientation.captureRotation(it.sensorOrientation)
                         } ?: 0
-                        scope.launch {
+                        captureJob = scope.launch {
                             // The timer runs before anything is locked, so the
                             // frames captured are the ones from the moment the
                             // countdown ends rather than when it began.
                             for (remaining in timerSeconds downTo 1) {
                                 countdown = remaining
+                                status = "$remaining… tap the shutter to cancel"
                                 kotlinx.coroutines.delay(1000)
                             }
                             countdown = 0
@@ -1456,7 +1499,12 @@ private fun LensChip(
 }
 
 @Composable
-private fun ShutterButton(busy: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun ShutterButton(
+    busy: Boolean,
+    modifier: Modifier = Modifier,
+    counting: Boolean = false,
+    onClick: () -> Unit,
+) {
     Box(
         modifier = modifier
             .size(76.dp)
@@ -1468,7 +1516,9 @@ private fun ShutterButton(busy: Boolean, modifier: Modifier = Modifier, onClick:
             .padding(6.dp)
             .clip(CircleShape)
             .background(if (busy) Ink.Amber else Ink.Bone)
-            .clickable(enabled = !busy, onClick = onClick)
-            .semantics { contentDescription = "Shutter" },
+            // Live during a countdown, which is the one moment a press means
+            // stop rather than go.
+            .clickable(enabled = !busy || counting, onClick = onClick)
+            .semantics { contentDescription = if (counting) "Cancel timer" else "Shutter" },
     )
 }

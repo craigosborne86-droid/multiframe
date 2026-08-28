@@ -161,6 +161,13 @@ object ControlBar {
      * first group is the capture itself, which is what a photographer changes
      * between shots; the guides are about the display and nothing else; the
      * openers come last because they are the only ones that lead somewhere.
+     *
+     * **Six, because a phone shows six.** It was nine, and on a Pixel 9 Pro XL
+     * about two and a half were visible before the pinned openers — a row that
+     * reads as unfinished however carefully the rest of it is drawn. `A/B` and
+     * `GUARD` moved into the PRO panel, which gives that panel a meaning it did
+     * not have: *what you set once*, against *what you change between shots*.
+     * Neither is something a photographer touches while composing.
      */
     fun modes(state: ControlBarState): List<ControlSpec> = buildList {
         // Nothing here may change while a capture is in flight: these are read
@@ -209,25 +216,6 @@ object ControlBar {
                 )
             )
         }
-        if (state.highlightGuardOffered) {
-            add(
-                ControlSpec(
-                    id = GUARD,
-                    label = "GUARD",
-                    kind = ControlKind.Mode,
-                    // The pull is a live reading of what the guard is doing, so
-                    // it belongs in the accent beside the label rather than
-                    // spliced into it.
-                    value = if (state.guardPull < -0.05f) {
-                        "%.1f".format(state.guardPull)
-                    } else {
-                        null
-                    },
-                    active = state.highlightGuardOn,
-                    enabled = settled,
-                )
-            )
-        }
         add(
             ControlSpec(
                 id = TIMER,
@@ -236,15 +224,6 @@ object ControlBar {
                 value = if (state.timerSeconds == 0) "OFF" else "${state.timerSeconds}s",
                 valueIsReading = state.timerSeconds > 0,
                 active = state.timerSeconds > 0,
-                enabled = settled,
-            )
-        )
-        add(
-            ControlSpec(
-                id = AB,
-                label = "A/B",
-                kind = ControlKind.Mode,
-                active = state.abMode,
                 enabled = settled,
             )
         )

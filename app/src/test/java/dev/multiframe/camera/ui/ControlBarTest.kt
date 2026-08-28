@@ -66,9 +66,26 @@ class ControlBarTest {
     }
 
     @Test
-    fun aCameraWithoutAZeroShutterLagStreamOffersNoModeOrGuard() {
+    fun aCameraWithoutAZeroShutterLagStreamOffersNoMode() {
         assertThat(ids(ControlBar.modes(bare)))
-            .containsNoneOf(ControlBar.CAPTURE_MODE, ControlBar.GUARD, ControlBar.ZSL)
+            .containsNoneOf(ControlBar.CAPTURE_MODE, ControlBar.ZSL)
+    }
+
+    /**
+     * Six, because a phone shows six.
+     *
+     * The row was nine and on a Pixel 9 Pro XL about two and a half were
+     * visible before the pinned openers, which reads as unfinished however
+     * carefully the rest is drawn. `A/B` and `GUARD` moved into the PRO panel:
+     * neither is touched while composing a shot.
+     */
+    @Test
+    fun theRowIsShortEnoughToFitAPhone() {
+        val settings = ControlBar.modes(fullyCapable)
+            .filter { it.kind != ControlKind.Opener }
+        assertThat(settings).hasSize(6)
+        assertThat(ids(ControlBar.modes(fullyCapable)))
+            .containsNoneOf(ControlBar.AB, ControlBar.GUARD)
     }
 
     @Test
@@ -121,16 +138,6 @@ class ControlBarTest {
         assertThat(frames.label).isEqualTo("FRAMES")
         assertThat(frames.value).isEqualTo("8")
         assertThat(specs.single { it.id == ControlBar.TIMER }.value).isEqualTo("3s")
-    }
-
-    @Test
-    fun theGuardShowsItsPullOnlyWhenItIsPulling() {
-        val idle = fullyCapable.copy(highlightGuardOn = true, guardPull = 0f)
-        assertThat(ControlBar.modes(idle).single { it.id == ControlBar.GUARD }.value).isNull()
-
-        val pulling = fullyCapable.copy(highlightGuardOn = true, guardPull = -1.4f)
-        assertThat(ControlBar.modes(pulling).single { it.id == ControlBar.GUARD }.value)
-            .isEqualTo("-1.4")
     }
 
     /**
