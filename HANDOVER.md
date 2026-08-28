@@ -6,26 +6,45 @@ holds the reasoning behind everything below.
 
 ## Where things stand
 
-Everything builds. **332 unit tests pass**, and **102 device tests** run on a
-Pixel 9 Pro XL on Android 17.
+Everything builds. **349 unit tests pass**, and **111 device tests** run — on
+the emulator, because the phone left with its owner partway through the session.
+The last full run on the phone was 102 tests, before the nine UI tests were
+added.
 
 Every row of [SUPERRES.md](SUPERRES.md) is built. Phases 6, 7 and 8 are closed
 with measurements on the phone.
 
-This session split the develop timer and acted on what it showed:
+This session did two things. On the pipeline:
 
-- **the develop is five stages, four of which had never been timed.** Naming
-  them found that the demosaic is 130 ms of a 296 ms native develop, not most
-  of it — and that **capture sharpening was 93 ms**, a third of the native
-  develop and the second largest item in a whole capture, reported nowhere
-- **sharpening now writes in place and runs four pixels at a time in NEON**, for
-  85-103 ms down to 54-65. Bit-identical: the parity test still reports worst
-  0/255 against the Kotlin reference
-- two harnesses added, `SharpenSpeedDeviceTest` and `DevelopSpeedDeviceTest`,
-  because the capture path could not resolve the change (see below)
+- **the rested capture reading the last handover asked for**: native develop
+  271 ms, against the 260 that was predicted by arithmetic. Sharpening is 37 ms
+  where it was 93
+- **the tone stage is about half of `demosaic+tone`**, the largest item in the
+  develop — 199 ms against 109 with the tone removed, forty samples each,
+  balanced ordering, no overlap
+- **but the exponential inside it is not the cost**, and the ablation that said
+  it was 79 ms was the instrument lying. See below; this is the important part
+- an inline `exp` was built, tested, measured at no gain, and reverted
+
+And on the interface, which needed no phone:
+
+- **a control now has a shape that says what touching it will do.** Tapping
+  `DNG` took a photograph and tapping `MERGE ON` set a flag, and the two were
+  the same object in one scrolling row of thirteen. Actions now live beside the
+  shutter and are squared off; settings are pills
+- the gating is **plain data built by a pure function**, so which controls a
+  phone offers is now 15 unit tests instead of something only holdable hardware
+  could answer
+- three bugs the first screenshot found: "GUIDES GUIDES", `OFF` dressed in the
+  accent reserved for live readings, and the two openers permanently scrolled
+  off the edge
+- every colour is now in `Ink`. There had been three different ambers
+
+[IDEAS.md](IDEAS.md) is new: things worth discussing before building, marked for
+whether the code was checked or not.
 
 `test-photos`: instrumentation runs write real captures into
-`/sdcard/DCIM/Multiframe/`, and roughly 60 have accumulated. They are the
+`/sdcard/DCIM/Multiframe/`, and roughly 70 have accumulated. They are the
 user's to delete.
 
 ## How this repo works
@@ -43,6 +62,13 @@ Six rules, all of them earned rather than assumed, and worth keeping:
   MediaStore publish over the same cores. Isolating the pass separated them. If
   the ranges overlap, ask what the instrument can see before concluding
   anything.
+- **Run an A/A before believing an A/B, and alternate the order.** The develop
+  harness, installed twice under two names and compared against itself, gives
+  per-round medians of 188, 193, 232, 486 against 201, 191, 478, 222. It
+  manufactures two and a half times out of nothing. A fixed install order
+  produced a clean-looking 79 ms result that evaporated when the change was
+  built and measured directly. Trust *separation* — forty samples of each with
+  no overlap — and never a difference of medians.
 - **A null result needs a harness that could have seen the effect**, and a
   parity test needs a fixture that could have shown the difference. The develop
   parity test now renders each width a second time with sharpening off and
@@ -65,44 +91,47 @@ of what was left.
 
 ## Next step
 
-**Take a rested capture reading first.** The phone degraded during this session
-and never recovered: a run that measured 496-628 ms of develop in the morning
-measured 866-912 ms at the end, on every stage including the JPEG encode and
-the MediaStore publish, which nothing touched. So the post-sharpening figure for
-a whole capture has not been measured on a healthy phone. It should be about
-260 ms of native develop, but that is arithmetic, not a measurement.
+**The tone stage, at roughly 90 ms of a 199 ms `demosaic+tone`.** That much is
+established: forty samples of each build, balanced ordering, ranges that do not
+overlap, reproduced twice.
 
-**Then the render, at 199 ms on a rested phone, is the largest item.** It splits:
+What is *not* established is which part of it. The obvious suspect was
+`shoulderCurve`'s `std::exp`, and it is not: replacing it with an inline series
+— worst relative error 3.3e-6 against `expf`, a sixteenth of an output byte,
+parity still 0/255 — changed nothing at all. The 79 ms that pointed at it came
+from ablations run in a fixed install order and does not survive alternation.
 
-    black 15ms, hotpixels 14ms, shading 38ms, demosaic+tone 130ms
+So before optimising the tone stage, **the harness needs an A/A that passes.**
+Everything finer than "the tone half costs about as much as the demosaic half"
+is currently unmeasurable with the instrument that exists, and building a
+sharper one is the actual next task. Ideas, in order of how much they would
+help:
 
-- **`demosaic+tone` is still a bundle**, and this log has been wrong five times
-  about which half of a bundle held the time. Split it before optimising. It
-  cannot be done with a timer — it is one fused loop — so it needs an ablation
-  build, the way the sharpening before-and-after was built: keep the demosaic
-  and replace the tone stage with a direct byte write, alternate against the
-  shipping build, take the difference. Keep the demosaic result used or the
-  compiler will delete it.
-- **`shading` at 38 ms is the cheapest real win.** `shadingGain` runs per pixel
-  and does two float divides, four clamps and four gathers into the map, for a
-  grid whose cells are 240 pixels wide. The x-dependent parts (`fx`, `x0`, `tx`)
-  depend only on x and could be computed once for the whole image; within a
-  cell, the four corner values are loop-invariant. Both are exact
-  rearrangements — no reassociation — so parity survives.
-- **`black` and `hotpixels` are two passes over the same 50 MB plane** with the
-  hot-pixel scan between them only because the correction has to happen in the
-  sensor's own domain, before shading. Fusing hot pixels with shading is
-  possible with a two-row lag, but band boundaries make it fiddly and it is
-  worth maybe 15-20 ms.
+- Time the render *inside* one process across many alternations, the way
+  `JpegEncodeSpeedDeviceTest` keeps both encoders in one binary — no reinstall,
+  which is where the variance comes from.
+- Failing that, many more alternations with the order balanced, and report only
+  separation.
 
-Do not start by assuming the demosaic is the cost. That assumption has now been
-wrong twice here — the JPEG encode the first time, sharpening the second.
+The rest of the render, unattacked and measured on a rested phone:
 
-If you come back to `nAddFrame`, two things are settled: **interleaving `sum`
-and `weight` has been tried and reverted** (see the log), and **the noise lookup
-is why the compiler never vectorised the loop** — `noise[refRaw]` is a
-data-dependent load and NEON has no gather. Folding it into a `vqtbl4q_u8`
-lookup would need the bin computed in vector form, reproducing `binOf` exactly.
+    black 14ms, hotpixels 27ms, shading 38ms, demosaic+tone 146ms
+
+`shading` is still the cheapest real win and needs no new instrument to justify:
+`shadingGain` runs per pixel and does two float divides, four clamps and four
+gathers into a map whose cells are 240 pixels wide. The x-dependent parts depend
+only on x and could be computed once for the image; within a cell the four
+corner values are loop-invariant. Both are exact rearrangements, so parity
+survives.
+
+Do not start by assuming the demosaic is the cost. That has now been wrong twice
+here — the JPEG encode the first time, sharpening the second — and a third
+assumption, about the exponential, was wrong this session.
+
+**And take a rested capture reading before believing anything about the whole.**
+A phone that has been idle gives one good capture and then stops being a rested
+phone: nine captures taken immediately after a good one had a median render of
+315 ms against its 227.
 
 ## How to measure
 
@@ -115,9 +144,16 @@ Three instruments, in decreasing order of authority:
 - **`SharpenSpeedDeviceTest` and `DevelopSpeedDeviceTest` isolate a stage**, and
   are comparison instruments only. The develop one **reads about twice what a
   capture pays and nobody knows why** — clock ramp, exposure and foreground
-  scheduling were each tried as explanations and each failed. It is repeatable
-  to about 2% (medians of 406, 414, 415 across three runs), which is what makes
-  it useful for before-and-after. Never quote it as what a capture costs.
+  scheduling were each tried as explanations and each failed. Its
+  much-advertised 2% repeatability (406, 414, 415 across three runs) was
+  measured across runs that *shared one install*, and an A/B cannot: reinstall
+  between runs and it swings two and a half times. Never quote it as what a
+  capture costs, and never trust it without an A/A.
+- **The emulator is not slow, it is fast**, which is worse. An arm64 image on
+  Apple silicon runs sharpening in 6 ms where the phone takes 37-100, and the
+  JPEG strips in 8 ms against 48-107. A regression that doubled a phone's cost
+  would look healthy there. The four timing harnesses now say so in the log line
+  beside the figure.
 - `MergeSpeedDeviceTest` times the accumulation, and aligns on the JVM where a
   capture aligns natively, so it reads high. Switching it to `alignNative` is
   still the obvious improvement and still has not been done.
