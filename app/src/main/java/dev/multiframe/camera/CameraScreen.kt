@@ -121,6 +121,10 @@ import dev.multiframe.camera.ui.Histogram
 import dev.multiframe.camera.ui.Peaking
 import dev.multiframe.camera.ui.SweepMap
 import dev.multiframe.camera.ui.ControlsPanel
+import dev.multiframe.camera.ui.ActionStrip
+import dev.multiframe.camera.ui.ControlBar
+import dev.multiframe.camera.ui.ControlBarState
+import dev.multiframe.camera.ui.ControlRow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
@@ -966,6 +970,132 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 ),
         )
 
+        // Only where a longer lens exists to sweep with.
+        val sweepPlan = remember(lenses, lens, zslStream) {
+            val here = lens
+            val stream = zslStream
+            if (here == null || stream == null) null
+            else MosaicPlanner.bestPairing(
+                lenses, here, stream.config.width, stream.config.height,
+            )
+        }
+
+        // What the controls are is decided in one place and what they do in
+        // another, joined by an id. That is what lets `ControlBar` be plain
+        // data -- and so lets a phone without raw support, which this one is
+        // not, be tested on the JVM instead of held in the hand.
+        val barState = ControlBarState(
+            busy = busy,
+            mergeEnabled = mergeEnabled,
+            abMode = abMode,
+            burstFrames = burstFrames,
+            timerSeconds = timerSeconds,
+            guidesLabel = guides.label,
+            guidesOn = guides != GuideMode.OFF,
+            proOpen = showControls,
+            aboutOpen = showAbout,
+            captureModeLabel = if (zslStream == null) null else {
+                val plan = capturePlan
+                if (captureMode == CaptureMode.AUTO &&
+                    plan != null && plan.resolved != CaptureMode.AUTO
+                ) {
+                    // Say what AUTO settled on, not just that it is AUTO.
+                    "AUTO/${plan.resolved.label}"
+                } else {
+                    captureMode.label
+                }
+            },
+            captureModeActive = captureMode != CaptureMode.AUTO,
+            highlightGuardOffered = zslStream != null,
+            highlightGuardOn = highlightGuard,
+            guardPull = guardPull,
+            // Only offered where the hardware said yes. On a camera that stalls
+            // on raw the control never appears and nothing changes.
+            zslOffered = zslDecision is ZslDecision.Stream,
+            zslOn = zslWanted,
+            sweepOffered = sweepPlan != null,
+            sweepRunning = sweepRequested,
+            rawBurstOffered = rawCapture != null && characteristics != null,
+            dngOffered = rawCapture != null,
+        )
+
+        val handleControl: (String) -> Unit = { id ->
+            when (id) {
+                ControlBar.MERGE -> mergeEnabled = !mergeEnabled
+                ControlBar.AB -> abMode = !abMode
+                ControlBar.FRAMES -> {
+                    // Only counts the heap-sized ring can actually hold.
+                    val ceiling = zslStream?.maxBurst ?: buffer.capacity
+                    burstFrames = ControlBar.nextBurst(burstFrames, ceiling)
+                }
+                ControlBar.CAPTURE_MODE -> captureMode = captureMode.next()
+                ControlBar.ZSL -> {
+                    zslWanted = !zslWanted
+                    status = if (zslWanted) "engaging raw ring…"
+                    else "sequential capture"
+                }
+                ControlBar.GUARD -> highlightGuard = !highlightGuard
+                ControlBar.TIMER -> timerSeconds = ControlBar.nextTimer(timerSeconds)
+                ControlBar.GUIDES -> guides = guides.next()
+                ControlBar.PRO -> showControls = !showControls
+                ControlBar.ABOUT -> showAbout = true
+
+                ControlBar.SWEEP -> {
+                    if (sweepRequested) {
+                        sweepRequested = false
+                    } else if (sweepPlan != null) {
+                        sweepTargetLens = lens
+                        lens = sweepPlan.captureLens
+                        sweepRequested = true
+                        status = "switching to ${sweepPlan.captureLens.label}…"
+                    }
+                }
+
+                ControlBar.RAW_BURST -> {
+                    busy = true
+                    status = "raw burst…"
+                    scope.launch {
+                        val r = withContext(Dispatchers.Default) {
+                            RawBurstCapture.captureAndMerge(
+                                context = context,
+                                imageCapture = rawCapture!!,
+                                characteristics = characteristics!!,
+                                captureResult = lastCaptureResult.get(),
+                                frameCount = burstFrames,
+                                // The equivalent focal length is the
+                                // catalogue's to know, not the capture
+                                // result's.
+                                lens = lens,
+                                rotationDegrees = caps?.let {
+                                    orientation.captureRotation(it.sensorOrientation)
+                                } ?: 0,
+                                onProgress = { },
+                            )
+                        }
+                        Log.i(TAG, "raw burst result: $r")
+                        status = ("%s  capture %dms  merge %dms  " +
+                            "develop %dms  write %dms").format(
+                            r.message, r.captureMillis, r.mergeMillis,
+                            r.developMillis, r.writeMillis,
+                        )
+                        busy = false
+                    }
+                }
+
+                ControlBar.DNG -> {
+                    busy = true
+                    status = "DNG + JPEG…"
+                    RawCapture.capture(
+                        imageCapture = rawCapture!!,
+                        context = context,
+                    ) { message ->
+                        status = message
+                        busy = false
+                    }
+                }
+            }
+        }
+
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -973,145 +1103,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 .padding(top = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp),
-            ) {
-                Chip(if (mergeEnabled) "MERGE ON" else "MERGE OFF", mergeEnabled) {
-                    if (!busy) mergeEnabled = !mergeEnabled
-                }
-                Chip("A/B", abMode) { if (!busy) abMode = !abMode }
-                Chip("$burstFrames FRAMES", false) {
-                    if (!busy) {
-                        // Only offer counts the heap-sized ring can actually hold.
-                        val ceiling = zslStream?.maxBurst ?: buffer.capacity
-                        val steps = listOf(1, 2, 4, 8, 12, 16, 24, 28, 32)
-                            .filter { it <= ceiling }
-                        val here = steps.indexOf(burstFrames).coerceAtLeast(0)
-                        burstFrames = steps[(here + 1) % steps.size]
-                    }
-                }
-                Chip("PRO", showControls) { showControls = !showControls }
-                Chip(guides.label, guides != GuideMode.OFF) { guides = guides.next() }
-                if (zslStream != null) {
-                    val plan = capturePlan
-                    val label = if (captureMode == CaptureMode.AUTO &&
-                        plan != null && plan.resolved != CaptureMode.AUTO
-                    ) {
-                        // Say what AUTO settled on, not just that it is AUTO.
-                        "AUTO/${plan.resolved.label}"
-                    } else {
-                        captureMode.label
-                    }
-                    Chip(label, captureMode != CaptureMode.AUTO) {
-                        if (!busy) captureMode = captureMode.next()
-                    }
-                }
-                if (zslStream != null) {
-                    Chip(
-                        if (guardPull < -0.05f) "GUARD %.1f".format(guardPull) else "GUARD",
-                        highlightGuard,
-                    ) {
-                        if (!busy) highlightGuard = !highlightGuard
-                    }
-                }
-                // Only where a longer lens exists to sweep with.
-                val sweepPlan = remember(lenses, lens, zslStream) {
-                    val here = lens
-                    val stream = zslStream
-                    if (here == null || stream == null) null
-                    else MosaicPlanner.bestPairing(
-                        lenses, here, stream.config.width, stream.config.height,
-                    )
-                }
-                if (sweepPlan != null || sweepRequested) {
-                    Chip(if (sweepRequested) "STOP SWEEP" else "SUPER RES", sweepRequested) {
-                        if (sweepRequested) {
-                            sweepRequested = false
-                        } else if (!busy && sweepPlan != null) {
-                            sweepTargetLens = lens
-                            lens = sweepPlan.captureLens
-                            sweepRequested = true
-                            status = "switching to ${sweepPlan.captureLens.label}…"
-                        }
-                    }
-                }
-                // Only offered where the hardware said yes. On a camera that
-                // stalls on raw the chip never appears and nothing changes.
-                if (zslDecision is ZslDecision.Stream) {
-                    Chip(if (zslWanted) "ZSL ON" else "ZSL", zslWanted) {
-                        if (!busy) {
-                            zslWanted = !zslWanted
-                            status = if (zslWanted) "engaging raw ring…"
-                            else "sequential capture"
-                        }
-                    }
-                }
-                if (rawCapture != null && characteristics != null) {
-                    Chip("RAW x$burstFrames", false) {
-                        if (!busy) {
-                            busy = true
-                            status = "raw burst…"
-                            scope.launch {
-                                val r = withContext(Dispatchers.Default) {
-                                    RawBurstCapture.captureAndMerge(
-                                        context = context,
-                                        imageCapture = rawCapture!!,
-                                        characteristics = characteristics!!,
-                                        captureResult = lastCaptureResult.get(),
-                                        frameCount = burstFrames,
-                                        // The equivalent focal length is the
-                                        // catalogue's to know, not the capture
-                                        // result's.
-                                        lens = lens,
-                                        rotationDegrees = caps?.let {
-                                            orientation.captureRotation(it.sensorOrientation)
-                                        } ?: 0,
-                                        onProgress = { },
-                                    )
-                                }
-                                Log.i(TAG, "raw burst result: $r")
-                                status = ("%s  capture %dms  merge %dms  " +
-                                    "develop %dms  write %dms").format(
-                                    r.message, r.captureMillis, r.mergeMillis,
-                                    r.developMillis, r.writeMillis,
-                                )
-                                busy = false
-                            }
-                        }
-                    }
-                }
-                if (rawCapture != null) {
-                    Chip("DNG", false) {
-                        if (!busy) {
-                            busy = true
-                            status = "DNG + JPEG…"
-                            RawCapture.capture(
-                                imageCapture = rawCapture!!,
-                                context = context,
-                            ) { message ->
-                                status = message
-                                busy = false
-                            }
-                        }
-                    }
-                }
-                Chip(
-                    if (timerSeconds == 0) "TIMER" else "${timerSeconds}s",
-                    timerSeconds > 0,
-                ) {
-                    if (!busy) {
-                        timerSeconds = when (timerSeconds) {
-                            0 -> 3
-                            3 -> 10
-                            else -> 0
-                        }
-                    }
-                }
-                Chip("i", showAbout) { showAbout = true }
-            }
+            ControlRow(ControlBar.modes(barState), onControl = handleControl)
 
             if (status.isNotEmpty()) {
                 Text(
@@ -1163,9 +1155,19 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 )
             }
 
+            // The captures that are not the shutter. Squared off rather than
+            // pilled, and here rather than in the row at the top, because every
+            // one of them writes a photograph the moment it is touched and the
+            // things up there do not.
+            ActionStrip(
+                specs = ControlBar.actions(barState),
+                onControl = handleControl,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+
             ShutterButton(
                 busy = busy,
-                modifier = Modifier.padding(vertical = 28.dp),
+                modifier = Modifier.padding(top = 12.dp, bottom = 28.dp),
                 onClick = {
                     if (busy || countdown > 0) return@ShutterButton
 
@@ -1433,30 +1435,6 @@ private fun LensChip(
             fontFamily = FontFamily.Monospace,
         )
     }
-}
-
-@Composable
-private fun Chip(label: String, active: Boolean, onClick: () -> Unit) {
-    // Mono was doing the work of saying "instrument" and saying "unfinished" at
-    // the same time. A label is a label; the mono is kept for the numbers,
-    // which is where an instrument has always used it.
-    Text(
-        text = label,
-        color = if (active) Ink.OnBone else Ink.Bone,
-        fontSize = 12.sp,
-        letterSpacing = 0.4.sp,
-        fontWeight = FontWeight.Medium,
-        modifier = Modifier
-            .padding(horizontal = 4.dp)
-            .background(if (active) Ink.Bone else Ink.Pane, RoundedCornerShape(20.dp))
-            .then(
-                if (active) Modifier
-                else Modifier.border(1.dp, Ink.Hairline, RoundedCornerShape(20.dp))
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 13.dp, vertical = 8.dp)
-            .semantics { contentDescription = label },
-    )
 }
 
 @Composable
