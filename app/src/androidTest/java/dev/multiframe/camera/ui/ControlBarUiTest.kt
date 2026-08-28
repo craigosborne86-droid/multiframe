@@ -69,7 +69,7 @@ class ControlBarUiTest {
     fun touchingAControlReportsTheIdTheScreenDispatchesOn() {
         val fired = showRow(capable)
         compose.onNodeWithContentDescription("MERGE ON").performScrollTo().performClick()
-        compose.onNodeWithContentDescription("GUIDES GUIDES").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("GUIDES OFF").performScrollTo().performClick()
         assertThat(fired).containsExactly(ControlBar.MERGE, ControlBar.GUIDES).inOrder()
     }
 
@@ -97,7 +97,7 @@ class ControlBarUiTest {
     @Test
     fun theGuidesStayLiveWhileACaptureRuns() {
         val fired = showRow(capable.copy(busy = true))
-        compose.onNodeWithContentDescription("GUIDES GUIDES").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("GUIDES OFF").performScrollTo().performClick()
         assertThat(fired).containsExactly(ControlBar.GUIDES)
     }
 
@@ -123,6 +123,20 @@ class ControlBarUiTest {
         val fired = showActions(capable.copy(busy = true, sweepRunning = true))
         compose.onNodeWithContentDescription("STOP SWEEP").performClick()
         assertThat(fired).containsExactly(ControlBar.SWEEP)
+    }
+
+    /**
+     * The openers are how anyone reaches the manual controls or finds out what
+     * any of this does. In a row nine long on a phone-width screen they were
+     * never once on screen, so they do not scroll with the rest.
+     */
+    @Test
+    fun theOpenersAreReachableWithoutScrolling() {
+        val fired = showRow(capable)
+        compose.onNodeWithContentDescription("PRO").assertIsDisplayed()
+        compose.onNodeWithContentDescription("INFO").assertIsDisplayed()
+        compose.onNodeWithContentDescription("PRO").performClick()
+        assertThat(fired).containsExactly(ControlBar.PRO)
     }
 
     @Test

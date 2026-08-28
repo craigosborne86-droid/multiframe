@@ -35,6 +35,20 @@ enum class GuideMode {
             GRID_AND_LEVEL -> "GRID+LEVEL"
         }
 
+    /**
+     * What the control reads, as opposed to what it is called.
+     *
+     * These were the same string when the control was one pill carrying both,
+     * which put "GUIDES GUIDES" on the screen the moment the two were pulled
+     * apart. A control's name is not one of its values.
+     */
+    val valueLabel: String
+        get() = when (this) {
+            OFF -> "OFF"
+            GRID -> "GRID"
+            GRID_AND_LEVEL -> "GRID+LEVEL"
+        }
+
     fun next(): GuideMode = entries[(ordinal + 1) % entries.size]
 }
 

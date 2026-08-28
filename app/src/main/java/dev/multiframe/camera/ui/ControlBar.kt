@@ -72,6 +72,14 @@ data class ControlSpec(
     val kind: ControlKind,
     /** The reading, for a [ControlKind.Cycle]. Set apart from the label. */
     val value: String? = null,
+    /**
+     * Whether [value] is a reading rather than the word for not having one.
+     *
+     * The palette spends its single accent on numbers and live readings. `8`
+     * is one; `OFF` is the absence of one, and colouring it made a timer that
+     * was switched off look like a timer that was running.
+     */
+    val valueIsReading: Boolean = true,
     val active: Boolean = false,
     val enabled: Boolean = true,
 )
@@ -90,7 +98,7 @@ data class ControlBarState(
     val abMode: Boolean = false,
     val burstFrames: Int = 4,
     val timerSeconds: Int = 0,
-    val guidesLabel: String = "GUIDES",
+    val guidesLabel: String = "OFF",
     val guidesOn: Boolean = false,
     val proOpen: Boolean = false,
     val aboutOpen: Boolean = false,
@@ -226,6 +234,7 @@ object ControlBar {
                 label = "TIMER",
                 kind = ControlKind.Cycle,
                 value = if (state.timerSeconds == 0) "OFF" else "${state.timerSeconds}s",
+                valueIsReading = state.timerSeconds > 0,
                 active = state.timerSeconds > 0,
                 enabled = settled,
             )
@@ -245,6 +254,7 @@ object ControlBar {
                 label = "GUIDES",
                 kind = ControlKind.Cycle,
                 value = state.guidesLabel,
+                valueIsReading = state.guidesOn,
                 active = state.guidesOn,
                 // Drawing a grid does not touch the capture, so this one stays
                 // live while a capture runs.

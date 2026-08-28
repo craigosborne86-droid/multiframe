@@ -17,6 +17,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -47,6 +53,8 @@ import androidx.compose.ui.unit.sp
  * `8 FRAMES` read as a mode whose name happened to start with a digit.
  */
 private val PillShape = RoundedCornerShape(20.dp)
+/** How far the scrolling settings fade out at their trailing edge. */
+private const val FadeWidthPx = 44f
 private val ActionShape = RoundedCornerShape(6.dp)
 
 /** The row over the picture. Settings only -- see [ControlBar.modes]. */
@@ -56,23 +64,48 @@ fun ControlRow(
     onControl: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val (openers, settings) = specs.partition { it.kind == ControlKind.Opener }
+    val scroll = rememberScrollState()
     Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp),
+        modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        var openersStarted = false
-        specs.forEach { spec ->
-            // The openers are the only controls that lead somewhere rather than
-            // change something, so they are set off by a gap instead of being
-            // one more pill in the stream.
-            if (spec.kind == ControlKind.Opener && !openersStarted) {
-                openersStarted = true
-                Spacer(Modifier.width(14.dp))
-            }
-            ControlChip(spec) { onControl(spec.id) }
+        // The settings scroll, and on a narrow screen most of them start off
+        // the edge. That is deliberate -- the row is longer than the phone.
+        //
+        // What is not deliberate is a pill sliced down the middle at the
+        // boundary, which reads as a broken layout rather than as a hint that
+        // there is more. So the trailing edge fades, and only when there is
+        // in fact more: faded with nothing beyond it, the last control would
+        // look disabled.
+        Row(
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                .drawWithContent {
+                    drawContent()
+                    if (scroll.canScrollForward) {
+                        drawRect(
+                            brush = Brush.horizontalGradient(
+                                startX = size.width - FadeWidthPx,
+                                endX = size.width,
+                                colors = listOf(Color.Black, Color.Transparent),
+                            ),
+                            blendMode = BlendMode.DstIn,
+                        )
+                    }
+                }
+                .horizontalScroll(scroll),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            settings.forEach { spec -> ControlChip(spec) { onControl(spec.id) } }
+        }
+        // The openers do not scroll. They are the way into the manual controls
+        // and the way to find out what any of this does, and putting them at
+        // the end of a row nine long meant they were never once on screen.
+        if (openers.isNotEmpty()) {
+            Spacer(Modifier.width(10.dp))
+            openers.forEach { spec -> ControlChip(spec) { onControl(spec.id) } }
         }
     }
 }
@@ -140,8 +173,12 @@ private fun ControlChip(spec: ControlSpec, onClick: () -> Unit) {
             Text(
                 text = value,
                 // The one accent, spent where an instrument has always spent
-                // it: on the reading.
-                color = if (filled) Ink.OnBone else Ink.Amber,
+                // it: on the reading, and not on the word for not having one.
+                color = when {
+                    filled -> Ink.OnBone
+                    spec.valueIsReading -> Ink.Amber
+                    else -> Ink.Muted
+                },
                 fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.padding(start = 7.dp),

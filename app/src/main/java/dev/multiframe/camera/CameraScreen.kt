@@ -990,7 +990,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             abMode = abMode,
             burstFrames = burstFrames,
             timerSeconds = timerSeconds,
-            guidesLabel = guides.label,
+            guidesLabel = guides.valueLabel,
             guidesOn = guides != GuideMode.OFF,
             proOpen = showControls,
             aboutOpen = showAbout,

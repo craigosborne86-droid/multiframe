@@ -133,6 +133,34 @@ class ControlBarTest {
             .isEqualTo("-1.4")
     }
 
+    /**
+     * Pulling the label and the value apart put "GUIDES GUIDES" on the screen,
+     * because the mode's name was also the string it showed when off.
+     */
+    @Test
+    fun noControlRepeatsItsOwnNameAsItsValue() {
+        for (spec in ControlBar.modes(fullyCapable) + ControlBar.actions(fullyCapable)) {
+            assertThat(spec.value).isNotEqualTo(spec.label)
+        }
+    }
+
+    /**
+     * The accent is spent on numbers and live readings. "OFF" is neither, and
+     * colouring it made a timer that was switched off look like one running.
+     */
+    @Test
+    fun theWordForHavingNoValueIsNotDressedAsAReading() {
+        val off = ControlBar.modes(fullyCapable.copy(timerSeconds = 0, guidesOn = false))
+        assertThat(off.single { it.id == ControlBar.TIMER }.valueIsReading).isFalse()
+        assertThat(off.single { it.id == ControlBar.GUIDES }.valueIsReading).isFalse()
+
+        val on = ControlBar.modes(fullyCapable.copy(timerSeconds = 3, guidesOn = true))
+        assertThat(on.single { it.id == ControlBar.TIMER }.valueIsReading).isTrue()
+        assertThat(on.single { it.id == ControlBar.GUIDES }.valueIsReading).isTrue()
+        // A frame count is always a reading -- there is no "off" for it.
+        assertThat(on.single { it.id == ControlBar.FRAMES }.valueIsReading).isTrue()
+    }
+
     @Test
     fun theOpenersComeLast() {
         val order = ids(ControlBar.modes(fullyCapable))
