@@ -6,46 +6,33 @@ holds the reasoning behind everything below.
 
 ## Where things stand
 
-Everything builds. **349 unit tests pass**, and **111 device tests** run — on
-the emulator, because the phone left with its owner partway through the session.
-The last full run on the phone was 102 tests, before the nine UI tests were
-added.
+**The target is one phone: a Pixel 9 Pro XL.** No Play Store, no other devices,
+no release paperwork — deferred by the owner's decision, and nothing in the
+current work depends on any of it.
 
-Every row of [SUPERRES.md](SUPERRES.md) is built. Phases 6, 7 and 8 are closed
-with measurements on the phone.
+Everything builds. **359 unit tests pass**, and **114 device tests** pass on the
+phone. The build on the phone is current HEAD, md5 verified.
 
-This session did two things. On the pipeline:
+The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
+in about a second and writes a DNG and a JPEG to the gallery, and the status
+line says what the merge bought: `8 frames · 91% kept`.
 
-- **the rested capture reading the last handover asked for**: native develop
-  271 ms, against the 260 that was predicted by arithmetic. Sharpening is 37 ms
-  where it was 93
-- **the tone stage is about half of `demosaic+tone`**, the largest item in the
-  develop — 199 ms against 109 with the tone removed, forty samples each,
-  balanced ordering, no overlap
-- **but the exponential inside it is not the cost**, and the ablation that said
-  it was 79 ms was the instrument lying. See below; this is the important part
-- an inline `exp` was built, tested, measured at no gain, and reverted
+Recent work, newest first:
 
-And on the interface, which needed no phone:
-
-- **a control now has a shape that says what touching it will do.** Tapping
-  `DNG` took a photograph and tapping `MERGE ON` set a flag, and the two were
-  the same object in one scrolling row of thirteen. Actions now live beside the
-  shutter and are squared off; settings are pills
-- the gating is **plain data built by a pure function**, so which controls a
-  phone offers is now 15 unit tests instead of something only holdable hardware
-  could answer
-- three bugs the first screenshot found: "GUIDES GUIDES", `OFF` dressed in the
-  accent reserved for live readings, and the two openers permanently scrolled
-  off the edge
-- every colour is now in `Ink`. There had been three different ambers
-
-[IDEAS.md](IDEAS.md) is new: things worth discussing before building, marked for
-whether the code was checked or not.
+- **it now opens in a state worth showing.** ZSL defaults on, the PRO panel has
+  a reset, the control row is six settings rather than nine because a phone
+  shows six, and the timer and guides are remembered. The self-timer can be
+  called off mid-countdown
+- **the merge readout** — the frames that went in and the share that survived
+  rejection, which the app had always measured and only ever logged
+- **a control now has a shape that says what touching it will do**; actions
+  live beside the shutter and are squared off, settings are pills
+- **on the pipeline**: the tone stage is about half of `demosaic+tone`, the
+  largest item in the develop. Which part of it is unknown — see below
 
 `test-photos`: instrumentation runs write real captures into
-`/sdcard/DCIM/Multiframe/`, and roughly 70 have accumulated. They are the
-user's to delete.
+`/sdcard/DCIM/Multiframe/`, and roughly 80 have accumulated. They are the
+owner's to delete.
 
 ## How this repo works
 
@@ -91,47 +78,43 @@ of what was left.
 
 ## Next step
 
-**The tone stage, at roughly 90 ms of a 199 ms `demosaic+tone`.** That much is
-established: forty samples of each build, balanced ordering, ranges that do not
-overlap, reproduced twice.
+**Two things need the owner and a real scene, and they outrank all the code.**
 
-What is *not* established is which part of it. The obvious suspect was
-`shoulderCurve`'s `std::exp`, and it is not: replacing it with an inline series
-— worst relative error 3.3e-6 against `expf`, a sixteenth of an output byte,
-parity still 0/255 — changed nothing at all. The 79 ms that pointed at it came
-from ablations run in a fixed install order and does not survive alternation.
+- **Nobody has swept a real scene with the mosaic.** Every stitching claim rests
+  on synthetic frames cut from a generated image. That is the right way to test
+  the algorithm and it is not evidence about a building. Until it has been
+  pointed at one, super-res should not be the thing anyone is shown first.
+- **Nobody has looked hard at a batch of real photographs.** The parity tests
+  prove the native path matches the Kotlin one; neither proves the picture is
+  good. Twenty frames in mixed light, looked at properly, would tell more than
+  any test here.
 
-So before optimising the tone stage, **the harness needs an A/A that passes.**
-Everything finer than "the tone half costs about as much as the demosaic half"
-is currently unmeasurable with the instrument that exists, and building a
-sharper one is the actual next task. Ideas, in order of how much they would
-help:
-
-- Time the render *inside* one process across many alternations, the way
-  `JpegEncodeSpeedDeviceTest` keeps both encoders in one binary — no reinstall,
-  which is where the variance comes from.
-- Failing that, many more alternations with the order balanced, and report only
-  separation.
-
-The rest of the render, unattacked and measured on a rested phone:
+**On the pipeline**, the render is what is left. Measured on a rested phone:
 
     black 14ms, hotpixels 27ms, shading 38ms, demosaic+tone 146ms
 
-`shading` is still the cheapest real win and needs no new instrument to justify:
+The tone half of that last figure is about as expensive as the demosaic half —
+established, forty samples each, balanced ordering, no overlap. *Which part* of
+the tone stage is not established, and the obvious suspect is innocent:
+replacing `shoulderCurve`'s `std::exp` with an inline series changed nothing.
+
+**Before optimising it, the harness needs an A/A that passes.** It currently
+separates a binary from itself by two and a half times. Everything finer than
+"the tone half costs about as much as the demosaic half" is unmeasurable with
+it, and building a sharper instrument is the actual task — probably by timing
+inside one process across alternations, the way `JpegEncodeSpeedDeviceTest`
+keeps both encoders in one binary, since the reinstall is where the variance
+comes from.
+
+`shading` at 38 ms remains the cheapest real win and needs no new instrument:
 `shadingGain` runs per pixel and does two float divides, four clamps and four
 gathers into a map whose cells are 240 pixels wide. The x-dependent parts depend
-only on x and could be computed once for the image; within a cell the four
-corner values are loop-invariant. Both are exact rearrangements, so parity
-survives.
+only on x; within a cell the corner values are loop-invariant. Both are exact
+rearrangements, so parity survives.
 
-Do not start by assuming the demosaic is the cost. That has now been wrong twice
-here — the JPEG encode the first time, sharpening the second — and a third
-assumption, about the exponential, was wrong this session.
-
-**And take a rested capture reading before believing anything about the whole.**
-A phone that has been idle gives one good capture and then stops being a rested
-phone: nine captures taken immediately after a good one had a median render of
-315 ms against its 227.
+Do not start by assuming the demosaic is the cost. Three assumptions about where
+develop time goes have been wrong here: the JPEG encode, the sharpening, and the
+exponential.
 
 ## How to measure
 
