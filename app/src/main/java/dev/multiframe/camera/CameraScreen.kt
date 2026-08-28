@@ -81,6 +81,7 @@ import dev.multiframe.camera.pipeline.AppSettings
 import dev.multiframe.camera.pipeline.AppSettings.Companion.reconcile
 import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.CaptureMode
+import dev.multiframe.camera.pipeline.CaptureReadout
 import dev.multiframe.camera.pipeline.CaptureModes
 import dev.multiframe.camera.pipeline.SceneAnalysis
 import dev.multiframe.camera.pipeline.FocusPeaking
@@ -1073,11 +1074,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             )
                         }
                         Log.i(TAG, "raw burst result: $r")
-                        status = ("%s  capture %dms  merge %dms  " +
-                            "develop %dms  write %dms").format(
-                            r.message, r.captureMillis, r.mergeMillis,
-                            r.developMillis, r.writeMillis,
+                        Log.i(
+                            TAG,
+                            ("capture %dms  merge %dms  develop %dms  " +
+                                "write %dms").format(
+                                r.captureMillis, r.mergeMillis,
+                                r.developMillis, r.writeMillis,
+                            ),
                         )
+                        status = r.stats?.let {
+                            CaptureReadout.of(it.framesMerged, it.meanContribution)
+                        } ?: r.message
                         busy = false
                     }
                 }
@@ -1201,12 +1208,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             }
                             Log.i(TAG, "ZSL result: $r")
                             r.streamStats?.let { Log.i(TAG, "stream health: $it") }
-                            status = ("%s  handover %.2fms  span %dms  " +
-                                "merge %dms  develop %dms  write %dms").format(
-                                r.message, r.handoverMicros / 1000.0,
-                                r.burstSpanMillis, r.mergeMillis,
-                                r.developMillis, r.writeMillis,
+                            Log.i(
+                                TAG,
+                                ("handover %.2fms  span %dms  merge %dms  " +
+                                    "develop %dms  write %dms").format(
+                                    r.handoverMicros / 1000.0, r.burstSpanMillis,
+                                    r.mergeMillis, r.developMillis, r.writeMillis,
+                                ),
                             )
+                            status = r.stats?.let {
+                                CaptureReadout.of(it.framesMerged, it.meanContribution)
+                            } ?: r.message
                             busy = false
                         }
                         return@ShutterButton
@@ -1255,11 +1267,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             "No frames buffered yet"
                         } else {
                             val stats = result.first as dev.multiframe.camera.pipeline.MergeStats
-                            Log.i(TAG, "Saved ${result.second}  $stats  rot=$rotation")
-                            "%s  %d frames  align %dms  merge %dms  rot %d".format(
-                                label, stats.framesUsed, stats.alignMillis,
-                                stats.mergeMillis, rotation,
+                            // The engineering detail stays in the log, where it
+                            // has always been read from. What reaches the screen
+                            // is what the merge bought, which is the one thing
+                            // this camera does that the phone's own does not --
+                            // and which until now only logcat ever saw.
+                            Log.i(
+                                TAG,
+                                "Saved ${result.second}  $stats  rot=$rotation  " +
+                                    "align ${stats.alignMillis}ms merge ${stats.mergeMillis}ms",
                             )
+                            CaptureReadout.of(stats.framesUsed, stats.meanContribution)
                         }
                         busy = false
                     }
