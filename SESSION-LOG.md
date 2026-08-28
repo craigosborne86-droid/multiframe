@@ -2091,6 +2091,83 @@ to give the harness an A/A that passes.
 
 102 device tests pass, 332 unit tests pass.
 
+## Aimed at one phone, and at being worth showing
+
+The target narrowed to a single Pixel 9 Pro XL — no Play Store, no other
+devices, no release paperwork. That is a smaller job than it sounds, because
+almost nothing here depended on any of it.
+
+### What the app was actually like to pick up
+
+It worked. 111 device tests and 356 unit tests passed on the phone, the shutter
+produced a 12-frame merged raw capture, and the new control row rendered
+correctly over a live preview with all five lenses.
+
+And it would have demoed badly, for three reasons that had nothing to do with
+whether the code was correct:
+
+- **Its saved state was wrong.** `MERGE OFF`, `ZSL OFF`, `FRAMES 28`, left
+  behind by the morning's measurement runs. Both headline features switched off
+  and captures taking about five seconds. Worse, there was no way back: a set of
+  controls someone has been playing with could only be undone by reinstalling.
+- **The control row did not fit.** Nine settings, of which the phone showed
+  about two and a half before the pinned openers. That reads as unfinished
+  however carefully the rest is drawn — and it was invisible on the emulator,
+  whose window is a different shape.
+- **The timer and the guides were forgotten between launches**, alone among the
+  settings.
+
+None of that is visible from the code, the tests, or an emulator. It took
+holding the thing.
+
+### The readout, and the number that is not in it
+
+The merge measures what it bought — the frames that went in, and how much of
+them survived rejection — and both went to logcat. The status line now reads
+`8 frames · 91% kept` on all three capture paths, and the millisecond counts
+moved to the log where they were being read from anyway.
+
+**The good number could not be had honestly.** "noise ÷3.5" is what a readout
+like this wants to say. The improvement in signal-to-noise of a weighted mean is
+`Σw / √(Σw²)`, which is *scale-invariant*: halving every weight changes it not at
+all. Only the variation between weights matters, and only their mean is
+recorded, so the mean cannot produce the figure. What is offered instead is the
+effective frame count — the reference plus what the rest actually contributed —
+because a burst of twelve that kept half of each is not a burst of twelve.
+
+### Six controls, because a phone shows six
+
+`A/B` and `GUARD` moved into the PRO panel, which gave that panel a meaning it
+had lacked: *what you set once*, against *what you change between shots*.
+Neither is touched while composing. That the move was a change to a list of data
+rather than to a layout is the whole return on the restructuring done earlier —
+`ControlBarTest` caught the ordering before it reached the phone.
+
+Zero shutter lag now defaults on. It is the headline of this camera and
+defaulting it off made the app feel slower than it is.
+
+### A suspicion that was wrong, checked before acting on it
+
+Turning ZSL on by default raised an obvious worry: the raw path is Camera2
+rather than CameraX, so it is not bound to the activity lifecycle, and
+`DisposableEffect(Unit)` does not fire on backgrounding. Show a friend, take a
+call, come back to a dead camera.
+
+It does not happen. The preview is a `SurfaceView` and
+`surface.onDestroyed { zslSurface = null }` nulls the surface when the window
+stops being visible; the effect that owns the stream is keyed on that surface,
+so it tears the camera down and rebuilds it on return. Keying on the surface
+rather than on lifecycle events is the better choice, because it also covers the
+surface going away for any other reason — which is exactly what the comment
+above that effect already said it was for.
+
+Worth recording as a near miss: the fix for a bug that is not there would have
+been a second teardown path racing the one that works.
+
+359 unit tests pass. 114 device tests pass on the phone — with the capture
+consistency check failing once at 38.6 C after four minutes of load and passing
+on its own, which is the thermal flakiness this log has recorded twice before.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
