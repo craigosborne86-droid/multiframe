@@ -2168,6 +2168,94 @@ been a second teardown path racing the one that works.
 consistency check failing once at 38.6 C after four minutes of load and passing
 on its own, which is the thermal flakiness this log has recorded twice before.
 
+## Looking at the photographs, which nothing here had done
+
+Every claim in this log about the pipeline had been a claim about *arithmetic*:
+the native path matches the Kotlin reference, the parity is exact, the ranges do
+not overlap. None of it is a claim that the pictures are any good. This is the
+first time anyone opened the output and measured it.
+
+Done during a night when the project volume was unreadable — macOS was refusing
+the process access to the removable drive — so it used only the phone and four
+captures pulled off it. Nothing was changed; there was no source to change.
+
+### The output is good
+
+From `MF_20260826_184811_zsl_28f.jpg`, a 28-frame handheld capture through the
+raw path. The subject is a battery label on carpet, which is a better test than
+it sounds: fine text, a barcode for high-frequency detail, a smooth painted body
+for noise, carpet for random texture.
+
+    noise, flattest tenth of patches   sd 1.64 / 255
+    detail, mean |laplacian|           34.4  (median 21)
+    clipped highlights                 0.00%
+    crushed shadows                    0.00%
+
+At 100% on the barcode, where artefacts surface first: no sharpening halos, no
+demosaic mazing or zipper, no colour fringing, and **no ghosting across 28
+handheld frames**. In the corner, where the shading correction multiplies by up
+to 3.5: no vignetting, and no corner noise amplification, which is the thing
+that correction risks.
+
+### A demosaic bug that was not there
+
+A first pass found a 2.3/255 even-odd difference in flat areas, in both rows and
+columns, that did not scale with local contrast. That is the signature of
+residual CFA structure — a demosaic failing to equalise the two greens — and it
+would have been a real defect.
+
+It was an artefact of the measurement. **Averaging the absolute value of a
+difference turns zero-mean noise into a positive number.** The signed average is
+0.27 and 0.51 levels on the two images and points in opposite directions.
+
+The decisive test is the sign, because a real artefact has a consistent one:
+16 of 40 flat patches one way on the first image, 26 of 40 on the second, p =
+0.27 and 0.08. A coin flip. The demosaic is clean.
+
+That is the third time in this log that a measurement has had to be checked
+against the possibility that it was measuring itself.
+
+### White balance renders warm, and now by a known amount
+
+The label is genuinely neutral white, and the merged DNG proves it. Taking the
+raw CFA over it, black-subtracted and normalised, and applying the camera's own
+`AsShotNeutral` of `[0.4873, 1.0, 0.6934]` — R x2.052, B x1.442:
+
+    raw over the label                      R/G 0.503   B/G 0.669
+    x AsShotNeutral, linear                 R/G 1.033   B/G 0.964
+    the same, sRGB encoded                  R/G 1.015   B/G 0.984   <- neutral
+    what the app rendered, sRGB             R/G 1.090   B/G 0.932
+
+**The comparison has to be made in one space.** A first attempt put the linear
+figure beside the app's sRGB figure and read a difference off the two, which
+means nothing, because gamma changes ratios. Encoded properly, a correctly
+balanced render of this label sits at 1.015 / 0.984 and the app puts it at
+1.090 / 0.932 — **warm by about 7% in R/G and 5% in B/G, in the space the eye
+judges.**
+
+That is not the sensor, the merge or the demosaic. It is `ColorProfile.calibrated`,
+which logs `blend 0.73 toward daylight` on every capture: under warm indoor
+light, blending toward daylight deliberately leaves the warmth in.
+
+**So it is a tuning decision rather than a defect**, and both positions are
+defensible — a photograph taken under tungsten arguably should look warm, and
+full neutralisation looks clinical. But an app whose argument is colour from the
+sensor's own characterisation, rendering a known-neutral label visibly warm, is
+worth a second look. It is now measurable either way, which it was not before.
+
+One sample. Worth a grey card under two lightings before changing anything.
+
+### The raw path is not just faster than the fallback, it is better
+
+    raw ZSL path    4080x3072   noise sd 1.64   detail 34.4   clipped 0.00%
+    YUV merge path  1600x1200   noise sd 0.20   detail 10.0   clipped 4.47%
+
+1.9 megapixels against 12.5, a third of the detail, and one of the two YUV
+captures blew four and a half per cent of its highlights. That path is what runs
+when zero-shutter-lag is off, which was the default until it was changed on
+28 August. **That change was a picture-quality decision as much as a speed one**,
+and the entry above it claims only the speed.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
