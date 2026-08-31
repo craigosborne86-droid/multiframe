@@ -171,6 +171,11 @@ class NativeMerge private constructor(
         minChroma: Float, innerRadius: Float,
     ): Int
     private external fun nReleaseScratch()
+    private external fun nShadingBench(
+        width: Int, height: Int, cfa: IntArray, gains: FloatArray,
+        shading: FloatArray, columns: Int, rows: Int,
+        rounds: Int, selfCheck: Boolean,
+    ): LongArray?
     private external fun nSharpen(
         bitmap: Bitmap, amount: Float, threshold: Float, maxShift: Float,
     ): Boolean
@@ -213,6 +218,35 @@ class NativeMerge private constructor(
             if (!isAvailable()) return false
             return NativeMerge(0L, 0, 0, SensorProfile.DEFAULT)
                 .nSharpen(bitmap, params.amount, params.threshold, params.maxShift)
+        }
+
+        /**
+         * Times the shading pass against the form it replaced, in one process.
+         *
+         * Reachable only through a full develop otherwise, which spends four
+         * times as long on the demosaic and buries the figure -- and, worse,
+         * would need a second install to compare against, which is the one
+         * thing this project has established it cannot measure through. Both
+         * implementations live in the binary, so a round times them back to
+         * back on the same cores.
+         *
+         * Returns `[a, b]` per round in microseconds, then the count of values
+         * the two disagreed on and the largest disagreement in nano-units.
+         */
+        internal fun shadingBench(
+            width: Int,
+            height: Int,
+            profile: SensorProfile,
+            gains: FloatArray,
+            map: ShadingMap,
+            rounds: Int,
+            selfCheck: Boolean,
+        ): LongArray? {
+            if (!isAvailable()) return null
+            return NativeMerge(0L, 0, 0, profile).nShadingBench(
+                width, height, profile.cfaPattern, gains,
+                map.gains, map.columns, map.rows, rounds, selfCheck,
+            )
         }
 
         /** Whether the native library loaded. Falls back to Kotlin if not. */

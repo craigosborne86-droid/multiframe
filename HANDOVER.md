@@ -10,7 +10,7 @@ holds the reasoning behind everything below.
 no release paperwork — deferred by the owner's decision, and nothing in the
 current work depends on any of it.
 
-Everything builds. **359 unit tests pass**, and **114 device tests** pass on the
+Everything builds. **359 unit tests pass**, and **116 device tests** pass on the
 phone. The build on the phone is current HEAD, md5 verified.
 
 The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
@@ -19,6 +19,13 @@ line says what the merge bought: `8 frames · 91% kept`.
 
 Recent work, newest first:
 
+- **there is now a harness whose A/A passes.** Both implementations of a pass
+  live in one binary and are timed back to back in one process, forty rounds,
+  order alternated. Pairing the runs sees through a phone that wanders by a
+  factor of three; pooled ranges do not — see `ShadingSpeedDeviceTest`
+- **the shading pass is about 1.53x faster**, measured that way — 39 of 40
+  rounds in one run and 38 of 40 in a second. The row's grid position, the
+  column's, and the corner gains are all lifted out of the pixel loop
 - **it now opens in a state worth showing.** ZSL defaults on, the PRO panel has
   a reset, the control row is six settings rather than nine because a phone
   shows six, and the timer and guides are remembered. The self-timer can be
@@ -56,6 +63,20 @@ Six rules, all of them earned rather than assumed, and worth keeping:
   produced a clean-looking 79 ms result that evaporated when the change was
   built and measured directly. Trust *separation* — forty samples of each with
   no overlap — and never a difference of medians.
+- **Across installs, trust separation. Within one process, pair the runs.** Two
+  rules for two instruments, and the second is much the stronger.
+  `ShadingSpeedDeviceTest` holds both implementations in the binary: its pooled
+  ranges overlap almost entirely, because the phone wanders by a factor of three
+  over the eight seconds it takes, and the paired comparison still calls the
+  same data 39 rounds out of 40. The A/A then checks the *pairing* rather than
+  the ranges — 19 of 40 is a fair instrument, two rounds in three would be a
+  thumb on the scale.
+- **`-ffast-math` means the same expression written twice is not the same
+  arithmetic.** A rearrangement of the shading loop that preserved every
+  operation, order and association still differed from the original over a fifth
+  of the plane, by one unit in the last place, because the compiler fused and
+  reassociated the two loops differently. Assert a stated bound rather than
+  equality, and say what the bound rules out.
 - **A null result needs a harness that could have seen the effect**, and a
   parity test needs a fixture that could have shown the difference. The develop
   parity test now renders each width a second time with sharpening off and
@@ -89,41 +110,48 @@ of what was left.
   good. Twenty frames in mixed light, looked at properly, would tell more than
   any test here.
 
-**On the pipeline**, the render is what is left. Measured on a rested phone:
+**On the pipeline**, `demosaic+tone` is now most of the develop and the
+instrument to attack it with exists. A capture on a warm phone this session:
 
-    black 14ms, hotpixels 27ms, shading 38ms, demosaic+tone 146ms
+    black 18-35ms, hotpixels 20-50ms, shading 22-34ms, demosaic+tone 168-250ms
 
 The tone half of that last figure is about as expensive as the demosaic half —
 established, forty samples each, balanced ordering, no overlap. *Which part* of
 the tone stage is not established, and the obvious suspect is innocent:
 replacing `shoulderCurve`'s `std::exp` with an inline series changed nothing.
 
-**Before optimising it, the harness needs an A/A that passes.** It currently
-separates a binary from itself by two and a half times. Everything finer than
-"the tone half costs about as much as the demosaic half" is unmeasurable with
-it, and building a sharper instrument is the actual task — probably by timing
-inside one process across alternations, the way `JpegEncodeSpeedDeviceTest`
-keeps both encoders in one binary, since the reinstall is where the variance
-comes from.
+**The blocker on that has been cleared.** `nShadingBench` is the pattern: hold
+both implementations in one binary, alternate the order, pair the two runs
+within a round, and require the A/A to come back near 20 of 40 before believing
+anything the A/B says. It works because the phone's wander is shared by two runs
+a few milliseconds apart — which is exactly what a reinstall between runs
+destroys. The same shape applied to the tone stage would make the colour matrix,
+the rendering curve's maxima and branches, and the display lookup separable at
+last.
 
-`shading` at 38 ms remains the cheapest real win and needs no new instrument:
-`shadingGain` runs per pixel and does two float divides, four clamps and four
-gathers into a map whose cells are 240 pixels wide. The x-dependent parts depend
-only on x; within a cell the corner values are loop-invariant. Both are exact
-rearrangements, so parity survives.
+Two things to know before writing that harness. The rearrangement it measures
+will **not** be bit-exact under `-ffast-math`, so assert a bound; and it needs
+its own reference implementation kept in the binary, which is what
+`applyShadingReference` is for. Both cost about ten lines and both were learned
+the expensive way.
 
-Do not start by assuming the demosaic is the cost. Three assumptions about where
-develop time goes have been wrong here: the JPEG encode, the sharpening, and the
-exponential.
+Do not start by assuming the demosaic is the cost. Four assumptions about where
+develop time goes have been wrong here: the JPEG encode, the sharpening, the
+exponential, and that a rearrangement would come back identical.
 
 ## How to measure
 
-Three instruments, in decreasing order of authority:
+In decreasing order of authority:
 
 - **The real capture path is the only authority on what a photograph costs.**
   Run `ZslStreamDeviceTest#repeatedCapturesTakeAConsistentTime` and read
   `develop breakdown`, `develop stages`, `develop:` and `sharpen:` out of
   logcat. That is real camera frames.
+- **`ShadingSpeedDeviceTest` is the only instrument here that can compare two
+  implementations**, because it is the only one that does not need a second
+  install. Both live in the binary, forty rounds, order alternated within the
+  round, and the comparison is paired rather than pooled. Its A/A test is not a
+  formality and runs first. Copy this rather than the two below.
 - **`SharpenSpeedDeviceTest` and `DevelopSpeedDeviceTest` isolate a stage**, and
   are comparison instruments only. The develop one **reads about twice what a
   capture pays and nobody knows why** — clock ramp, exposure and foreground

@@ -714,6 +714,157 @@ inline float shadingGain(const float* gains, int columns, int rows,
 }
 
 /**
+ * White balance gain per CFA site.
+ *
+ * The two greens are separate sites and the profile carries a gain for each, so
+ * which one a site takes depends on whether its row is even -- and sites 0 and 1
+ * are the even rows by construction, which is why no y is needed here.
+ */
+inline void balanceBySite(const int* cfa, const float* gains, float* wb) {
+    for (int site = 0; site < 4; ++site) {
+        const int c = cfa[site];
+        wb[site] = (c == 0) ? gains[0] : (c == 2) ? gains[3]
+                                                  : (site < 2 ? gains[1] : gains[2]);
+    }
+}
+
+/**
+ * The x half of the bilinear weights, and the runs of pixels sharing a cell.
+ *
+ * Both depend only on x, and every one of the 3072 rows recomputes them
+ * identically. At 4080 pixels across a 17-column grid there are sixteen runs of
+ * about 240 pixels, so a run's four corner gains can be read once for the run
+ * rather than once for each of its pixels.
+ */
+struct ShadingPlan {
+    struct Run {
+        int from, to;  // half-open range of x
+        int x0, x1;    // the grid columns this run interpolates between
+    };
+    std::vector<float> tx;
+    std::vector<Run> runs;
+};
+
+ShadingPlan buildShadingPlan(int columns, int width) {
+    ShadingPlan plan;
+    plan.tx.resize(static_cast<size_t>(width));
+    for (int x = 0; x < width; ++x) {
+        const float fx = (static_cast<float>(x) / (width - 1)) * (columns - 1);
+        const int x0 = std::clamp(static_cast<int>(fx), 0, columns - 1);
+        const int x1 = std::min(x0 + 1, columns - 1);
+        plan.tx[static_cast<size_t>(x)] = std::clamp(fx - x0, 0.0f, 1.0f);
+        // x0 is non-decreasing in x, so a changed value always opens a new run.
+        if (plan.runs.empty() || plan.runs.back().x0 != x0) {
+            plan.runs.push_back({x, x + 1, x0, x1});
+        } else {
+            plan.runs.back().to = x + 1;
+        }
+    }
+    return plan;
+}
+
+/**
+ * Shading and white balance, one pixel at a time.
+ *
+ * This is the form DevelopParityTest pinned to ShadingMap.kt. It is kept
+ * because the fast path below is only permitted to be a rearrangement of it,
+ * and something has to say what it is a rearrangement *of*.
+ * ShadingSpeedDeviceTest runs the two against each other at 4080x3072 with a
+ * 17x13 map, where a run is 240 pixels -- the case the fast path exists for,
+ * and one the 64x48 parity fixture cannot reach, its cells being four pixels
+ * wide.
+ */
+void applyShadingReference(float* plane, int width, int height,
+                           const float* shadingPtr, int columns, int rows,
+                           const float* wb) {
+    parallelBands(height, [&](int yStart, int yEnd) {
+        for (int y = yStart; y < yEnd; ++y) {
+            const int rowParity = (y & 1) * 2;
+            const size_t rowBase = static_cast<size_t>(y) * width;
+            for (int x = 0; x < width; ++x) {
+                const int site = rowParity + (x & 1);
+                plane[rowBase + x] *= shadingGain(shadingPtr, columns, rows,
+                                                  x, y, width, height, site) * wb[site];
+            }
+        }
+    });
+}
+
+/**
+ * The same correction with everything that does not vary per pixel lifted out.
+ *
+ * Three things were being recomputed twelve and a half million times: the row's
+ * position in the grid, which is constant along a row; the column's, which is
+ * the same for every row; and the four corner gains, which hold for the whole
+ * run. What is left inside the loop is one table read and the interpolation
+ * itself, written in the same order and the same associations as the reference
+ * above.
+ *
+ * That is deliberately not the same as saying the answers are identical. The
+ * build compiles with -ffast-math, and the compiler reassociates and fuses the
+ * two loops differently because their surroundings differ: about a fifth of the
+ * plane comes back one unit in the last place away, some 1e-7 on values running
+ * to 3.5. ShadingSpeedDeviceTest bounds that rather than asserting equality,
+ * and says what the bound is there to rule out.
+ *
+ * The two sites of a row are carried side by side in `a0`..`b1` rather than
+ * split into two loops, because splitting them would halve the sequential
+ * access to the plane, which is the one thing this pass does well.
+ */
+void applyShadingHoisted(float* plane, int width, int height,
+                         const float* shadingPtr, int columns, int rows,
+                         const float* wb) {
+    if (shadingPtr == nullptr || columns <= 0 || rows <= 0 || width <= 1 || height <= 1) {
+        // shadingGain answers 1 to every one of these, so only balance is left.
+        parallelBands(height, [&](int yStart, int yEnd) {
+            for (int y = yStart; y < yEnd; ++y) {
+                const int rowParity = (y & 1) * 2;
+                const size_t rowBase = static_cast<size_t>(y) * width;
+                for (int x = 0; x < width; ++x) {
+                    plane[rowBase + x] *= wb[rowParity + (x & 1)];
+                }
+            }
+        });
+        return;
+    }
+
+    const ShadingPlan plan = buildShadingPlan(columns, width);
+
+    parallelBands(height, [&](int yStart, int yEnd) {
+        for (int y = yStart; y < yEnd; ++y) {
+            const float fy = (static_cast<float>(y) / (height - 1)) * (rows - 1);
+            const int y0 = std::clamp(static_cast<int>(fy), 0, rows - 1);
+            const int y1 = std::min(y0 + 1, rows - 1);
+            const float ty = std::clamp(fy - y0, 0.0f, 1.0f);
+            const int rowParity = (y & 1) * 2;
+            const size_t rowBase = static_cast<size_t>(y) * width;
+
+            const float* upper = shadingPtr + static_cast<size_t>(y0) * columns * 4;
+            const float* lower = shadingPtr + static_cast<size_t>(y1) * columns * 4;
+
+            for (const ShadingPlan::Run& run : plan.runs) {
+                float a0[2], a1[2], b0[2], b1[2];
+                for (int p = 0; p < 2; ++p) {
+                    const int channel = rowParity + p;
+                    a0[p] = upper[static_cast<size_t>(run.x0) * 4 + channel];
+                    a1[p] = upper[static_cast<size_t>(run.x1) * 4 + channel];
+                    b0[p] = lower[static_cast<size_t>(run.x0) * 4 + channel];
+                    b1[p] = lower[static_cast<size_t>(run.x1) * 4 + channel];
+                }
+                for (int x = run.from; x < run.to; ++x) {
+                    const int p = x & 1;
+                    const float tx = plan.tx[static_cast<size_t>(x)];
+                    const float top = a0[p] * (1.0f - tx) + a1[p] * tx;
+                    const float bottom = b0[p] * (1.0f - tx) + b1[p] * tx;
+                    plane[rowBase + x] *=
+                        (top * (1.0f - ty) + bottom * ty) * wb[rowParity + p];
+                }
+            }
+        }
+    });
+}
+
+/**
  * Replaces defective sensor sites in a normalised CFA plane.
  *
  * Mirrors HotPixels.kt, where the tests are. Compares against the four sites two
@@ -956,20 +1107,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
 
     // Then shading and white balance, on the corrected values.
     tShading = nowMicros();
-    parallelBands(height, [&](int y0, int y1) {
-        for (int y = y0; y < y1; ++y) {
-            const int rowParity = (y & 1) * 2;
-            const size_t rowBase = static_cast<size_t>(y) * width;
-            for (int x = 0; x < width; ++x) {
-                const int site = rowParity + (x & 1);
-                const int c = cfa[site];
-                const float g = (c == 0) ? gains[0] : (c == 2) ? gains[3]
-                                                               : ((y & 1) == 0 ? gains[1] : gains[2]);
-                plane[rowBase + x] *= shadingGain(shadingPtr, shadingColumns, shadingRows,
-                                                  x, y, width, height, site) * g;
-            }
-        }
-    });
+    float wb[4];
+    balanceBySite(cfa, gains, wb);
+    applyShadingHoisted(plane.data(), width, height, shadingPtr,
+                        shadingColumns, shadingRows, wb);
 
     // Built once for this capture's tone parameters, then read by every band.
     // On the stack rather than in a global: two develops on different threads
@@ -1077,6 +1218,116 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
 
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
+}
+
+/**
+ * Times the shading pass against the per-pixel form it replaced, in one binary.
+ *
+ * Every A/B in this project until now compared two installs, and the develop
+ * harness measured against itself that way separates a binary from itself by
+ * two and a half times -- the reinstall is where the variance lives. Both
+ * implementations are present here, so a round times one straight after the
+ * other on the same cores at the same temperature and nothing has to be
+ * installed twice.
+ *
+ * `selfCheck` runs the fast path in both slots. That is the A/A this project
+ * decided it would demand before believing any A/B, and it is cheap enough that
+ * the test always runs it first.
+ *
+ * The result is `[a0, b0, a1, b1, ...]` in microseconds, then the number of
+ * values on which the two runs disagreed, then the largest such disagreement in
+ * nano-units. The order of the two within a round alternates, so a drift over
+ * the measurement cannot land on one of them.
+ */
+JNIEXPORT jlongArray JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nShadingBench(
+        JNIEnv* env, jobject, jint width, jint height,
+        jintArray jcfa, jfloatArray jgains,
+        jfloatArray jshading, jint columns, jint rows,
+        jint roundCount, jboolean selfCheck) {
+    if (width <= 1 || height <= 1 || roundCount <= 0) return nullptr;
+
+    int cfa[4];
+    float gains[4], wb[4];
+    env->GetIntArrayRegion(jcfa, 0, 4, cfa);
+    env->GetFloatArrayRegion(jgains, 0, 4, gains);
+    balanceBySite(cfa, gains, wb);
+
+    std::vector<float> map;
+    const float* shadingPtr = nullptr;
+    if (jshading != nullptr && columns > 0 && rows > 0) {
+        const jsize count = env->GetArrayLength(jshading);
+        if (count == columns * rows * 4) {
+            map.resize(static_cast<size_t>(count));
+            env->GetFloatArrayRegion(jshading, 0, count, map.data());
+            shadingPtr = map.data();
+        }
+    }
+    if (shadingPtr == nullptr) return nullptr;
+
+    const size_t n = static_cast<size_t>(width) * height;
+    std::vector<float> a(n), b(n);
+
+    // Not a flat plane: a constant would multiply to a constant and let a
+    // wrong gain pass unnoticed. Knuth's multiplicative hash gives every
+    // pixel its own value for the price of one multiply.
+    auto fill = [&](std::vector<float>& v) {
+        for (size_t i = 0; i < n; ++i) {
+            v[i] = 0.05f + 0.9f *
+                static_cast<float>((i * 2654435761u) & 0xffffu) / 65535.0f;
+        }
+    };
+
+    // Untimed, and not a formality: the first pass over 100 MB of freshly
+    // allocated vector faults every page in, and the big cores are still at
+    // their idle clock. Both costs landed on whichever variant went first.
+    fill(a);
+    fill(b);
+    for (int w = 0; w < 2; ++w) {
+        applyShadingReference(a.data(), width, height, shadingPtr, columns, rows, wb);
+        applyShadingHoisted(b.data(), width, height, shadingPtr, columns, rows, wb);
+    }
+
+    std::vector<jlong> out(static_cast<size_t>(roundCount) * 2 + 2, 0);
+    long differing = 0;
+    double worst = 0.0;
+
+    for (int r = 0; r < roundCount; ++r) {
+        fill(a);
+        fill(b);
+        int64_t tA = 0, tB = 0;
+        auto slotA = [&]() {
+            const int64_t t = nowMicros();
+            if (selfCheck) {
+                applyShadingHoisted(a.data(), width, height, shadingPtr, columns, rows, wb);
+            } else {
+                applyShadingReference(a.data(), width, height, shadingPtr, columns, rows, wb);
+            }
+            tA = nowMicros() - t;
+        };
+        auto slotB = [&]() {
+            const int64_t t = nowMicros();
+            applyShadingHoisted(b.data(), width, height, shadingPtr, columns, rows, wb);
+            tB = nowMicros() - t;
+        };
+        if ((r & 1) == 0) { slotA(); slotB(); } else { slotB(); slotA(); }
+
+        out[static_cast<size_t>(r) * 2] = tA;
+        out[static_cast<size_t>(r) * 2 + 1] = tB;
+        for (size_t i = 0; i < n; ++i) {
+            if (a[i] != b[i]) {
+                ++differing;
+                worst = std::max(worst, std::fabs(static_cast<double>(a[i]) - b[i]));
+            }
+        }
+    }
+    out[static_cast<size_t>(roundCount) * 2] = differing;
+    out[static_cast<size_t>(roundCount) * 2 + 1] = static_cast<jlong>(worst * 1e9);
+
+    jlongArray result = env->NewLongArray(static_cast<jsize>(out.size()));
+    if (result == nullptr) return nullptr;
+    env->SetLongArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
+    return result;
 }
 
 }  // extern "C"

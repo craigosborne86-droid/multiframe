@@ -2256,6 +2256,98 @@ when zero-shutter-lag is off, which was the default until it was changed on
 28 August. **That change was a picture-quality decision as much as a speed one**,
 and the entry above it claims only the speed.
 
+## An instrument that can be believed, and the first thing measured with it
+
+The last session left two jobs on the pipeline: make the shading pass cheaper,
+and build a harness that can tell one build from another. They turned out to be
+one job, because there was no way to demonstrate the first without the second.
+
+### Why the old harness could not have shown this
+
+Every A/B in this log until now compared two installs, and the develop harness
+pointed at its own binary separates it from itself by two and a half times. The
+reinstall is where the variance lives. Shading is 38 ms of a 230 ms develop, so
+the win available was smaller than the noise by an order of magnitude.
+
+So both implementations of the pass were built into the binary and timed back to
+back inside one process, the way `JpegEncodeSpeedDeviceTest` holds both encoders.
+`nShadingBench` runs forty rounds, alternating which of the two goes first,
+returning the two times per round and a comparison of the two output planes.
+
+**Pooled ranges are the wrong test here, and the A/A is what proved it.** Running
+the fast path against itself:
+
+    left   median 39ms   range 27-72ms      run two:  31ms   22-57ms
+    right  median 38ms   range 28-61ms                35ms   20-66ms
+    won 19 of 40 rounds                               15 of 40
+
+Those ranges overlap almost completely, and they would overlap however large the
+real difference was — the phone wanders by a factor of nearly three over the
+eight seconds the test takes. But **the wander is shared by two runs a few
+milliseconds apart**, so the within-round comparison sees straight through it.
+19 and 15 of 40 is what a fair instrument looks like, and it is the claim the
+A/A had to fail to make, because it is the claim the A/B would go on to make.
+
+That is the replacement for the rule this log has been using. Separation of
+pooled ranges is the right test across installs, where nothing pairs. Within one
+process, pair the runs and check the pairing itself for bias.
+
+### The shading pass, 1.53x
+
+`shadingGain` was recomputing three things twelve and a half million times: the
+row's position in the grid, which is constant along a row; the column's, which
+is identical for every row; and the four corner gains, which hold for the whole
+240-pixel run a cell covers. Lifting all three out leaves one table read and the
+interpolation.
+
+    per-pixel  median 60ms   range 41-92ms     run two:  59ms   39-79ms
+    hoisted    median 39ms   range 26-69ms               39ms   24-68ms
+    won 39 of 40 rounds, ratio median 1.53x             38 of 40, 1.54x
+
+Both runs are above, because one is not evidence here. The two rounds the fast
+path lost were a tie at 0.99x and a 0.85x, and the worst disagreement between
+the two output planes came back at 4.76e-07 in both runs.
+
+On the real capture path shading now reads 22-34 ms. The log's earlier 38 ms
+came from a different run and cannot be subtracted from it — `black` and
+`hotpixels` both read differently in this run too, and neither was touched.
+
+### It was written to be bit-exact and it is not
+
+Every operation survives the rearrangement in the same order and the same
+association, which under IEEE arithmetic makes the two answers identical. The
+first version of the test asserted exactly that, and failed: a fifth of the
+plane came back different.
+
+**The build compiles with `-ffast-math`.** That licenses the compiler to
+reassociate and to fuse a multiply and an add into one instruction, and it takes
+that licence differently in the two loops because their surroundings differ.
+Writing the same expression twice does not produce the same instructions. The
+worst disagreement across 500 million values is 4.8e-07 — one unit in the last
+place, on numbers running to 3.5, before a gamma encode and an 8-bit quantise.
+
+So the test states a bound instead of assuming exactness, and says what the
+bound is for: a wrong corner, a run reading its neighbour's gains, an off-by-one
+in the grid would all show as whole numbers, not last places.
+
+**This is the fourth time in this log that a measurement had to be checked
+against the possibility that it was measuring itself** — and the first time the
+answer was the compiler rather than the phone.
+
+### What the parity test could not have caught
+
+`DevelopParityTest` renders 64x48, where a cell of a five-column map is four
+pixels wide. The run-hoisting it is checking never gets a run longer than four.
+The bench compares the two implementations at 4080x3072 against a 17x13 map,
+where a run is 240 pixels, which is the case the code was written for. The
+per-pixel form is kept in the binary for exactly this: it is what the fast path
+is a rearrangement *of*, and something has to say so.
+
+359 unit tests pass. 116 device tests pass on the phone, with
+`repeatedCapturesTakeAConsistentTime` failing once at 40.7 C after five minutes
+of load and passing on its own — the thermal flakiness this log has now
+recorded three times.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
