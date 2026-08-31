@@ -176,6 +176,12 @@ class NativeMerge private constructor(
         shading: FloatArray, columns: Int, rows: Int,
         rounds: Int, selfCheck: Boolean,
     ): LongArray?
+    private external fun nToneBench(
+        width: Int, height: Int, cfa: IntArray, matrix: FloatArray,
+        exposureGain: Float, knee: Float, contrast: Float,
+        desatStrength: Float, desatStart: Float, blackPoint: Float,
+        variantA: Int, variantB: Int, rounds: Int,
+    ): LongArray?
     private external fun nSharpen(
         bitmap: Bitmap, amount: Float, threshold: Float, maxShift: Float,
     ): Boolean
@@ -246,6 +252,39 @@ class NativeMerge private constructor(
             return NativeMerge(0L, 0, 0, profile).nShadingBench(
                 width, height, profile.cfaPattern, gains,
                 map.gains, map.columns, map.rows, rounds, selfCheck,
+            )
+        }
+
+        /**
+         * What `demosaic+tone` is made of, by leaving one piece out.
+         *
+         * The pass is the largest item in a capture and reports as one figure.
+         * It cannot be timed in halves: they are fused so that the demosaic's
+         * output never leaves the registers, and an intermediate buffer would
+         * add 50 MB of traffic and be what got measured. So a variant is the
+         * whole pass with one item removed, timed against the whole pass, in
+         * one process and paired within a round. See [ToneAblation].
+         *
+         * Returns `[a, b]` per round in microseconds, then the bytes on which
+         * the two outputs disagreed -- meaningful only for an A/A -- then how
+         * many pixels of the harness's scene landed above the knee.
+         */
+        internal fun toneBench(
+            width: Int,
+            height: Int,
+            profile: SensorProfile,
+            color: ColorProfile,
+            params: DevelopParams,
+            variantA: Int,
+            variantB: Int,
+            rounds: Int,
+        ): LongArray? {
+            if (!isAvailable()) return null
+            return NativeMerge(0L, 0, 0, profile).nToneBench(
+                width, height, profile.cfaPattern, color.matrix,
+                params.exposureGain, params.shoulderKnee, params.contrast,
+                params.highlightDesaturation, params.desaturationStart,
+                params.blackPoint, variantA, variantB, rounds,
             )
         }
 

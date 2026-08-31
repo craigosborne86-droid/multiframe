@@ -637,12 +637,33 @@ inline uint8_t toByte(float v) {
     return static_cast<uint8_t>(std::clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
 }
 
-inline float shoulderCurve(float x, float knee) {
+/**
+ * The highlight roll-off.
+ *
+ * `RealExp` is false only for the ablation harness. It swaps the exponential
+ * for a reciprocal -- a saturating curve of the same shape, and not free, since
+ * it is still a divide -- keeping the branch and everything around it. So what
+ * that variant saves is not the cost of the call but the cost of the call *less
+ * the cost of replacing it*, which is the number worth having: it is what a
+ * fast approximation could hope to recover. The false instantiation renders a
+ * wrong picture on purpose and is never reachable from a capture.
+ */
+template <bool RealExp>
+inline float shoulderCurveParts(float x, float knee) {
     if (x <= 0.0f) return 0.0f;
     if (x <= knee) return x;
     float headroom = 1.0f - knee;
     if (headroom <= 0.0f) return knee;
-    return knee + headroom * (1.0f - std::exp(-(x - knee) / headroom));
+    const float z = (x - knee) / headroom;
+    if constexpr (RealExp) {
+        return knee + headroom * (1.0f - std::exp(-z));
+    } else {
+        return knee + headroom * (1.0f - 1.0f / (1.0f + z));
+    }
+}
+
+inline float shoulderCurve(float x, float knee) {
+    return shoulderCurveParts<true>(x, knee);
 }
 
 /**
@@ -658,8 +679,15 @@ struct ToneParams {
     float blackPoint = 0.012f;
 };
 
-/** Hue-preserving roll-off, then highlight desaturation, in linear light. */
-inline void renderLinear(float& r, float& g, float& b, const ToneParams& t) {
+/**
+ * Hue-preserving roll-off, then highlight desaturation, in linear light.
+ *
+ * A template only so that the ablation harness can leave one of the two halves
+ * out; `renderLinear` below is the instantiation that ships, and it is the one
+ * ToneCurveTest and the develop parity test hold to ToneCurve.kt.
+ */
+template <bool Shoulder, bool Desat, bool RealExp = true>
+inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t) {
     r = std::max(r, 0.0f);
     g = std::max(g, 0.0f);
     b = std::max(b, 0.0f);
@@ -668,19 +696,28 @@ inline void renderLinear(float& r, float& g, float& b, const ToneParams& t) {
     // sit at 1 and nothing can tell them apart.
     const float scenePeak = std::max(r, std::max(g, b));
 
-    if (scenePeak > t.knee) {
-        const float scale = shoulderCurve(scenePeak, t.knee) / scenePeak;
-        r *= scale; g *= scale; b *= scale;
+    if constexpr (Shoulder) {
+        if (scenePeak > t.knee) {
+            const float scale =
+                shoulderCurveParts<RealExp>(scenePeak, t.knee) / scenePeak;
+            r *= scale; g *= scale; b *= scale;
+        }
     }
 
-    if (t.desatStrength > 0.0f && scenePeak > t.desatStart) {
-        const float k = 1.0f - t.desatStart / scenePeak;
-        const float mix = std::clamp(k * k * t.desatStrength, 0.0f, 1.0f);
-        const float level = std::max(r, std::max(g, b));
-        r += (level - r) * mix;
-        g += (level - g) * mix;
-        b += (level - b) * mix;
+    if constexpr (Desat) {
+        if (t.desatStrength > 0.0f && scenePeak > t.desatStart) {
+            const float k = 1.0f - t.desatStart / scenePeak;
+            const float mix = std::clamp(k * k * t.desatStrength, 0.0f, 1.0f);
+            const float level = std::max(r, std::max(g, b));
+            r += (level - r) * mix;
+            g += (level - g) * mix;
+            b += (level - b) * mix;
+        }
     }
+}
+
+inline void renderLinear(float& r, float& g, float& b, const ToneParams& t) {
+    renderLinearParts<true, true>(r, g, b, t);
 }
 
 /**
@@ -958,6 +995,243 @@ void buildDisplayLut(DisplayLut& lut, const ToneParams& t) {
     }
 }
 
+/**
+ * Which part of the develop's last pass to leave out, for the ablation harness.
+ *
+ * The pass reports as one figure -- `demosaic+tone`, and the largest item in a
+ * capture -- and this log's recurring lesson is that one figure is usually two.
+ * Splitting it by running it in halves would not work: the halves are fused
+ * precisely so that the demosaic's output never leaves the registers, and
+ * writing it to an intermediate buffer would add 50 MB of traffic and measure
+ * that instead. So each variant is the whole pass with one item removed, timed
+ * against the whole pass, and the difference is what the item costs.
+ *
+ * Every variant still writes all four bytes of every pixel from values the
+ * demosaic produced, so nothing can be deleted as dead.
+ */
+enum ToneAblation {
+    kToneFull = 0,       // as shipped
+    kToneNoMatrix = 1,   // the 3x3 colour matrix, nine multiplies and six adds
+    kToneNoRender = 2,   // renderLinear: three maxima and two branches
+    kToneNoDisplay = 3,  // the display table, replaced by a bare quantise
+    kToneNone = 4,       // the demosaic on its own
+    kToneNoShoulder = 5, // renderLinear without the highlight roll-off
+    kToneNoDesat = 6,    // renderLinear without the highlight desaturation
+    kToneNoExp = 7,      // the roll-off with its exponential taken out
+    kToneCensus = 8,     // as shipped, and counts which way the branches went
+};
+
+/**
+ * Demosaic, colour, tone and quantise, in one pass over the plane.
+ *
+ * A template rather than a copy: `nDevelop` runs the `kToneFull` instantiation
+ * and the harness runs the others, so a measurement here is a measurement of
+ * the code that ships. The alternative -- a second copy of the demosaic kept
+ * beside the real one for benchmarking -- would drift within a session.
+ */
+template <int Ablation>
+void demosaicAndTone(const float* plane, int width, int height,
+                     uint8_t* dstBase, int stride,
+                     const int* cfa, const float* m,
+                     const ToneParams& tone, const DisplayLut& display,
+                     std::atomic<long>* aboveKnee = nullptr) {
+    parallelBands(height, [&](int y0, int y1) {
+        float acc[3];
+        int cnt[3];
+        [[maybe_unused]] long overKnee = 0;
+        for (int y = y0; y < y1; ++y) {
+            uint8_t* row = dstBase + static_cast<size_t>(y) * stride;
+            const bool interiorRow = (y >= 2 && y < height - 2);
+            for (int x = 0; x < width; ++x) {
+                float r0, g0, b0;
+
+                if (!interiorRow || x < 2 || x >= width - 2) {
+                    // Border: no 5x5 support, so the simple gather, with the
+                    // bounds checks that only these pixels need.
+                    acc[0] = acc[1] = acc[2] = 0.0f;
+                    cnt[0] = cnt[1] = cnt[2] = 0;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        const int sy = y + dy;
+                        if (sy < 0 || sy >= height) continue;
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            const int sx = x + dx;
+                            if (sx < 0 || sx >= width) continue;
+                            const int c = cfa[(sy & 1) * 2 + (sx & 1)];
+                            acc[c] += plane[static_cast<size_t>(sy) * width + sx];
+                            cnt[c]++;
+                        }
+                    }
+                    r0 = cnt[0] ? acc[0] / cnt[0] : 0.0f;
+                    g0 = cnt[1] ? acc[1] / cnt[1] : 0.0f;
+                    b0 = cnt[2] ? acc[2] / cnt[2] : 0.0f;
+                } else {
+                    // Gradient-corrected linear interpolation (Malvar, He and
+                    // Cutler). The measured sample at this site is kept
+                    // exactly; only the two missing colours are interpolated,
+                    // with a second-derivative term carrying the luminance
+                    // gradient across channels so the planes agree about edge
+                    // position. Mirrors Demosaic.kt, where the tests are.
+                    const float* p = plane + static_cast<size_t>(y) * width + x;
+                    const int w1 = width;
+                    const int w2 = width * 2;
+
+                    const float c0 = p[0];
+                    const float nA = p[-w1], sA = p[w1];
+                    const float eA = p[1], wA = p[-1];
+                    const float nn = p[-w2], ss = p[w2];
+                    const float ee = p[2], ww = p[-2];
+                    const float diag = p[-w1 - 1] + p[-w1 + 1] + p[w1 - 1] + p[w1 + 1];
+                    const float axis = nA + sA + eA + wA;
+                    const float axis2 = nn + ss + ee + ww;
+
+                    const int here = cfa[(y & 1) * 2 + (x & 1)];
+                    if (here == 1) {
+                        const bool redHorizontal = cfa[(y & 1) * 2 + ((x + 1) & 1)] == 0;
+                        const float alongH = 5.0f * c0 + 4.0f * (wA + eA) - (ww + ee) -
+                                             diag + 0.5f * (nn + ss);
+                        const float alongV = 5.0f * c0 + 4.0f * (nA + sA) - (nn + ss) -
+                                             diag + 0.5f * (ww + ee);
+                        r0 = (redHorizontal ? alongH : alongV) * 0.125f;
+                        g0 = c0;
+                        b0 = (redHorizontal ? alongV : alongH) * 0.125f;
+                    } else if (here == 0) {
+                        r0 = c0;
+                        g0 = (4.0f * c0 + 2.0f * axis - axis2) * 0.125f;
+                        b0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) * 0.125f;
+                    } else {
+                        r0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) * 0.125f;
+                        g0 = (4.0f * c0 + 2.0f * axis - axis2) * 0.125f;
+                        b0 = c0;
+                    }
+                    // The correction extrapolates and can overshoot past black.
+                    r0 = std::max(r0, 0.0f);
+                    g0 = std::max(g0, 0.0f);
+                    b0 = std::max(b0, 0.0f);
+                }
+
+                uint8_t* q = row + static_cast<size_t>(x) * 4;
+                if constexpr (Ablation == kToneNone) {
+                    // Still three bytes out of three demosaiced values, so the
+                    // pass above it cannot be deleted as unused.
+                    q[0] = toByte(r0);
+                    q[1] = toByte(g0);
+                    q[2] = toByte(b0);
+                    q[3] = 255;
+                    continue;
+                }
+
+                float r, g, b;
+                if constexpr (Ablation == kToneNoMatrix) {
+                    r = r0; g = g0; b = b0;
+                } else {
+                    r = m[0] * r0 + m[1] * g0 + m[2] * b0;
+                    g = m[3] * r0 + m[4] * g0 + m[5] * b0;
+                    b = m[6] * r0 + m[7] * g0 + m[8] * b0;
+                }
+
+                r *= tone.exposureGain;
+                g *= tone.exposureGain;
+                b *= tone.exposureGain;
+
+                if constexpr (Ablation == kToneCensus) {
+                    if (std::max(r, std::max(g, b)) > tone.knee) ++overKnee;
+                }
+                if constexpr (Ablation == kToneNoShoulder) {
+                    renderLinearParts<false, true>(r, g, b, tone);
+                } else if constexpr (Ablation == kToneNoDesat) {
+                    renderLinearParts<true, false>(r, g, b, tone);
+                } else if constexpr (Ablation == kToneNoExp) {
+                    renderLinearParts<true, true, false>(r, g, b, tone);
+                } else if constexpr (Ablation != kToneNoRender) {
+                    renderLinear(r, g, b, tone);
+                }
+
+                // RGBA_8888 is byte order R,G,B,A in memory.
+                if constexpr (Ablation == kToneNoDisplay) {
+                    q[0] = toByte(r);
+                    q[1] = toByte(g);
+                    q[2] = toByte(b);
+                } else {
+                    q[0] = display(r);
+                    q[1] = display(g);
+                    q[2] = display(b);
+                }
+                q[3] = 255;
+            }
+        }
+        if constexpr (Ablation == kToneCensus) {
+            if (aboveKnee != nullptr) aboveKnee->fetch_add(overKnee);
+        }
+    });
+}
+
+
+void runToneVariant(int variant, const float* plane, int width, int height,
+                    uint8_t* dst, int stride, const int* cfa, const float* m,
+                    const ToneParams& tone, const DisplayLut& display,
+                    std::atomic<long>* aboveKnee) {
+    switch (variant) {
+        case kToneNoMatrix:
+            demosaicAndTone<kToneNoMatrix>(plane, width, height, dst, stride,
+                                           cfa, m, tone, display); break;
+        case kToneNoRender:
+            demosaicAndTone<kToneNoRender>(plane, width, height, dst, stride,
+                                           cfa, m, tone, display); break;
+        case kToneNoDisplay:
+            demosaicAndTone<kToneNoDisplay>(plane, width, height, dst, stride,
+                                            cfa, m, tone, display); break;
+        case kToneNone:
+            demosaicAndTone<kToneNone>(plane, width, height, dst, stride,
+                                       cfa, m, tone, display); break;
+        case kToneNoShoulder:
+            demosaicAndTone<kToneNoShoulder>(plane, width, height, dst, stride,
+                                             cfa, m, tone, display); break;
+        case kToneNoDesat:
+            demosaicAndTone<kToneNoDesat>(plane, width, height, dst, stride,
+                                          cfa, m, tone, display); break;
+        case kToneNoExp:
+            demosaicAndTone<kToneNoExp>(plane, width, height, dst, stride,
+                                        cfa, m, tone, display); break;
+        case kToneCensus:
+            demosaicAndTone<kToneCensus>(plane, width, height, dst, stride,
+                                         cfa, m, tone, display, aboveKnee); break;
+        default:
+            demosaicAndTone<kToneFull>(plane, width, height, dst, stride,
+                                       cfa, m, tone, display); break;
+    }
+}
+
+/**
+ * A normalised CFA plane with something for every branch to do.
+ *
+ * The scene matters more than it looks, and here it decides the answer rather
+ * than shading it. `renderLinear` has two data-dependent branches, so a plane
+ * that never reaches the knee would report the rendering curve as nearly free;
+ * one that clips everywhere would report it as the whole cost. So this ramps
+ * across the frame, carries a per-site tint because a CFA plane is white
+ * balanced by the time this pass sees it, and has fine detail on top so the
+ * demosaic's gradient terms are not multiplying zeros. The harness counts how
+ * many pixels ended up over the knee and the test prints it, so the figure
+ * comes with the scene it describes.
+ */
+void fillScenePlane(float* plane, int width, int height) {
+    for (int y = 0; y < height; ++y) {
+        const float v = static_cast<float>(y) / height;
+        for (int x = 0; x < width; ++x) {
+            const float u = static_cast<float>(x) / width;
+            const float base = 0.04f + 0.50f * (0.35f * u + 0.65f * v);
+            const float detail = 0.03f * std::sin(x * 0.21f) * std::sin(y * 0.17f) +
+                                 0.06f * std::sin(u * 31.0f + v * 17.0f);
+            // Sites 0 and 3 are the red and blue corners of the 2x2; a white
+            // balanced plane has them lifted relative to the two greens.
+            const int site = (y & 1) * 2 + (x & 1);
+            const float tint = (site == 0) ? 1.18f : (site == 3) ? 1.09f : 1.0f;
+            plane[static_cast<size_t>(y) * width + x] =
+                std::max((base + detail) * tint, 0.0f);
+        }
+    }
+}
+
 }  // namespace
 
 extern "C" {
@@ -1119,97 +1393,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     buildDisplayLut(display, tone);
 
     tDemosaic = nowMicros();
-    parallelBands(height, [&](int y0, int y1) {
-        float acc[3];
-        int cnt[3];
-        for (int y = y0; y < y1; ++y) {
-            uint8_t* row = dstBase + static_cast<size_t>(y) * stride;
-            const bool interiorRow = (y >= 2 && y < height - 2);
-            for (int x = 0; x < width; ++x) {
-                float r0, g0, b0;
-
-                if (!interiorRow || x < 2 || x >= width - 2) {
-                    // Border: no 5x5 support, so the simple gather, with the
-                    // bounds checks that only these pixels need.
-                    acc[0] = acc[1] = acc[2] = 0.0f;
-                    cnt[0] = cnt[1] = cnt[2] = 0;
-                    for (int dy = -1; dy <= 1; ++dy) {
-                        const int sy = y + dy;
-                        if (sy < 0 || sy >= height) continue;
-                        for (int dx = -1; dx <= 1; ++dx) {
-                            const int sx = x + dx;
-                            if (sx < 0 || sx >= width) continue;
-                            const int c = cfa[(sy & 1) * 2 + (sx & 1)];
-                            acc[c] += plane[static_cast<size_t>(sy) * width + sx];
-                            cnt[c]++;
-                        }
-                    }
-                    r0 = cnt[0] ? acc[0] / cnt[0] : 0.0f;
-                    g0 = cnt[1] ? acc[1] / cnt[1] : 0.0f;
-                    b0 = cnt[2] ? acc[2] / cnt[2] : 0.0f;
-                } else {
-                    // Gradient-corrected linear interpolation (Malvar, He and
-                    // Cutler). The measured sample at this site is kept
-                    // exactly; only the two missing colours are interpolated,
-                    // with a second-derivative term carrying the luminance
-                    // gradient across channels so the planes agree about edge
-                    // position. Mirrors Demosaic.kt, where the tests are.
-                    const float* p = plane.data() + static_cast<size_t>(y) * width + x;
-                    const int w1 = width;
-                    const int w2 = width * 2;
-
-                    const float c0 = p[0];
-                    const float nA = p[-w1], sA = p[w1];
-                    const float eA = p[1], wA = p[-1];
-                    const float nn = p[-w2], ss = p[w2];
-                    const float ee = p[2], ww = p[-2];
-                    const float diag = p[-w1 - 1] + p[-w1 + 1] + p[w1 - 1] + p[w1 + 1];
-                    const float axis = nA + sA + eA + wA;
-                    const float axis2 = nn + ss + ee + ww;
-
-                    const int here = cfa[(y & 1) * 2 + (x & 1)];
-                    if (here == 1) {
-                        const bool redHorizontal = cfa[(y & 1) * 2 + ((x + 1) & 1)] == 0;
-                        const float alongH = 5.0f * c0 + 4.0f * (wA + eA) - (ww + ee) -
-                                             diag + 0.5f * (nn + ss);
-                        const float alongV = 5.0f * c0 + 4.0f * (nA + sA) - (nn + ss) -
-                                             diag + 0.5f * (ww + ee);
-                        r0 = (redHorizontal ? alongH : alongV) * 0.125f;
-                        g0 = c0;
-                        b0 = (redHorizontal ? alongV : alongH) * 0.125f;
-                    } else if (here == 0) {
-                        r0 = c0;
-                        g0 = (4.0f * c0 + 2.0f * axis - axis2) * 0.125f;
-                        b0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) * 0.125f;
-                    } else {
-                        r0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) * 0.125f;
-                        g0 = (4.0f * c0 + 2.0f * axis - axis2) * 0.125f;
-                        b0 = c0;
-                    }
-                    // The correction extrapolates and can overshoot past black.
-                    r0 = std::max(r0, 0.0f);
-                    g0 = std::max(g0, 0.0f);
-                    b0 = std::max(b0, 0.0f);
-                }
-
-                float r = m[0] * r0 + m[1] * g0 + m[2] * b0;
-                float g = m[3] * r0 + m[4] * g0 + m[5] * b0;
-                float b = m[6] * r0 + m[7] * g0 + m[8] * b0;
-
-                r *= tone.exposureGain;
-                g *= tone.exposureGain;
-                b *= tone.exposureGain;
-                renderLinear(r, g, b, tone);
-
-                uint8_t* q = row + static_cast<size_t>(x) * 4;
-                // RGBA_8888 is byte order R,G,B,A in memory.
-                q[0] = display(r);
-                q[1] = display(g);
-                q[2] = display(b);
-                q[3] = 255;
-            }
-        }
-    });
+    demosaicAndTone<kToneFull>(plane.data(), width, height, dstBase, stride,
+                               cfa, m, tone, display);
 
     const int64_t tEnd = nowMicros();
     LOGI("develop: black %lldms, hotpixels %lldms, shading %lldms, demosaic+tone %lldms, total %lldms",
@@ -1323,6 +1508,103 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nShadingBench(
     }
     out[static_cast<size_t>(roundCount) * 2] = differing;
     out[static_cast<size_t>(roundCount) * 2 + 1] = static_cast<jlong>(worst * 1e9);
+
+    jlongArray result = env->NewLongArray(static_cast<jsize>(out.size()));
+    if (result == nullptr) return nullptr;
+    env->SetLongArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
+    return result;
+}
+
+/**
+ * What `demosaic+tone` is made of, measured by leaving one piece out.
+ *
+ * The pass is the largest item in a capture and reports as one number. It
+ * cannot be split by running it in halves -- the halves are fused so that the
+ * demosaic's output never leaves the registers, and an intermediate buffer
+ * would add 50 MB of traffic and measure that. So the harness runs the whole
+ * pass with one item removed and compares it against the whole pass, in the
+ * same process, paired within a round, the way `nShadingBench` does.
+ *
+ * Ablation differences are subtractions and subtractions do not have to add up.
+ * Removing an item lets the compiler and the machine rearrange what is left, so
+ * a part's cost measured this way is what removing it saves, which is the
+ * useful quantity but not the same as what it would cost on its own.
+ *
+ * `[a0, b0, a1, b1, ...]` in microseconds, then the bytes on which the two
+ * outputs disagreed -- meaningful only when the two variants are the same one --
+ * then how many pixels the census found above the knee.
+ */
+JNIEXPORT jlongArray JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nToneBench(
+        JNIEnv* env, jobject, jint width, jint height,
+        jintArray jcfa, jfloatArray jmatrix,
+        jfloat exposureGain, jfloat knee, jfloat contrast,
+        jfloat desatStrength, jfloat desatStart, jfloat blackPoint,
+        jint variantA, jint variantB, jint roundCount) {
+    if (width < 8 || height < 8 || roundCount <= 0) return nullptr;
+    ensureGammaLut();
+
+    int cfa[4];
+    float m[9];
+    env->GetIntArrayRegion(jcfa, 0, 4, cfa);
+    env->GetFloatArrayRegion(jmatrix, 0, 9, m);
+
+    ToneParams tone;
+    tone.exposureGain = exposureGain;
+    tone.knee = knee;
+    tone.contrast = contrast;
+    tone.desatStrength = desatStrength;
+    tone.desatStart = desatStart;
+    tone.blackPoint = blackPoint;
+
+    DisplayLut display;
+    buildDisplayLut(display, tone);
+
+    const size_t pixels = static_cast<size_t>(width) * height;
+    const int stride = width * 4;
+    std::vector<float> plane(pixels);
+    std::vector<uint8_t> dstA(pixels * 4), dstB(pixels * 4);
+    fillScenePlane(plane.data(), width, height);
+
+    // Untimed: faults in 150 MB of fresh pages and lets the cores come up to
+    // clock, both of which otherwise land on whichever variant went first.
+    std::atomic<long> aboveKnee{0};
+    runToneVariant(kToneCensus, plane.data(), width, height, dstA.data(), stride,
+                   cfa, m, tone, display, &aboveKnee);
+    runToneVariant(variantA, plane.data(), width, height, dstA.data(), stride,
+                   cfa, m, tone, display, nullptr);
+    runToneVariant(variantB, plane.data(), width, height, dstB.data(), stride,
+                   cfa, m, tone, display, nullptr);
+
+    std::vector<jlong> out(static_cast<size_t>(roundCount) * 2 + 2, 0);
+    long differing = 0;
+
+    for (int r = 0; r < roundCount; ++r) {
+        int64_t tA = 0, tB = 0;
+        auto slotA = [&]() {
+            const int64_t t = nowMicros();
+            runToneVariant(variantA, plane.data(), width, height, dstA.data(),
+                           stride, cfa, m, tone, display, nullptr);
+            tA = nowMicros() - t;
+        };
+        auto slotB = [&]() {
+            const int64_t t = nowMicros();
+            runToneVariant(variantB, plane.data(), width, height, dstB.data(),
+                           stride, cfa, m, tone, display, nullptr);
+            tB = nowMicros() - t;
+        };
+        if ((r & 1) == 0) { slotA(); slotB(); } else { slotB(); slotA(); }
+
+        out[static_cast<size_t>(r) * 2] = tA;
+        out[static_cast<size_t>(r) * 2 + 1] = tB;
+        if (r == 0) {
+            for (size_t i = 0; i < dstA.size(); ++i) {
+                if (dstA[i] != dstB[i]) ++differing;
+            }
+        }
+    }
+    out[static_cast<size_t>(roundCount) * 2] = differing;
+    out[static_cast<size_t>(roundCount) * 2 + 1] = aboveKnee.load();
 
     jlongArray result = env->NewLongArray(static_cast<jsize>(out.size()));
     if (result == nullptr) return nullptr;

@@ -10,7 +10,7 @@ holds the reasoning behind everything below.
 no release paperwork — deferred by the owner's decision, and nothing in the
 current work depends on any of it.
 
-Everything builds. **359 unit tests pass**, and **116 device tests** pass on the
+Everything builds. **359 unit tests pass**, and **119 device tests** pass on the
 phone. The build on the phone is current HEAD, md5 verified.
 
 The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
@@ -19,6 +19,10 @@ line says what the merge bought: `8 frames · 91% kept`.
 
 Recent work, newest first:
 
+- **`demosaic+tone` has been split, and it is the rendering curve.** Not the
+  demosaic, not the colour matrix, not the display lookup. `renderLinear` is
+  1.6-2.0x of the whole pass and its highlight roll-off is most of that, 16 of
+  16 rounds in every run. `ToneAblationDeviceTest`
 - **there is now a harness whose A/A passes.** Both implementations of a pass
   live in one binary and are timed back to back in one process, forty rounds,
   order alternated. Pairing the runs sees through a phone that wanders by a
@@ -110,34 +114,58 @@ of what was left.
   good. Twenty frames in mixed light, looked at properly, would tell more than
   any test here.
 
-**On the pipeline**, `demosaic+tone` is now most of the develop and the
-instrument to attack it with exists. A capture on a warm phone this session:
+**On the pipeline**, `demosaic+tone` is the develop and has now been split. A
+capture on a warm phone this session:
 
     black 18-35ms, hotpixels 20-50ms, shading 22-34ms, demosaic+tone 168-250ms
 
-The tone half of that last figure is about as expensive as the demosaic half —
-established, forty samples each, balanced ordering, no overlap. *Which part* of
-the tone stage is not established, and the obvious suspect is innocent:
-replacing `shoulderCurve`'s `std::exp` with an inline series changed nothing.
+`ToneAblationDeviceTest` takes that last figure apart by running the whole pass
+with one item removed. As paired ratios, which are what transfer:
 
-**The blocker on that has been cleared.** `nShadingBench` is the pattern: hold
-both implementations in one binary, alternate the order, pair the two runs
-within a round, and require the A/A to come back near 20 of 40 before believing
-anything the A/B says. It works because the phone's wander is shared by two runs
-a few milliseconds apart — which is exactly what a reinstall between runs
-destroys. The same shape applied to the tone stage would make the colour matrix,
-the rendering curve's maxima and branches, and the display lookup separable at
-last.
+    everything after the demosaic     2.2 - 3.0x     16 of 16, every run
+    renderLinear                      1.9 - 2.5x     16 of 16, every run
+      its highlight roll-off          1.44 - 1.6x    16 of 16, every run
+      the exponential inside it       1.15 - 1.21x   52 of 64 rounds pooled
+    the colour matrix, the display table, the desaturation   below the floor
 
-Two things to know before writing that harness. The rearrangement it measures
-will **not** be bit-exact under `-ffast-math`, so assert a bound; and it needs
-its own reference implementation kept in the binary, which is what
-`applyShadingReference` is for. Both cost about ten lines and both were learned
-the expensive way.
+**The rendering curve is the cost.** The demosaic is under half the pass, and
+the three items anyone would name first are all smaller than the harness
+resolves in sixteen rounds.
 
-Do not start by assuming the demosaic is the cost. Four assumptions about where
+**The roll-off's price belongs to the photograph, not the code.** Its work sits
+behind `if (scenePeak > knee)`: at 82% of the frame above the knee `renderLinear`
+is 1.58x and 2.20x on two runs, both 16 of 16; at 1% it does not separate at all,
+8 and 9 rounds of 16. Never quote a figure for this pass without the scene beside
+it.
+
+**The harness resolves about a tenth of the pass and no better.** Sixteen rounds
+put the colour matrix at 1.11x, 1.05x, 1.13x and 1.04x with win counts of 16, 11,
+9 and 8 — one real reading and three coin flips. Below that floor, raise the
+rounds or shrink the enclosing pass; do not read the ratio.
+
+### The move that is now identified and costed
+
+Replace the roll-off's `std::exp`, or better, replace
+`shoulderCurve(p, knee) / p` outright with a table on `p` built per capture the
+way `buildDisplayLut` already builds one — that kills the call and the divide
+together. The ceiling is the 1.44-1.6x the whole roll-off is worth; the
+exponential alone is 1.15-1.21x of it.
+
+**It would be the first approximation in the render, and that is the decision to
+put to the owner rather than slip in.** Everything in this pipeline so far is
+either exact or pinned to a reference; `DisplayLut` makes a point of being exact
+and explains why that is the only reason it was worth doing. A table on a
+continuous input cannot be. A 4096-entry interpolated table is accurate to about
+1e-6, four orders below a display code, so the picture would not change — but
+the *kind* of claim this pipeline makes would.
+
+Note also that this log's earlier "replacing the exponential changed nothing"
+was a false negative from the broken harness, so do not take it as evidence.
+
+Do not start by assuming the demosaic is the cost. Five assumptions about where
 develop time goes have been wrong here: the JPEG encode, the sharpening, the
-exponential, and that a rearrangement would come back identical.
+exponential, that a rearrangement would come back identical, and that the
+demosaic was the expensive half of the pass named after it.
 
 ## How to measure
 
@@ -147,11 +175,21 @@ In decreasing order of authority:
   Run `ZslStreamDeviceTest#repeatedCapturesTakeAConsistentTime` and read
   `develop breakdown`, `develop stages`, `develop:` and `sharpen:` out of
   logcat. That is real camera frames.
-- **`ShadingSpeedDeviceTest` is the only instrument here that can compare two
-  implementations**, because it is the only one that does not need a second
-  install. Both live in the binary, forty rounds, order alternated within the
-  round, and the comparison is paired rather than pooled. Its A/A test is not a
-  formality and runs first. Copy this rather than the two below.
+- **`ShadingSpeedDeviceTest` and `ToneAblationDeviceTest` are the only
+  instruments here that can compare two implementations**, because they are the
+  only ones that do not need a second install. Both candidates live in the
+  binary, the order alternates within a round, and the comparison is paired
+  rather than pooled. Their A/A tests are not a formality and run first. Copy
+  these rather than the two below.
+- **Report the paired ratio, not a difference of medians.** The same comparison
+  read 104 ms of 320 and, twenty seconds later, 269 ms of 419: both true,
+  neither transferable, because the phone had slowed by half in between. The
+  within-round ratio is untouched by that. The win count is the significance;
+  the ratio is the size.
+- **This phone degrades over a session and a rest does not fix it.** The same
+  pass read 172 ms early and 313 ms half an hour later, with per-round times
+  spreading from 223 ms to 973 ms, on battery at 42.8 C. Nine minutes of idle
+  made it worse. Watch `dumpsys battery` for temperature *and* level.
 - **`SharpenSpeedDeviceTest` and `DevelopSpeedDeviceTest` isolate a stage**, and
   are comparison instruments only. The develop one **reads about twice what a
   capture pays and nobody knows why** — clock ramp, exposure and foreground

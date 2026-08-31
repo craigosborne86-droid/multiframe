@@ -2081,6 +2081,13 @@ The inline exponential is reverted. It is arithmetically defensible, well
 tested, and buys nothing measurable, which makes it the fifth experiment this
 log has backed out rather than kept on faith.
 
+> **This was wrong, and the same entry says why.** The measurement that found
+> nothing came from the harness this entry had just shown to be untrustworthy.
+> A later one puts the exponential at about a seventh of `demosaic+tone`, and
+> answers the list of suspects below: it is the rendering curve, and the colour
+> matrix and the display lookup are both too small to resolve. See *What the
+> largest item in a capture is made of*.
+
 ### What this leaves
 
 The tone stage is worth attacking and the exponential inside it is not the
@@ -2347,6 +2354,106 @@ is a rearrangement *of*, and something has to say so.
 `repeatedCapturesTakeAConsistentTime` failing once at 40.7 C after five minutes
 of load and passing on its own — the thermal flakiness this log has now
 recorded three times.
+
+## What the largest item in a capture is made of
+
+`demosaic+tone` is 170-250 ms of a develop and has always reported as one
+number. An earlier session established that its tone half costs about as much as
+its demosaic half and could get no further, because the instrument could not see
+anything finer. The instrument built for the shading pass can, so it was pointed
+at this.
+
+### How you time half of a fused loop
+
+You cannot run the halves separately. They are fused precisely so that the
+demosaic's three floats go into the colour matrix without ever reaching memory,
+and writing them to an intermediate buffer would add 50 MB of traffic and
+measure that instead.
+
+So every variant is the *whole* pass with one item removed, timed against the
+whole pass. The loop became a template with `if constexpr` gates rather than a
+second copy kept for benchmarking, so `nDevelop` runs the `kToneFull`
+instantiation and the harness runs the others — a measurement here is a
+measurement of the code that ships.
+
+**Ablation differences are subtractions, and subtractions do not have to add
+up.** Removing an item lets the compiler and the machine rearrange what is left.
+What this measures is what removing a piece *saves*, which is the number worth
+having — it is the ceiling on what optimising that piece could recover — but it
+is not what the piece would cost alone, and the figures are not obliged to sum.
+
+### The answer
+
+Across six runs, as paired ratios, because those are what survive a phone that
+doubles its own times over a few minutes:
+
+    everything after the demosaic     2.2 - 3.0x     16 of 16, every run
+    renderLinear                      1.9 - 2.5x     16 of 16, every run
+      its highlight roll-off          1.44 - 1.6x    16 of 16, every run
+      the exponential inside it       1.15 - 1.21x   52 of 64 rounds pooled
+    the colour matrix                 1.04 - 1.13x   8-16 of 16, unstable
+    the display table                 1.03 - 1.05x   7-10 of 16, unstable
+    the highlight desaturation        1.04 - 1.16x   10-12 of 16, unstable
+
+**The rendering curve is the cost, and within it the roll-off.** The demosaic —
+five-by-five gathers, thirteen neighbours, three branches per pixel — is under
+half the pass. The three items everyone would name first are all too small for
+this harness to resolve in sixteen rounds, which is a statement about them and
+about the harness, and both are worth having in writing.
+
+### The roll-off's price is a property of the photograph
+
+`renderLinear`'s work sits behind `if (scenePeak > knee)`. So the harness runs
+the same ablation at two exposures and prints how much of the frame is above the
+knee beside each figure:
+
+    gain 3.5, 82% of the frame above the knee    1.58x, 2.20x   16 of 16, twice
+    gain 1.1,  1% of the frame above the knee    ---             8 and 9 of 16
+
+At one per cent it does not separate at all: two runs, 8 and 9 rounds of 16,
+which is a coin flip, so the ratios those runs printed mean nothing and are left
+out. **Essentially all of the roll-off's cost is the branch being taken.** A
+figure for this pass without the scene beside it is not a figure.
+
+### A null result that was a false negative
+
+This log records that replacing `shoulderCurve`'s `std::exp` with an inline
+series changed nothing. **It was measured with the harness that separates a
+binary from itself by two and a half times.**
+
+Swapping the exponential for a reciprocal — the same saturating shape, and not
+free, since it is still a divide — is worth 1.15 to 1.21x of the whole pass,
+52 of 64 rounds pooled across four runs. So what a fast approximation could
+recover is around a seventh of `demosaic+tone`, not nothing.
+
+The rule this log already had said so in advance: a null result needs a harness
+that could have seen the effect. It did not have one, and said the words anyway.
+
+### What the harness cannot do
+
+It resolves about a tenth of the pass in sixteen rounds and no better. The three
+small items above moved between runs in both directions — the colour matrix read
+1.11x, 1.05x, 1.13x and 1.04x with win counts of 16, 11, 9 and 8 of 16, which is
+one real reading and three coin flips. Separating them needs more rounds or a
+smaller enclosing pass, and neither was worth it to establish that a tenth is
+the floor.
+
+The A/A held up all the way down: 12 of 24, 13 of 20, and 9 of 20 twice, the
+last of those on a phone whose per-round times had spread from 223 ms to 973 ms
+for the very same code. The pairing survives what the millisecond difference
+cannot, which is the whole argument for it.
+
+### The state of the phone, because it is part of the reading
+
+The absolute figures above drifted from 172 ms to 313 ms for the same code over
+about half an hour of these runs, with the battery going 43% to 27% and the
+temperature 40.6 C to 42.8 C. A nine-minute rest made it worse rather than
+better. Nothing here is quotable as what a capture costs; the capture path is
+still the only authority on that. The ratios are what transfers.
+
+359 unit tests pass. 119 device tests pass on the phone, with
+`repeatedCapturesTakeAConsistentTime` failing once in the full-suite run after
+six minutes of load and passing on its own, which is now four times.
 
 ## Outstanding for release
 
