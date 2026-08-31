@@ -17,6 +17,16 @@ The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
 in about a second and writes a DNG and a JPEG to the gallery, and the status
 line says what the merge bought: `8 frames · 91% kept`.
 
+**Run `ZslStreamDeviceTest#repeatedCapturesTakeAConsistentTime` first, on a
+rested phone.** It asserts the slowest of three shots is within 1.4x of the
+fastest, and by the end of the last session the device could not pass it in any
+state — every develop stage was reading about twice what it had four hours
+earlier. So it has not been demonstrated against the develop refactor. The
+grounds for thinking that is device state and not a regression are that all the
+parity tests pass, that the inflation is uniform across stages rather than
+localised, and that a compile-time template cannot widen a runtime spread. Check
+it before trusting anything else here.
+
 Recent work, newest first:
 
 - **`demosaic+tone` has been split, and it is the rendering curve.** Not the
@@ -186,10 +196,6 @@ In decreasing order of authority:
   neither transferable, because the phone had slowed by half in between. The
   within-round ratio is untouched by that. The win count is the significance;
   the ratio is the size.
-- **This phone degrades over a session and a rest does not fix it.** The same
-  pass read 172 ms early and 313 ms half an hour later, with per-round times
-  spreading from 223 ms to 973 ms, on battery at 42.8 C. Nine minutes of idle
-  made it worse. Watch `dumpsys battery` for temperature *and* level.
 - **`SharpenSpeedDeviceTest` and `DevelopSpeedDeviceTest` isolate a stage**, and
   are comparison instruments only. The develop one **reads about twice what a
   capture pays and nobody knows why** — clock ramp, exposure and foreground
@@ -203,9 +209,13 @@ In decreasing order of authority:
   JPEG strips in 8 ms against 48-107. A regression that doubled a phone's cost
   would look healthy there. The four timing harnesses now say so in the log line
   beside the figure.
-- `MergeSpeedDeviceTest` times the accumulation, and aligns on the JVM where a
-  capture aligns natively, so it reads high. Switching it to `alignNative` is
-  still the obvious improvement and still has not been done.
+- **`MergeSpeedDeviceTest` reports what a capture pays**, which it was believed
+  for three sessions not to. It aligns natively now, as a capture does — but
+  that was not why it was thought to read high, and it never did: measured
+  against a capture on the same phone minutes apart, 39 ms an accumulated frame
+  against 37. The old note compared its figure to a capture figure from another
+  day, which is the one comparison the rules above forbid. It also runs both
+  gaps and finds the accumulation cannot tell them apart, 7 of 16 pairs.
 
 Hard-won notes that still apply:
 
@@ -217,17 +227,34 @@ Hard-won notes that still apply:
   then restore — that is how this session's sharpening comparison was made.
 - **The device degrades over an afternoon, and a short rest does not fix it.**
   Watch `dumpsys battery` and `/proc/meminfo`, and know that both can look fine
-  while everything runs at half speed.
+  while everything runs at half speed. Over one session the same pass went 172
+  to 313 ms with per-round times spreading from 223 ms to 973 ms, every develop
+  stage roughly doubled, a nine-minute rest made it worse, and the battery fell
+  43% to 23%. Plug it in and leave it before a measuring session.
 - **Never subtract a figure in the log from one taken in a different run.** Only
-  an alternated comparison inside a single session means anything.
+  an alternated comparison inside a single session means anything. This is the
+  easiest rule here to keep while breaking: `MergeSpeedDeviceTest` was believed
+  for three sessions to read high, on the strength of its figure being set
+  beside a capture figure from another day. It does not. The rule has to be
+  applied to the *notes* as well as to the measurements.
 - **Wireless adb drops writes** under this load: installs fail with "device
   offline" and then succeed on a retry. Loop the install two or three times.
 
 ## Environment
 
-- **WiFi adb has degraded** to roughly three minutes per APK install, which
-  makes Gradle look hung. Use USB, or install once by hand and drive tests with
-  `adb shell am instrument -w -e class <Class> dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner`.
+- **`adb logcat -d` after a long test loses the start of it.** These harnesses
+  print a line per comparison over a minute or two and the ring buffer rolls, so
+  the early lines are gone by the time the run ends. Capture continuously
+  instead: `adb logcat -c`, then `adb logcat -s <Tag> > file &` before the run,
+  and read the file after. Half an hour went on re-running tests whose output
+  had already scrolled away.
+- **Wireless adb was fine this session** — 80 MB/s pushes and installs in about
+  a second, over mDNS. An earlier session recorded it degraded to three minutes
+  an install; that was the link on the day, not the transport. If it is slow,
+  push both APKs to `/data/local/tmp` and `adb shell pm install -r` from there,
+  and drive tests with
+  `adb shell am instrument -w -e class <Class> dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner`
+  rather than through Gradle, which looks hung while it waits.
 - The phone connects over mDNS; watch for it attaching **twice** (once by IP,
   once by mDNS), which makes every `adb` command fail with "more than one
   device".

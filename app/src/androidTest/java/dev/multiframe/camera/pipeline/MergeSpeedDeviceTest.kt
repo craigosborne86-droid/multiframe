@@ -25,11 +25,25 @@ private const val TAG = "MergeSpeed"
  * **Three things it is careful about.**
  *
  * It does the proxy and the alignment between accumulations even though it does
- * not time them. An earlier version left them out and reported sixty
- * milliseconds a frame where a capture logs under twenty -- accumulations run
- * back to back leave the memory system saturated in a way the real loop, which
- * has twenty milliseconds of alignment between one frame and the next, never
- * sees. A benchmark that removes the gaps is not measuring the same loop.
+ * not time them, and it does them *the way a capture does* -- natively. An
+ * earlier version left the gap out entirely and reported sixty milliseconds a
+ * frame where a capture logged under twenty: accumulations run back to back
+ * leave the memory system saturated in a way the real loop never sees.
+ *
+ * A later one put the gap back but filled it with the Kotlin aligner, and this
+ * project carried a note for several sessions saying that made the harness read
+ * high -- a pyramid per frame is some 44 MB of garbage a burst, collected on
+ * the cores being timed. **Measured, it does not.** The harness now runs both
+ * gaps, alternating, and the Kotlin one reads 0.97x and 1.03x on two runs, 7 of
+ * 16 pairs, which is a coin flip in both directions. The native gap is a tenth
+ * the length of the Kotlin one and the accumulation cannot tell them apart, so
+ * whatever removing the gap entirely was doing, thirty milliseconds of it is
+ * already enough.
+ *
+ * The gap is native now because a harness should do what a capture does, not
+ * because it was reading high. The paired form is there because a phone cannot
+ * be trusted to hold still between one burst and the next; see
+ * [ShadingSpeedDeviceTest].
  *
  * A phone does not hold still long enough to compare two runs directly -- these
  * samples have varied by a factor of two on a device doing nothing else, as it
@@ -45,6 +59,12 @@ private const val TAG = "MergeSpeed"
  * numbers are fiction, which is why the assertion is only a ceiling loose
  * enough to catch a collapse rather than a budget -- the evidence is in the
  * logged samples, read on hardware.
+ *
+ * **What it reports is what a capture pays.** Read against a capture on the
+ * same phone minutes apart: 39 ms per accumulated frame here, 37 ms there. The
+ * belief that this harness read high came from setting its figure beside a
+ * capture figure recorded on another day, which is the one comparison this
+ * project's own rules forbid.
  */
 @RunWith(AndroidJUnit4::class)
 class MergeSpeedDeviceTest {
@@ -99,9 +119,16 @@ class MergeSpeedDeviceTest {
             val tilesX = maxOf(1, m.proxyWidth / 32)
             val tilesY = maxOf(1, m.proxyHeight / 32)
 
-            val accumulateMillis = LongArray(BURSTS)
+            val nativeGap = LongArray(PAIRS)
+            val jvmGap = LongArray(PAIRS)
             val controlMillis = LongArray(BURSTS)
             for (b in 0 until BURSTS) {
+                val pair = b / 2
+                // Which aligner fills the gap, alternating within the pair and
+                // alternating the order of the pair, so a phone that warms over
+                // the measurement warms for both of them equally.
+                val useNative = if (pair % 2 == 0) b % 2 == 0 else b % 2 == 1
+
                 // Timed as the control: unchanged native code sweeping the same
                 // buffers, 25 MB in and 125 MB out through the same band
                 // scheduler. If the phone throttles or another process takes a
@@ -113,7 +140,7 @@ class MergeSpeedDeviceTest {
                 controlMillis[b] = (System.nanoTime() - mark) / 1_000_000
 
                 val refProxy = m.lumaProxy(reference, stride)
-                val refPyramid = Aligner.buildPyramid(refProxy)
+                val refPyramid = if (useNative) null else Aligner.buildPyramid(refProxy)
                 var accumulate = 0L
                 for (frame in 1 until BURST_FRAMES) {
                     // Untimed, and deliberately not skipped. The proxy and the
@@ -123,34 +150,49 @@ class MergeSpeedDeviceTest {
                     // milliseconds a frame where a capture logs under twenty:
                     // back-to-back accumulations leave the memory system
                     // saturated in a way the real loop never sees.
-                    //
-                    // The alignment here is the Kotlin one, where a capture
-                    // takes the native path. That makes this harness read high
-                    // -- the Kotlin aligner builds a pyramid per frame, some
-                    // 44 MB of garbage a burst, and collecting it runs on the
-                    // same cores as the accumulation being timed. Swapping it
-                    // is the obvious next improvement, and has to be done on a
-                    // phone that is not already short of memory, or the
-                    // measurement it is meant to sharpen is swamped.
                     val proxy = m.lumaProxy(alternate, stride)
-                    val field = Aligner.align(
-                        refPyramid, Aligner.buildPyramid(proxy), tilesX, tilesY,
-                    )
+                    val field = if (useNative) {
+                        Aligner.alignNative(refProxy, proxy, tilesX, tilesY)!!
+                    } else {
+                        Aligner.align(
+                            refPyramid!!, Aligner.buildPyramid(proxy), tilesX, tilesY,
+                        )
+                    }
 
                     mark = System.nanoTime()
                     m.addFrame(alternate, stride, field)
                     accumulate += System.nanoTime() - mark
                 }
-                accumulateMillis[b] = accumulate / 1_000_000
+                if (useNative) {
+                    nativeGap[pair] = accumulate / 1_000_000
+                } else {
+                    jvmGap[pair] = accumulate / 1_000_000
+                }
             }
 
-            val a = accumulateMillis.sorted()
+            val a = nativeGap.sorted()
+            val j = jvmGap.sorted()
             val c = controlMillis.sorted()
+            val wins = (0 until PAIRS).count { nativeGap[it] < jvmGap[it] }
+            val ratios = (0 until PAIRS).map { jvmGap[it].toDouble() / nativeGap[it] }.sorted()
             Log.i(
                 TAG,
                 "accumulate over ${BURST_FRAMES - 1} frames of ${width}x$height, " +
-                    "$BURSTS bursts: " + accumulateMillis.joinToString(", ") { "${it}ms" } +
-                    "; min ${a.first()}ms median ${a[BURSTS / 2]}ms max ${a.last()}ms",
+                    "$PAIRS bursts each. gap aligned natively, as a capture does: " +
+                    nativeGap.joinToString(", ") { "${it}ms" } +
+                    "; min ${a.first()}ms median ${a[PAIRS / 2]}ms max ${a.last()}ms",
+            )
+            Log.i(
+                TAG,
+                "the same, with the gap aligned on the JVM as this harness used to: " +
+                    jvmGap.joinToString(", ") { "${it}ms" } +
+                    "; min ${j.first()}ms median ${j[PAIRS / 2]}ms max ${j.last()}ms",
+            )
+            Log.i(
+                TAG,
+                "the JVM gap was reading %.2fx, and did so in %d of %d pairs".format(
+                    ratios[ratios.size / 2], wins, PAIRS,
+                ),
             )
             Log.i(
                 TAG,
@@ -169,9 +211,10 @@ class MergeSpeedDeviceTest {
             // contributed and below one because some were rejected.
             assertThat(contribution).isGreaterThan(0f)
             assertThat(contribution).isLessThan(1f)
-            // Not a budget, and deliberately loose enough that no machine
-            // fails it: what this catches is the loop having stopped being a
-            // loop over pixels at all.
+            // Asserted on the natively aligned bursts, because those are the
+            // ones that describe a capture. Not a budget, and deliberately
+            // loose enough that no machine fails it: what this catches is the
+            // loop having stopped being a loop over pixels at all.
             //
             // It used to say an emulator takes far longer. Measured, it does
             // not -- an arm64 image on Apple silicon has the host's cores and
@@ -193,7 +236,10 @@ class MergeSpeedDeviceTest {
          * of the identical binary -- coarser than any change worth making to
          * this loop.
          */
-        const val BURSTS = 12
+        const val BURSTS = 16
+
+        /** Bursts of each kind of gap. */
+        const val PAIRS = BURSTS / 2
 
         /** What the app defaults to, so the figure is the one a shot pays. */
         const val BURST_FRAMES = 8

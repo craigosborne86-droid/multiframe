@@ -2455,6 +2455,63 @@ still the only authority on that. The ratios are what transfers.
 `repeatedCapturesTakeAConsistentTime` failing once in the full-suite run after
 six minutes of load and passing on its own, which is now four times.
 
+## A harness that was never reading high
+
+`MergeSpeedDeviceTest` times the burst accumulation, and every version of this
+log has carried the same note about it: it aligns on the JVM where a capture
+aligns natively, so it reads high, and switching it is the obvious improvement.
+Three sessions carried that note without acting on it.
+
+The switch is a two-line change. What took the work was checking the reason.
+
+### The reason was wrong
+
+Both gaps are now in the harness, alternating within a pair and alternating the
+order of the pair, timed the way everything else this session was timed. The
+Kotlin gap — a pyramid per frame, some 44 MB of garbage a burst, collected on
+the cores being timed, and ten times the wall-clock length of the native one —
+reads:
+
+    0.97x, 3 of 8 pairs        1.03x, 4 of 8 pairs
+
+Seven of sixteen pairs, in both directions. **The accumulation cannot tell the
+two apart.** Whatever removing the gap entirely was doing to an earlier version
+of this harness, thirty milliseconds of gap already supplies it, and five
+hundred adds nothing.
+
+### And the harness was never reading high either
+
+The claim it read high came from setting its figure beside a capture's `under
+twenty milliseconds`, recorded on a different day. Measured against a capture on
+the same phone, minutes apart:
+
+    harness   276 ms over 7 accumulated frames    39 ms a frame
+    capture   112 ms over 3 accumulated frames    37 ms a frame
+
+Within six per cent. **This log has a rule against exactly the comparison that
+produced the belief** — never subtract a figure in the log from one taken in a
+different run — and the belief survived three sessions because nobody applied it
+to a note rather than to a measurement.
+
+The change stands anyway: a harness should do what a capture does. But it is
+worth being clear that it fixes a discrepancy that was not there.
+
+### The phone, and what could not be checked because of it
+
+By the end of this the device was at 23% battery and 40 C, and every stage of
+the develop read about twice what it had read four hours earlier — black 21-44
+against 18-35, shading 48-64 against 22-34, `demosaic+tone` 267-323 against
+168-250. Uniformly, with no stage out of line.
+
+`ZslStreamDeviceTest#repeatedCapturesTakeAConsistentTime` asserts that the
+slowest of three shots is within 1.4x of the fastest, and the phone can no
+longer pass that in any state. **So this session cannot demonstrate that test
+passing against the develop refactor**, and says so rather than assuming. The
+grounds for thinking it is not a regression are that all the parity tests pass,
+that the stage inflation is uniform rather than localised, and that a
+compile-time template cannot make a runtime spread wider. The next session
+should run it first, on a rested phone, before anything else.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
