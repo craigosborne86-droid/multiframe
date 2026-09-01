@@ -66,4 +66,16 @@ object ToneAblation {
      * ablation: same reconstruction, one lane wide.
      */
     const val SCALAR_DEMOSAIC = 10
+
+    /**
+     * The whole display chain gone: no clamp, no scale to the table's index, no
+     * float-to-int convert and no lookup -- just the low byte of the float's own
+     * bits, which still consumes the value so nothing above it is deleted.
+     *
+     * [NO_DISPLAY] only ever swapped the lookup for a multiply-add, so it could
+     * measure the table load and nothing else, and it came back 241 of 480
+     * rounds over thirty runs. This is the probe that can see the rest, and what
+     * it sees is a fifth of the pass. Renders noise on purpose.
+     */
+    const val NO_DISPLAY_CHAIN = 11
 }

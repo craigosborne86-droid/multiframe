@@ -1122,8 +1122,30 @@ enum ToneAblation {
     kToneExactShoulder = 8,  // the roll-off computed rather than tabulated
     kToneUnsplitDemosaic = 9,  // the demosaic dispatching per pixel on its site
     kToneScalarDemosaic = 10,  // the split loop, a pixel at a time
-    kToneCensus = 11,    // as shipped, and counts which way the branches went
+    kToneNoDisplayChain = 11,  // no clamp, no scale, no convert and no lookup
+    kToneCensus = 12,    // as shipped, and counts which way the branches went
 };
+
+/**
+ * A byte out of a float for the price of nothing, for the ablation harness.
+ *
+ * `kToneNoDisplay` swaps the display table for `toByte`, which is a clamp, a
+ * multiply-add and a convert -- so all it could ever measure was whether a 4 KB
+ * lookup costs more than one extra fma. Pooled over thirty runs it came back
+ * 241 rounds of 480, settling that the *load* is free and saying nothing
+ * whatever about the clamp, the scale and the convert that both sides pay.
+ *
+ * This takes the low byte of the float's own bits: no clamp, no scale, no
+ * convert, no load, and the value is still fully consumed so nothing above it
+ * can be deleted as dead. It renders noise on purpose. What `kToneFull` costs
+ * against it is the whole display chain, which is 1.06 to 1.32x of the pass --
+ * a fifth of it, invisible to the older probe.
+ */
+inline uint8_t rawByte(float v) {
+    uint32_t bits;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return static_cast<uint8_t>(bits);
+}
 
 #if defined(__ARM_NEON)
 /**
@@ -1291,7 +1313,11 @@ void demosaicAndTone(const float* plane, int width, int height,
                 }
 
                 // RGBA_8888 is byte order R,G,B,A in memory.
-                if constexpr (Ablation == kToneNoDisplay) {
+                if constexpr (Ablation == kToneNoDisplayChain) {
+                    q[0] = rawByte(r);
+                    q[1] = rawByte(g);
+                    q[2] = rawByte(b);
+                } else if constexpr (Ablation == kToneNoDisplay) {
                     q[0] = toByte(r);
                     q[1] = toByte(g);
                     q[2] = toByte(b);
@@ -1558,6 +1584,9 @@ void runToneVariant(int variant, const float* plane, int width, int height,
                                                   cfa, m, tone, display, shoulder); break;
         case kToneScalarDemosaic:
             demosaicAndTone<kToneScalarDemosaic>(plane, width, height, dst, stride,
+                                                 cfa, m, tone, display, shoulder); break;
+        case kToneNoDisplayChain:
+            demosaicAndTone<kToneNoDisplayChain>(plane, width, height, dst, stride,
                                                  cfa, m, tone, display, shoulder); break;
         case kToneCensus:
             demosaicAndTone<kToneCensus>(plane, width, height, dst, stride,

@@ -84,6 +84,7 @@ class ToneAblationDeviceTest {
         val named = listOf(
             "colour matrix" to ToneAblation.NO_MATRIX,
             "display table" to ToneAblation.NO_DISPLAY,
+            "the whole display chain" to ToneAblation.NO_DISPLAY_CHAIN,
             "renderLinear" to ToneAblation.NO_RENDER,
             "its roll-off" to ToneAblation.NO_SHOULDER,
             "its desaturation" to ToneAblation.NO_DESAT,

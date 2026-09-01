@@ -112,12 +112,15 @@ Six rules, all of them earned rather than assumed, and worth keeping:
 - **Third-party code is a last resort, and there is exactly one piece of it.**
   libjpeg-turbo is vendored under `cpp/third_party/`, pinned to the framework
   encoder's output rather than to a Kotlin reference, because it cannot be.
-- **Negative results are recorded and reverted**, not kept on faith. Ten so far:
+- **Negative results are recorded and reverted**, not kept on faith. Twelve so
+  far:
   a lower-priority DNG writer thread, disabling filtering on the rotation,
   aligning natively inside the merge benchmark, interleaving the merge's two
   accumulation planes, the inline exponential (which later turned out to be a
   false negative from the broken harness), `__restrict` on the develop's input
-  and output, and four separate attacks on the desaturation in one sitting.
+  and output, four separate attacks on the desaturation in one sitting, and two at the display
+  chain. Where an experiment leaves a *probe* worth keeping, the probe stays and
+  the change goes — `kToneNoDisplayChain` is there for that reason.
 
 A recurring lesson, hit five times now: a single reported figure often bundles
 two very different things. Splitting the timer before optimising found that
@@ -155,7 +158,8 @@ roll-off was tabulated:
       its highlight roll-off          1.25x   15 of 16
       its highlight desaturation      1.24x   15 of 16
     everything after the demosaic     2.36x   16 of 16
-    the colour matrix, the display table       below the floor
+    the whole display chain           1.06 - 1.32x   59 of 64
+    the colour matrix, the display *table*     below the floor
 
 **The rendering curve is the largest item again.** The desaturation came up
 level with the roll-off and looked like the same job — a block behind a
@@ -168,6 +172,20 @@ and making its branch arithmetic is **1.13x worse** (7 of 48).
 Removing the whole block saves a fifth of the pass; removing any part of it saves
 nothing. **Do not build a table for the divide** — that was the roll-off's story
 and the probe that justified it there comes back a coin flip here.
+
+**The display chain is the other fifth, and it is not the lookup.** The table
+load is free — 241 rounds of 480 over thirty runs — but that comparison only ever
+swapped a load for an fma, and the clamp, scale and convert were on both sides of
+it. `kToneNoDisplayChain` is the probe that can see them, and it puts the chain
+at 1.06-1.32x. Vectorising those three operations bought nothing, through the
+stack or through lane extracts, 69 rounds of 128.
+
+**Both failures have the same cause and it is worth stating once.** The
+per-pixel tail is latency-bound, not throughput-bound: the arithmetic already
+sits in the slack left by the dependency on `renderLinear`'s output and by the
+stores, so making it cheaper or wider compresses something that is not the
+critical path. Everything that has worked here was in the demosaic; nothing tried
+in the tail has.
 
 **Read those as shares, not as costs.** The colour matrix was under the floor,
 then 1.09-1.25x with 57 of 64 rounds, then under the floor again, without the

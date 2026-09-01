@@ -2930,6 +2930,73 @@ table: the divide is not the cost.
 
 359 unit tests pass. 121 device tests pass.
 
+## The display lookup, and a probe that could never have seen it
+
+The ablation table had said the display table was below the resolution floor
+since the day it was written. Pooled over every run of this session:
+
+    the display table, swapped for toByte    241 of 480 rounds
+
+Dead centre, thirty runs. It would be easy to read that as *the display chain
+costs nothing* and move on. It says no such thing.
+
+### The probe was measuring one instruction
+
+`display(v)` is a clamp, a multiply, a float-to-int convert and a 4 KB table
+load. `toByte(v)` — what the ablation swapped it for — is a multiply, an add, a
+clamp and a convert. **The two differ by a table load against one fma**, so that
+is the only thing 480 rounds ever measured, and what they established is that the
+load is free. The clamp, the scale and the convert are on *both* sides of the
+comparison and were never in it.
+
+This log's own rule says a null result needs a harness that could have seen the
+effect. Here was one that could not, and it had been quoted eight times.
+
+### What the chain actually costs
+
+`kToneNoDisplayChain` takes the low byte of the float's own bits: no clamp, no
+scale, no convert, no load, and the value still fully consumed so nothing above
+it is deleted. Wrong picture on purpose, and the right comparison.
+
+    the whole display chain    1.06 - 1.32x    59 of 64 rounds
+
+**A fifth of the pass**, and all of it in the three arithmetic operations, none
+of it in the lookup the stage is named after.
+
+### Vectorising it bought nothing, twice
+
+The clamp, the scale and the convert are exactly the shape that goes four wide.
+The lookup is not — NEON has no gather — but it does not need to.
+
+    through an index array on the stack   36 of 64 rounds to the scalar form
+    through `vgetq_lane_u32` extracts     33 of 64
+    pooled                                69 of 128
+
+The first version wrote twenty-four indices to the stack and read them back, and
+the round trip plausibly ate the win; the second keeps everything in registers
+and needs the eight pixels written out longhand, because a lane index has to be
+a constant. Neither is distinguishable from the scalar form in either direction.
+
+**The reason is the same one the desaturation gave.** These three operations were
+never the bottleneck: the core is wide, and they sit in the slack left by the
+dependency on `renderLinear`'s output and by the stores. Making them four wide
+compresses something that was not the critical path. This tail is latency-bound,
+not throughput-bound, which is now the second stage in a row to say so.
+
+### What is kept
+
+The optimisation is reverted; **the probe is not**. `kToneNoDisplayChain` stays
+in the binary because the weak probe beside it is actively misleading, and the
+next person to read `display table: 1.00x, 8 of 16` deserves to find the
+instrument that says what that does and does not mean sitting next to it.
+
+Twelve experiments backed out now. The ones this session that survived — the
+roll-off's table, the parity split, the NEON octets, the vectorised colour
+matrix — are all in the demosaic and its arithmetic. Everything tried in the
+per-pixel tail has failed, in the same way, for the same reason.
+
+359 unit tests pass. 121 device tests pass.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
