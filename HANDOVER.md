@@ -37,9 +37,11 @@ rules.
 
 ## Where things stand
 
-**The target is one phone: a Pixel 9 Pro XL.** No Play Store, no other devices,
-no release paperwork — deferred by the owner's decision, and nothing in the
-current work depends on any of it.
+**The target is one phone: a Pixel 9 Pro XL** — and a Pixel 11 Pro is on order,
+512 GB / 16 GB, which changes more than it looks like. See *When the phone
+changes* at the end. No Play Store, no other devices, no release paperwork —
+deferred by the owner's decision, and nothing in the current work depends on any
+of it.
 
 Everything builds. **359 unit tests pass**, and **124 device tests** pass on the
 phone in a clean full suite. The capture consistency check fails once the phone
@@ -476,6 +478,66 @@ Hard-won notes that still apply:
   failure.
 - Build output is redirected off the exFAT project volume; see
   [BUILD.md](BUILD.md).
+
+## When the phone changes
+
+A Pixel 11 Pro is on order — 512 GB, so 16 GB of RAM, which is what this phone
+has and means the ring depth and the memory budget behave as they do today.
+Tensor G6, Android 17 (which komodo already runs, so `targetSdk` is untouched),
+a new 50 MP 1/1.3" main sensor, and a 6.3" screen where this one is 6.8".
+
+**Correctness should carry over untouched, and not by luck.** Every sensor
+property is read from the camera rather than assumed: `SensorProfile.from` takes
+the CFA arrangement, the black level pattern and the white level from
+`CameraCharacteristics`, `ColorProfile.from` takes the matrix and neutral point
+from the capture result, the shading map arrives per capture, and
+`ZslPolicy.evaluate` picks the largest zero-stall raw configuration the camera
+offers rather than naming a size. The Pixel 9 numbers in `SensorProfile.DEFAULT`
+are a fallback and nothing else. Every parity test is synthetic, so all of them
+should pass on the first run.
+
+**Every timing in this file and in the log is komodo's, and none of it
+transfers.** Not the milliseconds, and *not the ratios either*, which is the
+part that is easy to get wrong. The G6 is reported to pair with LPDDR5X-8533
+against the G4's LPDDR5X-4200 — roughly twice the memory bandwidth, against a
+much smaller gain in the cores. Read that against what this project has just
+measured:
+
+- **The prepass fold wins by removing traffic**, 225 MB down to 75 MB, and the
+  entry above records that it already beats neither the traffic model nor the
+  extrapolation — the arithmetic underneath is showing. Double the bandwidth and
+  1.36-1.45x shrinks. It cannot reverse, since one sweep cannot cost more than
+  three, but the prize is a property of the machine.
+- **The next fold is worth less than it looks, there.** It is justified by taking
+  another 100 MB of traffic out. Price it on the phone it will run on.
+- **The twelve negative results are device-scoped too.** The per-pixel tail was
+  found latency-bound on a G4. Wider cores could make one or two of those
+  peepholes live again — which is a reason to re-run the ablations before
+  believing the conclusion, not a reason to assume they changed.
+
+**Do not delete the old phone's baseline, and do not mix the two.** Run the full
+suite on komodo one more time before it goes, and keep it long enough to run the
+same suite on the new one. The rule that has cost this project the most time is
+setting a figure from one run beside a figure from another; a change of phone is
+that mistake with a hardware step in the middle.
+
+**First day, in this order:**
+
+1. `adb shell am instrument -w dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner`
+   — 124 tests. Correctness first, before anything is measured.
+2. Take a shot and read the `ZSL` decision out of logcat. **This is the one real
+   functional risk:** if the new sensor or ISP has no zero-stall `RAW_SENSOR`
+   configuration, `ZslDecision.Fallback` says so in words and the app drops to
+   sequential capture. It degrades rather than breaks, but zero shutter lag is
+   the feature.
+3. Read `develop:` out of the same capture and write down what a photograph
+   costs on this phone. That is the new baseline; the old one is history.
+4. Re-run `ShadingSpeedDeviceTest` and `ToneAblationDeviceTest`. Their A/As come
+   first, as always, and on an unfamiliar machine they matter more rather than
+   less.
+5. Look at the control row. **Six, because a phone shows six** was judged by eye
+   on a 6.8" screen; this one is 6.3" and 1280 px across. The number may still
+   be six. It should be looked at rather than inherited.
 
 ## What needs you rather than me
 
