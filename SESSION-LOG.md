@@ -2865,6 +2865,71 @@ capture path `demosaic+tone` reads 96-130 ms, on a phone at 38.9 C and 50%
 battery whose other stages are all reading half again what a rested one gives —
 which is why that figure is written down and not compared with any other entry's.
 
+## The desaturation, which turned out not to have a cost you can point at
+
+`renderLinear`'s highlight desaturation had come up level with the roll-off —
+1.17 to 1.25x of `demosaic+tone`, 13 to 16 rounds of 16 in every run since the
+demosaic was vectorised. It looked like the same job as the roll-off: a block
+behind a data-dependent branch, with a divide in it.
+
+It is not. Four things were tried, each one measured against the shipping form
+in the same binary, and **none of them is where the time goes**.
+
+    the second three-way maximum, removed    55 of 96 rounds   nothing
+    the divide, swapped for a multiply       28 of 48 rounds   nothing
+    the tone parameters kept in a local      30 of 48 rounds   p = 0.06
+    the branch, made arithmetic              7 of 48 rounds    1.13x WORSE
+
+### What each one was, and why it looked promising
+
+**The maximum was free for the taking.** The desaturation wants `max(r, g, b)`
+*after* the roll-off has scaled all three, and that value is already known: the
+three were multiplied by one positive number, and IEEE multiplication is
+monotone, so the largest of the products is the product of the largest. An
+identity, not an approximation. Removing the second three-way maximum in the
+function changed nothing measurable.
+
+**The divide was the roll-off's story.** There, swapping the exponential for
+something cheaper was worth 1.15 to 1.21x and pointed straight at the table that
+followed. Here the same probe — `desatStart / scenePeak` replaced by a multiply,
+everything else kept — is 28 rounds of 48, which is a coin flip. **That is worth
+knowing before building a table, not after**: a table on the scene peak would
+have removed a divide that costs nothing and added a lookup that does not.
+
+**The parameters are read through a reference while the loop writes through a
+`uint8_t*`**, which may under the aliasing rules point at anything, so the
+compiler must assume the exposure gain and both desaturation parameters have
+changed and reload them every pixel. Copying them into a local it can see is one
+line. 30 of 48 rounds, p = 0.06 — not enough to keep.
+
+**And the branch is load-bearing.** Below `desaturationStart` the mix works out
+to zero and the blend is a no-op, so the test can be arithmetic instead. Made
+branchless it is **1.13x slower**, 41 rounds of 48 against it — the same shape,
+and the same size, as when the roll-off's branch was dropped for exactly the same
+reason. Twice now.
+
+### The finding is about the harness as much as the code
+
+The harness has said since the day it was written that **ablation differences are
+subtractions and subtractions do not have to add up** — that removing an item
+lets the machine rearrange what is left, so a part's cost is what removing it
+saves and not what it would cost alone. That was a caveat in a comment. This is
+the first time it has bitten.
+
+Removing the whole block saves a fifth of the pass. Removing any of its parts
+saves nothing at all. Both are true, and what they mean together is that the
+block's cost is the block: a dependent chain that the pixels below the threshold
+skip entirely and the pixels above pay in full, with nothing in it slack enough
+for the machine to hide.
+
+**So the desaturation is left alone**, and all four experiments are reverted —
+which makes ten this log has backed out rather than kept on faith, four of them
+in this one sitting. What is
+worth having is written down here so that the next person does not build the
+table: the divide is not the cost.
+
+359 unit tests pass. 121 device tests pass.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a

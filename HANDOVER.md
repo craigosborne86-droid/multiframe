@@ -112,10 +112,12 @@ Six rules, all of them earned rather than assumed, and worth keeping:
 - **Third-party code is a last resort, and there is exactly one piece of it.**
   libjpeg-turbo is vendored under `cpp/third_party/`, pinned to the framework
   encoder's output rather than to a Kotlin reference, because it cannot be.
-- **Negative results are recorded and reverted**, not kept on faith. Four
-  experiments have been backed out this way: a lower-priority DNG writer thread,
-  disabling filtering on the rotation, aligning natively inside the merge
-  benchmark, and interleaving the merge's two accumulation planes.
+- **Negative results are recorded and reverted**, not kept on faith. Ten so far:
+  a lower-priority DNG writer thread, disabling filtering on the rotation,
+  aligning natively inside the merge benchmark, interleaving the merge's two
+  accumulation planes, the inline exponential (which later turned out to be a
+  false negative from the broken harness), `__restrict` on the develop's input
+  and output, and four separate attacks on the desaturation in one sitting.
 
 A recurring lesson, hit five times now: a single reported figure often bundles
 two very different things. Splitting the timer before optimising found that
@@ -155,10 +157,17 @@ roll-off was tabulated:
     everything after the demosaic     2.36x   16 of 16
     the colour matrix, the display table       below the floor
 
-**The rendering curve is the largest item again**, and the desaturation has come
-up level with the roll-off after three sessions below the floor. Both sit behind
-the same kind of data-dependent branch and would want the treatment the roll-off
-got.
+**The rendering curve is the largest item again.** The desaturation came up
+level with the roll-off and looked like the same job — a block behind a
+data-dependent branch with a divide in it. **It is not, and four experiments say
+so:** its second three-way maximum is free to remove and buys nothing (55 of 96
+rounds), its divide is not the cost (28 of 48), keeping the tone parameters in a
+local against the `uint8_t*` aliasing barrier is marginal (30 of 48, p = 0.06),
+and making its branch arithmetic is **1.13x worse** (7 of 48).
+
+Removing the whole block saves a fifth of the pass; removing any part of it saves
+nothing. **Do not build a table for the divide** — that was the roll-off's story
+and the probe that justified it there comes back a coin flip here.
 
 **Read those as shares, not as costs.** The colour matrix was under the floor,
 then 1.09-1.25x with 57 of 64 rounds, then under the floor again, without the
