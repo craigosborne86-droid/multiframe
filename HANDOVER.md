@@ -43,11 +43,10 @@ changes* at the end. No Play Store, no other devices, no release paperwork —
 deferred by the owner's decision, and nothing in the current work depends on any
 of it.
 
-Everything builds. **359 unit tests pass.** The device suite is **128 tests**,
-of which 124 were last seen green in one clean run (`d40f7fd`, see
-[BASELINE.md](BASELINE.md)); the four `GpuCrossingDeviceTest` cases pass standing
-alone and inside a suite run that the phone's battery cut short. **Run the full
-128 on a charged phone before believing anything here.** The capture consistency check fails once the phone
+Everything builds. **359 unit tests pass**, and **128 of 128 device tests pass in
+a clean full suite** — see [BASELINE.md](BASELINE.md), which holds two readings
+of this phone taken a day apart and shows them agreeing on every ratio while
+differing by more than twice in absolute milliseconds. The capture consistency check fails once the phone
 is short of memory, which is device state and not a regression — see the
 measurement rules below. The build on the phone is current HEAD.
 
@@ -59,7 +58,7 @@ Recent work, newest first:
 
 - **the develop's three preparatory passes are one pass.** `black`, `hotpixels`
   and `shading` fold into a single sweep that reads the merged `uint16` and
-  writes the plane once: 1.36-1.45x of the three, 155 of 160 rounds. Hot pixel
+  writes the plane once: 1.36-1.52x of the three, 192 of 200 rounds. Hot pixel
   detection moved into the raw domain, which is exact once the clamp at the
   black level is carried as `max(code, black)` — it is not exact without it
 - **a race in `suppressHotPixels` is fixed**, which had made the develop not
@@ -194,8 +193,8 @@ At the end of a measuring session, 48% and 38 C, with the fold in:
 **Those two lines are not comparable and subtracting them is the mistake this
 log has made before.** The same three passes read 76-85 ms in `nPrepassBench`
 last session and 94-117 ms in it today; the phone, not the code, is most of the
-difference. What transfers is the paired ratio: the fold is 1.36-1.45x of the
-three, 155 of 160 rounds, measured inside one binary in one process.
+difference. What transfers is the paired ratio: the fold is 1.36-1.52x of the
+three, 192 of 200 rounds, measured inside one binary in one process.
 
 The same phone four hours into a session of measuring reads roughly twice
 everything. Do not mix the two, and do not compare either with the 38 ms shading
@@ -278,7 +277,7 @@ way past, and writes the plane once:
 
     three passes   median 102, 117, 94, 91 ms
     one pass       median  75,  81, 69, 66 ms
-    the fold       1.36 - 1.45x     155 of 160 rounds
+    the fold       1.36 - 1.52x     192 of 200 rounds
 
 Four things are worth knowing before touching it.
 
@@ -320,9 +319,10 @@ shader too cheap to matter, 50 MB of RGBA out. On komodo, forty rounds:
     staging   37ms      shared (uncached)  36ms
     cached    10ms      imported            7ms
 
-**Against a develop of 112-199 ms, the cheapest crossing is 6-7 ms** — so on
-that phone the crossing is not what would make a GPU develop lose. Three things
-to carry rather than re-derive:
+**The cheapest crossing is 7 ms against a develop of 112-199 ms on a rested
+phone, and 16 ms against 152-279 ms on a warm charging one** — the same 5-6%
+either way, which is the point. So on that phone the crossing is not what would
+make a GPU develop lose. Three things to carry rather than re-derive:
 
 - **It says nothing about whether a GPU develop would be faster.** The dispatch
   is a floor and a real kernel is added to it. This closes the question only in
@@ -539,7 +539,7 @@ measured:
 - **The prepass fold wins by removing traffic**, 225 MB down to 75 MB, and the
   entry above records that it already beats neither the traffic model nor the
   extrapolation — the arithmetic underneath is showing. Double the bandwidth and
-  1.36-1.45x shrinks. It cannot reverse, since one sweep cannot cost more than
+  1.36-1.52x shrinks. It cannot reverse, since one sweep cannot cost more than
   three, but the prize is a property of the machine.
 - **The next fold is worth less than it looks, there.** It is justified by taking
   another 100 MB of traffic out. Price it on the phone it will run on.

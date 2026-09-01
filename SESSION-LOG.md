@@ -3198,11 +3198,11 @@ be careful about turned out to be the thing that removes the hazard.
 
     black + hotpixels + shading   median 102, 117, 94, 91 ms
     one pass                      median  75,  81, 69, 66 ms
-    the fold                      1.36 - 1.45x     155 of 160 rounds
+    the fold                      1.36 - 1.52x     192 of 200 rounds
 
 `nPrepassBench` now holds the three passes in one slot and the fold in the other,
 alternates them within a round, and compares the two planes every round. Its A/A
-runs the fold in both slots: 21, 18, 21 and 20 of 40, ratio 1.01x, 0.98x, 1.03x and 1.01x
+runs the fold in both slots five times: 21, 18, 21, 20 and 20 of 40, ratio 1.01x, 0.98x, 1.03x, 1.01x and 1.00x
 — a fair instrument, and the same plane every time, bit for bit, which is the
 race fix showing up as a property rather than as an argument.
 
@@ -3218,7 +3218,7 @@ above this. So would dropping the clamp.
 Three passes move about 225 MB and the fold moves 75 MB, which would be 3x if
 these stages were pure traffic. Folding one was 1.25-1.29x, which fits a fixed
 cost plus a per-sweep cost and predicts 1.74x for folding all three. The measured
-1.36-1.45x beats neither model.
+1.36-1.52x beats neither model.
 
 The fused sweep is a fatter sweep: it reads five `uint16` per interior pixel,
 does the shading interpolation, and converts three values where the black pass
@@ -3286,7 +3286,9 @@ routes, forty rounds, paired and alternated like everything else here.
     cached      21ms      3ms       4ms        6ms       10ms
     imported    17ms      2ms       3ms        4ms        7ms
 
-**Against a develop of 112-199 ms, the cheapest crossing is 6-7 ms.** On this
+**Against a develop of 112-199 ms, the cheapest crossing is 7 ms** — and 16 ms
+against a develop of 152-279 ms when the same benchmark was re-run the next
+morning on a warm, charging phone. The same 5-6% of the pass either way. On this
 phone the crossing is not what would make a GPU develop lose. That is the whole
 claim, and it is deliberately one-directional: the dispatch above is a floor, any
 real kernel is added to it, and nothing here says a GPU develop would be faster.
@@ -3345,11 +3347,15 @@ harness nobody has run is not evidence, and because the Pixel 11 Pro's reported
 doubling of memory bandwidth acts on the download — which this says is the entire
 cost. Re-run it there before quoting any of it.
 
-359 unit tests pass. The four tests above pass standing alone and again inside
-a suite run — but **that suite did not finish**: the phone ran out of battery
-inside `ShadingSpeedDeviceTest`, about a hundred tests in, with nothing failed to
-that point. The device count is 128 and 128 has not yet been seen green in one
-run. Re-run it on a charged phone before quoting it.
+359 unit tests pass. **128 of 128 device tests pass in a clean full suite**, on
+a phone charging from flat at 38 C the morning after.
+
+That run is worth one more note, because it makes this file's oldest rule
+concrete. Every absolute figure in it is roughly twice the previous day's — the
+GPU round trip 16 ms against 7, the develop 152-279 ms against 112-199 — and
+every ratio agrees: the fold 1.52x against 1.42x, importing 3.77x against 4.01x,
+40 of 40 rounds both times. **Warm and charging is a different instrument from
+rested, and only one half of what it reports survives the difference.**
 
 ## Outstanding for release
 
