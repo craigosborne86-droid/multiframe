@@ -4,6 +4,35 @@ A short brief for picking this up in a fresh session. Delete it once it has
 served its purpose; [SESSION-LOG.md](SESSION-LOG.md) is the real record and
 holds the reasoning behind everything below.
 
+## Start here: fold the develop's three preparatory passes
+
+**This is the agreed next task**, decided at the end of the last session. The
+design, the numbers and the caveats are in *Fewer passes, which is priced and
+not yet built* below — read that section before writing anything. In short:
+
+1. **Fix the race in `suppressHotPixels` first.** It reads rows y±2 while
+   writing row y, and at a band's last two rows those reads land in the next
+   band. The develop is not deterministic today, and everything else here
+   assumes it is.
+2. **Then fold.** Two shapes are written up: a two-row-lag pipeline with a halo
+   at each band edge, or moving hot-pixel detection into the raw `uint16`
+   domain, which is free algebraically because ±2 preserves CFA parity. The
+   second is cleaner if its one caveat holds — check the `max(...,0)` clamp
+   below the black level.
+3. **The prize is measured, not guessed:** folding one of the three is worth
+   1.25-1.29x of the three, 57 of 60 rounds. `nPrepassBench` is already in the
+   binary and is how to check the real fold when it exists.
+
+Before starting, confirm a green baseline on a **rested, charged** phone:
+
+```bash
+adb shell am instrument -w dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+122 tests should pass. If `repeatedCapturesTakeAConsistentTime` fails, check
+`/proc/meminfo` and the battery before suspecting the code — see the measurement
+rules.
+
 ## Where things stand
 
 **The target is one phone: a Pixel 9 Pro XL.** No Play Store, no other devices,
