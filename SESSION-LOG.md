@@ -2599,6 +2599,84 @@ Settled shots, 4080x3072, 36 C. Not comparable with the 38 ms shading or the
 359 unit tests pass. 119 device tests pass on the phone — a clean full suite,
 which this log has not been able to record before.
 
+## The roll-off, tabulated: the first approximation in the render
+
+The ablation harness had named the target and costed it: `renderLinear` was 1.9
+to 2.5x of `demosaic+tone`, its highlight roll-off 1.44 to 1.6x of that, and the
+exponential inside the roll-off 1.15 to 1.21x. `shoulderCurve(p, knee) / p` is a
+pure function of one float. So it becomes a table, built per capture the way
+`buildDisplayLut` already builds one.
+
+**This is the first approximation in the render, and it was the owner's call
+rather than mine.** Everything else in this pipeline is either exact or pinned
+to a reference. `DisplayLut` collapses the same kind of chain into a table and
+is *exact* — its own comment says that is the only reason it was worth doing —
+because `encodeSrgb` had already quantised its input to the index the table is
+addressed by. The scene peak has not been quantised by anything. No such
+argument was available here, so what is offered instead is a measured bound.
+
+### The bound
+
+    265 of 50,135,040 bytes differ, and every one of them by a single code
+
+Twelve and a half megapixels rendered both ways in one process, every channel
+compared. Five bytes in a million, one code each.
+
+**Identical is the wrong bar, and it took the measurement to see why.** The
+table's scale is out by around 2e-7. `DisplayLut` bins the linear value into
+4096, so a byte can differ only where a pixel happened to land within 2e-7 of a
+bin boundary — and nothing bounds how close a pixel can land, so no refinement
+of the table removes those. The test asserts the shape of the error instead: no
+byte more than one code out, and fewer than one byte in a hundred thousand out
+at all.
+
+### What it bought
+
+    the table against the arithmetic, bright scene   1.13x   15 of 16 rounds
+    the same, from the ablation table                1.18x    1 of 16 against
+    the table against the arithmetic, dark scene     1.01x    9 of 16 — nothing
+
+And the ablations, before and after:
+
+    renderLinear          1.9 - 2.5x  ->  1.42 - 1.51x
+    its highlight roll-off  1.44 - 1.6x  ->  1.10x
+
+### Two predictions, both written into the code, both wrong within the hour
+
+**Nearest entry rather than interpolated.** The comment argued that at 4096
+cells two neighbours differ by well under a display code, so a lerp would buy
+accuracy the 8-bit output could not carry. Measured: 892,955 bytes out of a
+render, and the native-versus-Kotlin parity went from two codes to three, which
+is a failing test. The reason is the `DisplayLut` binning above — truncating a
+table on a curve is first order in the cell, about 6e-4 here, which is twice a
+bin. Interpolating makes it second order, some 2e-7. One extra load off the same
+cache line and one fma took 892,955 differing bytes to 265.
+
+**Read the table unconditionally and lose the branch.** The ablations had shown
+that a scene with 1% of the frame above the knee could not be separated from one
+that skipped the roll-off entirely, and that was read as *the branch being taken
+is the cost*. Backwards: what is expensive is the **body**, and skipping it is
+precisely why the dark scene paid nothing. Branchless made that frame **0.89x**,
+14 rounds of 16 against it — a regression, caught because the harness runs the
+comparison at two exposures.
+
+Putting the branch back and tabulating only the body gives 1.13x on the bright
+scene and 1.01x on the dark one, which is the right shape: faster where there is
+work to do, unchanged where there is not.
+
+### What that says about the instrument
+
+Neither of these would have been visible before this session. The first is a
+sub-code error found by rendering twelve megapixels twice in one process; the
+second is a 0.89x regression on a scene the harness only measures because an
+earlier entry made it print the share of the frame above the knee beside every
+figure. **The three sessions of harness work paid for themselves inside one
+change**, twice, in the space of an hour.
+
+359 unit tests pass. 120 device tests pass on the phone, a clean full suite.
+Develop on that phone: black 15-23ms, hotpixels 17-28ms, shading 20-32ms,
+demosaic+tone 113-141ms.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a

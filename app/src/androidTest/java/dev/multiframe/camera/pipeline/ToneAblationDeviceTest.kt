@@ -87,13 +87,23 @@ class ToneAblationDeviceTest {
             "renderLinear" to ToneAblation.NO_RENDER,
             "its roll-off" to ToneAblation.NO_SHOULDER,
             "its desaturation" to ToneAblation.NO_DESAT,
-            "the exponential, for a reciprocal" to ToneAblation.NO_EXP,
+            "the roll-off's table, for the arithmetic" to ToneAblation.EXACT_SHOULDER,
+            "of the computed roll-off, its exponential" to ToneAblation.NO_EXP,
             "everything after the demosaic" to ToneAblation.NONE,
         )
 
+        // NO_EXP is measured against the computed roll-off rather than the
+        // shipping one. It swaps the exponential for a reciprocal *inside* the
+        // computed path, so setting it beside the table would be comparing two
+        // changes at once -- and would read as the exponential costing less
+        // than nothing, which is what it did the first time it was run this way.
+        val against = { v: Int ->
+            if (v == ToneAblation.NO_EXP) ToneAblation.EXACT_SHOULDER else ToneAblation.FULL
+        }
+
         var everythingWins = 0
         for ((label, variant) in named) {
-            val raw = bench(ToneAblation.FULL, variant, ROUNDS)
+            val raw = bench(against(variant), variant, ROUNDS)
             assertThat(raw).isNotNull()
             val run = Run(raw!!)
             Log.i(
@@ -115,6 +125,48 @@ class ToneAblationDeviceTest {
     }
 
     /**
+     * The table renders the same photograph as the arithmetic it replaced.
+     *
+     * This is the first approximation in the render. `DisplayLut` collapses the
+     * same kind of chain into a table and is exact, because its input had
+     * already been quantised to the index the table is addressed by; the scene
+     * peak has not, so the roll-off's table is a rounding of a curve and no
+     * argument from exactness is available.
+     *
+     * What is available is a measurement, and it has to be the one that matters:
+     * not the error in the scale, which nobody looks at, but the bytes of the
+     * photograph. Twelve and a half megapixels rendered both ways, every channel
+     * of every pixel compared.
+     *
+     * **Identical is the wrong bar and it took a measurement to see why.** With
+     * the table interpolated the scale is out by around 2e-7, three orders below
+     * the 1/4096 bin `DisplayLut` sorts the linear value into -- so a byte can
+     * only differ where a pixel happened to sit within 2e-7 of a bin boundary,
+     * and no refinement of the table removes those, because nothing bounds how
+     * close a pixel can land. 266 bytes of 50 million do, every one of them by
+     * a single code. So the assertion is the shape of the error rather than its
+     * absence: **no byte more than one code out, and fewer than one byte in a
+     * hundred thousand out at all.** Both would break loudly if the table were
+     * ever mis-built, which is what a test is for.
+     */
+    @Test
+    fun theRollOffsTableRendersTheSamePhotographAsTheArithmetic() {
+        assertThat(NativeMerge.isAvailable()).isTrue()
+        val raw = bench(ToneAblation.FULL, ToneAblation.EXACT_SHOULDER, 2)
+        assertThat(raw).isNotNull()
+        val run = Run(raw!!)
+        val total = width.toLong() * height * 4
+        Log.i(
+            TAG,
+            "tabulated against computed: %d of %d bytes differ, worst by %d".format(
+                run.differing, total, run.worstByte,
+            ),
+        )
+        assertThat(run.worstByte).isAtMost(1L)
+        assertThat(run.differing).isLessThan(total / 100_000)
+    }
+
+    /**
      * The roll-off's price is a property of the photograph, not of the code.
      *
      * `renderLinear`'s work sits behind `if (scenePeak > knee)`, so what it
@@ -128,28 +180,41 @@ class ToneAblationDeviceTest {
     fun whatTheRollOffCostsDependsOnHowBrightTheSceneIs() {
         assertThat(NativeMerge.isAvailable()).isTrue()
         for (gain in listOf(3.5f, 1.1f)) {
-            val raw = bench(ToneAblation.FULL, ToneAblation.NO_RENDER, ROUNDS, gain)
-            assertThat(raw).isNotNull()
-            val run = Run(raw!!)
+            val cost = Run(bench(ToneAblation.FULL, ToneAblation.NO_RENDER, ROUNDS, gain)!!)
             Log.i(
                 TAG,
                 ("at gain %.1f, %s%% of the frame is above the knee: " +
                     "renderLinear costs %.2fx, %d of %d rounds (full %s)").format(
-                    gain, run.aboveKneePercent(), run.ratio(),
-                    run.wins(), ROUNDS, run.describe(run.a),
+                    gain, cost.aboveKneePercent(), cost.ratio(),
+                    cost.wins(), ROUNDS, cost.describe(cost.a),
                 ),
             )
+
+            // The table is read unconditionally where the arithmetic sat behind
+            // `if (p > knee)`, so a frame with nothing above the knee now pays
+            // for a lookup it used to skip. That is the one way this change
+            // could have made something worse, and it is cheap to check.
+            val bought = Run(bench(ToneAblation.FULL, ToneAblation.EXACT_SHOULDER, ROUNDS, gain)!!)
+            Log.i(
+                TAG,
+                "  and the table is worth %.2fx there, winning %d of %d rounds".format(
+                    1.0 / bought.ratio(), ROUNDS - bought.wins(), ROUNDS,
+                ),
+            )
+            // Never slower, at either end of the range of scenes.
+            assertThat(bought.wins()).isAtMost(ROUNDS / 2)
         }
         DeviceKind.warnIfNotAPhone(TAG)
     }
 
     /** One call's worth of results: two slots per round, then two summaries. */
     private inner class Run(raw: LongArray) {
-        private val rounds = (raw.size - 2) / 2
+        private val rounds = (raw.size - 3) / 2
         val a = LongArray(rounds) { raw[it * 2] }
         val b = LongArray(rounds) { raw[it * 2 + 1] }
         val differing = raw[rounds * 2]
         private val aboveKnee = raw[rounds * 2 + 1]
+        val worstByte = raw[rounds * 2 + 2]
 
         fun median(v: LongArray) = v.sorted()[v.size / 2]
 

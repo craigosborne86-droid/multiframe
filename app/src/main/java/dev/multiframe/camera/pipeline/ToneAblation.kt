@@ -42,4 +42,12 @@ object ToneAblation {
      * of it could hope to recover. Renders a wrong picture on purpose.
      */
     const val NO_EXP = 7
+
+    /**
+     * The roll-off computed per pixel rather than read from the table, which is
+     * what shipped until the table replaced it. Not an ablation: it renders the
+     * same picture the slow way, so timing it against [FULL] is what the table
+     * bought, and comparing the two outputs is what it cost.
+     */
+    const val EXACT_SHOULDER = 8
 }

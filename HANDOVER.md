@@ -10,10 +10,8 @@ holds the reasoning behind everything below.
 no release paperwork — deferred by the owner's decision, and nothing in the
 current work depends on any of it.
 
-Everything builds. **359 unit tests pass**, and **119 device tests** pass on the
-phone — a clean full suite, which this log had not previously recorded: the
-consistency check that failed four runs in a row turned out not to be flaky at
-all. The build on the phone is current HEAD, md5 verified.
+Everything builds. **359 unit tests pass**, and **120 device tests** pass on the
+phone, in a clean full suite. The build on the phone is current HEAD, md5 verified.
 
 The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
 in about a second and writes a DNG and a JPEG to the gallery, and the status
@@ -21,6 +19,11 @@ line says what the merge bought: `8 frames · 91% kept`.
 
 Recent work, newest first:
 
+- **the highlight roll-off is a table now**, worth 1.13-1.18x of `demosaic+tone`
+  on a bright frame and nothing on a dark one, at one display code on five bytes
+  in a million. It is **the first approximation in the render** — everything
+  else here is exact or pinned to a reference — so the bound is asserted at
+  capture size rather than argued
 - **`repeatedCapturesTakeAConsistentTime` failed four times and none of them
   were thermal.** It was the MediaStore publish, which quadruples across four
   shots on a 90%-full volume while the pipeline settles. The test drops a
@@ -135,17 +138,18 @@ those. Do not mix the two, and do not compare either with the 38 ms shading or
 the 146 ms `demosaic+tone` in older entries.
 
 `ToneAblationDeviceTest` takes that last figure apart by running the whole pass
-with one item removed. As paired ratios, which are what transfer:
+with one item removed. As paired ratios, which are what transfer, after the
+roll-off was tabulated:
 
-    everything after the demosaic     2.2 - 3.0x     16 of 16, every run
-    renderLinear                      1.9 - 2.5x     16 of 16, every run
-      its highlight roll-off          1.44 - 1.6x    16 of 16, every run
-      the exponential inside it       1.15 - 1.21x   52 of 64 rounds pooled
+    everything after the demosaic     1.9 - 2.0x     16 of 16, every run
+    renderLinear                      1.42 - 1.51x   16 of 16, every run
+      its highlight roll-off          1.10x          14 of 16
     the colour matrix, the display table, the desaturation   below the floor
 
-**The rendering curve is the cost.** The demosaic is under half the pass, and
-the three items anyone would name first are all smaller than the harness
-resolves in sixteen rounds.
+Before the table those read 2.2-3.0x, 1.9-2.5x and 1.44-1.6x. **The rendering
+curve was the cost and is now much less of it.** The demosaic is the larger half
+again, and the three items anyone would name first are still all smaller than
+the harness resolves in sixteen rounds.
 
 **The roll-off's price belongs to the photograph, not the code.** Its work sits
 behind `if (scenePeak > knee)`: at 82% of the frame above the knee `renderLinear`
@@ -158,29 +162,33 @@ put the colour matrix at 1.11x, 1.05x, 1.13x and 1.04x with win counts of 16, 11
 9 and 8 — one real reading and three coin flips. Below that floor, raise the
 rounds or shrink the enclosing pass; do not read the ratio.
 
-### The move that is now identified and costed
+### That move is done, and here is what it cost
 
-Replace the roll-off's `std::exp`, or better, replace
-`shoulderCurve(p, knee) / p` outright with a table on `p` built per capture the
-way `buildDisplayLut` already builds one — that kills the call and the divide
-together. The ceiling is the 1.44-1.6x the whole roll-off is worth; the
-exponential alone is 1.15-1.21x of it.
+`ShoulderLut` is built per capture beside `DisplayLut` and the branch that
+guards it stays. Two things to know before touching it:
 
-**It would be the first approximation in the render, and that is the decision to
-put to the owner rather than slip in.** Everything in this pipeline so far is
-either exact or pinned to a reference; `DisplayLut` makes a point of being exact
-and explains why that is the only reason it was worth doing. A table on a
-continuous input cannot be. A 4096-entry interpolated table is accurate to about
-1e-6, four orders below a display code, so the picture would not change — but
-the *kind* of claim this pipeline makes would.
+- **It is interpolated, and has to be.** `DisplayLut` bins the *linear* value
+  into 4096, so a scale that is out by a few ten-thousandths moves a bright
+  pixel across a bin. Truncating a table on a curve is first order in the cell,
+  about 6e-4 here — twice a bin. Nearest-entry put 892,955 bytes of a render one
+  code out and broke the parity test at three codes. Interpolated it is 265.
+- **The branch is not redundant.** Reading the table unconditionally — which is
+  correct, since it answers 1 below the knee — cost a dark frame 0.89x, 14 of 16
+  rounds. What is expensive is the body, not the test.
 
-Note also that this log's earlier "replacing the exponential changed nothing"
-was a false negative from the broken harness, so do not take it as evidence.
+`ToneAblationDeviceTest` asserts both: the render against the arithmetic at
+capture size, and that the table is never slower at either end of the range of
+scenes.
 
-Do not start by assuming the demosaic is the cost. Five assumptions about where
-develop time goes have been wrong here: the JPEG encode, the sharpening, the
-exponential, that a rearrangement would come back identical, and that the
-demosaic was the expensive half of the pass named after it.
+Do not start by assuming anything here. Seven predictions about this pass have
+been wrong: the JPEG encode, the sharpening, the exponential, that a
+rearrangement would come back identical, that the demosaic was the expensive
+half of the pass named after it, that a table would not need interpolating, and
+that the branch guarding the roll-off was its cost. The last two were written
+into the code as comments and refuted within the hour by the harness.
+
+**The demosaic is the larger half now.** It is five-by-five gathers, thirteen
+neighbours and three branches a pixel, and nothing has been tried on it.
 
 ## How to measure
 

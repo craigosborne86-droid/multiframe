@@ -266,8 +266,9 @@ class NativeMerge private constructor(
          * one process and paired within a round. See [ToneAblation].
          *
          * Returns `[a, b]` per round in microseconds, then the bytes on which
-         * the two outputs disagreed -- meaningful only for an A/A -- then how
-         * many pixels of the harness's scene landed above the knee.
+         * the two outputs disagreed, then how many pixels of the harness's
+         * scene landed above the knee, then the largest of those byte
+         * disagreements.
          */
         internal fun toneBench(
             width: Int,

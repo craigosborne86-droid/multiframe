@@ -679,15 +679,92 @@ struct ToneParams {
     float blackPoint = 0.012f;
 };
 
+
+/**
+ * The highlight roll-off as a table on the scene peak.
+ *
+ * `shoulderCurve(p, knee) / p` is a pure function of one float, evaluated once
+ * per pixel behind `if (p > knee)`, and the ablation harness put that branch at
+ * 1.44 to 1.6x of the whole `demosaic+tone` pass -- the largest single item in a
+ * capture. Not the exponential inside it, which is worth 1.15 to 1.21x on its
+ * own: the whole body, since the same pass over a scene with 1% of the frame
+ * above the knee could not be separated from one that skipped the roll-off
+ * entirely. So the body becomes a lookup and the branch that guards it stays --
+ * see `renderLinearParts` for what happened when it did not.
+ *
+ * **This is the first approximation in the render, and the difference from
+ * DisplayLut is the point.** That one collapses the same kind of chain into a
+ * table and is *exact*, because `encodeSrgb` had already quantised its input to
+ * the very index the table is addressed by; its comment says that is the only
+ * reason it was worth doing. There is no such argument here. The scene peak is a
+ * continuous float and a table on it is a rounding of the curve, so what can be
+ * offered instead of exactness is a measured bound:
+ * `ToneAblationDeviceTest` renders twelve and a half megapixels both ways and
+ * requires every byte to agree.
+ *
+ * Interpolated between entries, which the first version of this was written
+ * without -- on the argument that at 4096 cells two neighbours differ by well
+ * under a display code, so a lerp would buy accuracy the 8-bit output could not
+ * carry. Measured, that was wrong: nearest-entry put 1.8% of the bytes of a
+ * twelve-megapixel render one code away from the arithmetic, and pushed the
+ * native-versus-Kotlin parity from two codes to three.
+ *
+ * The reason is `DisplayLut` on the other side. It bins the *linear* value into
+ * 4096, so a scale that is off by a few ten-thousandths moves a bright pixel
+ * across a bin boundary, and the truncation error of a table on a curve is
+ * first order in the cell -- around 6e-4 here. Interpolating makes it second
+ * order, some 2e-7, which is three orders below a bin. One extra load off the
+ * same cache line and one fma, for a render that is identical byte for byte.
+ *
+ * Above `pMax` the exponential has saturated -- `knee + headroom` to within a
+ * float's last place -- and the curve is a plain reciprocal. That is computed
+ * rather than tabulated, because it is unbounded above and because a specular
+ * highlight is rare enough that the branch predicts.
+ */
+struct ShoulderLut {
+    static constexpr int kSize = 4096;
+    float scale[kSize];
+    float knee = 0.0f;
+    float pMax = 1.0f;
+    float indexScale = 0.0f;
+
+    float operator()(float p) const {
+        if (p >= pMax) return shoulderCurve(p, knee) / p;
+        const float x = p * indexScale;
+        const int i = static_cast<int>(x);
+        // p < pMax puts x below kSize - 1, so i + 1 is always in bounds.
+        return scale[i] + (scale[i + 1] - scale[i]) * (x - static_cast<float>(i));
+    }
+};
+
+void buildShoulderLut(ShoulderLut& lut, const ToneParams& t) {
+    const float headroom = 1.0f - t.knee;
+    // Sixteen headrooms past the knee, where exp(-16) is 1.1e-7 and the curve
+    // has reached its limit to within the last place of a float. Floored at 1
+    // so that a degenerate knee cannot produce an empty or inverted table; the
+    // reciprocal branch stays exact whatever the parameters are, so the only
+    // cost of getting this wrong would be speed.
+    lut.knee = t.knee;
+    lut.pMax = std::max(t.knee + 16.0f * std::max(headroom, 0.0f), 1.0f);
+    lut.indexScale = static_cast<float>(ShoulderLut::kSize - 1) / lut.pMax;
+    for (int i = 0; i < ShoulderLut::kSize; ++i) {
+        const float p = static_cast<float>(i) / lut.indexScale;
+        lut.scale[i] = (p > t.knee && p > 0.0f) ? shoulderCurve(p, t.knee) / p : 1.0f;
+    }
+}
+
 /**
  * Hue-preserving roll-off, then highlight desaturation, in linear light.
  *
  * A template only so that the ablation harness can leave one of the two halves
- * out; `renderLinear` below is the instantiation that ships, and it is the one
- * ToneCurveTest and the develop parity test hold to ToneCurve.kt.
+ * out, or reach the roll-off the slow way; `renderLinear` below is the
+ * instantiation that ships, and ToneCurve.kt is the reference the develop parity
+ * test holds it to -- within a tolerance now rather than exactly, because of the
+ * table above.
  */
-template <bool Shoulder, bool Desat, bool RealExp = true>
-inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t) {
+template <bool Shoulder, bool Desat, bool RealExp = true, bool Tabulated = true>
+inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t,
+                              const ShoulderLut& shoulder) {
     r = std::max(r, 0.0f);
     g = std::max(g, 0.0f);
     b = std::max(b, 0.0f);
@@ -697,9 +774,17 @@ inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t)
     const float scenePeak = std::max(r, std::max(g, b));
 
     if constexpr (Shoulder) {
+        // The branch stays. The first version of this dropped it -- the table
+        // answers 1 below the knee, so it can be read unconditionally -- on the
+        // reasoning that the ablations had shown the cost to be the branch being
+        // taken. Measured, that was reading it backwards: what is expensive is
+        // the *body*, and skipping it is why a frame with 1% above the knee had
+        // been indistinguishable from one that skipped the roll-off entirely.
+        // Branchless cost such a frame 0.89x, 14 rounds of 16 against it.
         if (scenePeak > t.knee) {
-            const float scale =
-                shoulderCurveParts<RealExp>(scenePeak, t.knee) / scenePeak;
+            const float scale = Tabulated
+                ? shoulder(scenePeak)
+                : shoulderCurveParts<RealExp>(scenePeak, t.knee) / scenePeak;
             r *= scale; g *= scale; b *= scale;
         }
     }
@@ -716,8 +801,9 @@ inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t)
     }
 }
 
-inline void renderLinear(float& r, float& g, float& b, const ToneParams& t) {
-    renderLinearParts<true, true>(r, g, b, t);
+inline void renderLinear(float& r, float& g, float& b, const ToneParams& t,
+                         const ShoulderLut& shoulder) {
+    renderLinearParts<true, true>(r, g, b, t, shoulder);
 }
 
 /**
@@ -1018,7 +1104,8 @@ enum ToneAblation {
     kToneNoShoulder = 5, // renderLinear without the highlight roll-off
     kToneNoDesat = 6,    // renderLinear without the highlight desaturation
     kToneNoExp = 7,      // the roll-off with its exponential taken out
-    kToneCensus = 8,     // as shipped, and counts which way the branches went
+    kToneExactShoulder = 8,  // the roll-off computed rather than tabulated
+    kToneCensus = 9,     // as shipped, and counts which way the branches went
 };
 
 /**
@@ -1034,6 +1121,7 @@ void demosaicAndTone(const float* plane, int width, int height,
                      uint8_t* dstBase, int stride,
                      const int* cfa, const float* m,
                      const ToneParams& tone, const DisplayLut& display,
+                     const ShoulderLut& shoulder,
                      std::atomic<long>* aboveKnee = nullptr) {
     parallelBands(height, [&](int y0, int y1) {
         float acc[3];
@@ -1137,13 +1225,15 @@ void demosaicAndTone(const float* plane, int width, int height,
                     if (std::max(r, std::max(g, b)) > tone.knee) ++overKnee;
                 }
                 if constexpr (Ablation == kToneNoShoulder) {
-                    renderLinearParts<false, true>(r, g, b, tone);
+                    renderLinearParts<false, true>(r, g, b, tone, shoulder);
                 } else if constexpr (Ablation == kToneNoDesat) {
-                    renderLinearParts<true, false>(r, g, b, tone);
+                    renderLinearParts<true, false>(r, g, b, tone, shoulder);
                 } else if constexpr (Ablation == kToneNoExp) {
-                    renderLinearParts<true, true, false>(r, g, b, tone);
+                    renderLinearParts<true, true, false, false>(r, g, b, tone, shoulder);
+                } else if constexpr (Ablation == kToneExactShoulder) {
+                    renderLinearParts<true, true, true, false>(r, g, b, tone, shoulder);
                 } else if constexpr (Ablation != kToneNoRender) {
-                    renderLinear(r, g, b, tone);
+                    renderLinear(r, g, b, tone, shoulder);
                 }
 
                 // RGBA_8888 is byte order R,G,B,A in memory.
@@ -1169,35 +1259,38 @@ void demosaicAndTone(const float* plane, int width, int height,
 void runToneVariant(int variant, const float* plane, int width, int height,
                     uint8_t* dst, int stride, const int* cfa, const float* m,
                     const ToneParams& tone, const DisplayLut& display,
-                    std::atomic<long>* aboveKnee) {
+                    const ShoulderLut& shoulder, std::atomic<long>* aboveKnee) {
     switch (variant) {
         case kToneNoMatrix:
             demosaicAndTone<kToneNoMatrix>(plane, width, height, dst, stride,
-                                           cfa, m, tone, display); break;
+                                           cfa, m, tone, display, shoulder); break;
         case kToneNoRender:
             demosaicAndTone<kToneNoRender>(plane, width, height, dst, stride,
-                                           cfa, m, tone, display); break;
+                                           cfa, m, tone, display, shoulder); break;
         case kToneNoDisplay:
             demosaicAndTone<kToneNoDisplay>(plane, width, height, dst, stride,
-                                            cfa, m, tone, display); break;
+                                            cfa, m, tone, display, shoulder); break;
         case kToneNone:
             demosaicAndTone<kToneNone>(plane, width, height, dst, stride,
-                                       cfa, m, tone, display); break;
+                                       cfa, m, tone, display, shoulder); break;
         case kToneNoShoulder:
             demosaicAndTone<kToneNoShoulder>(plane, width, height, dst, stride,
-                                             cfa, m, tone, display); break;
+                                             cfa, m, tone, display, shoulder); break;
         case kToneNoDesat:
             demosaicAndTone<kToneNoDesat>(plane, width, height, dst, stride,
-                                          cfa, m, tone, display); break;
+                                          cfa, m, tone, display, shoulder); break;
         case kToneNoExp:
             demosaicAndTone<kToneNoExp>(plane, width, height, dst, stride,
-                                        cfa, m, tone, display); break;
+                                        cfa, m, tone, display, shoulder); break;
+        case kToneExactShoulder:
+            demosaicAndTone<kToneExactShoulder>(plane, width, height, dst, stride,
+                                                cfa, m, tone, display, shoulder); break;
         case kToneCensus:
             demosaicAndTone<kToneCensus>(plane, width, height, dst, stride,
-                                         cfa, m, tone, display, aboveKnee); break;
+                                         cfa, m, tone, display, shoulder, aboveKnee); break;
         default:
             demosaicAndTone<kToneFull>(plane, width, height, dst, stride,
-                                       cfa, m, tone, display); break;
+                                       cfa, m, tone, display, shoulder); break;
     }
 }
 
@@ -1391,10 +1484,12 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     // would otherwise be writing the same table while reading it.
     DisplayLut display;
     buildDisplayLut(display, tone);
+    ShoulderLut shoulder;
+    buildShoulderLut(shoulder, tone);
 
     tDemosaic = nowMicros();
     demosaicAndTone<kToneFull>(plane.data(), width, height, dstBase, stride,
-                               cfa, m, tone, display);
+                               cfa, m, tone, display, shoulder);
 
     const int64_t tEnd = nowMicros();
     LOGI("develop: black %lldms, hotpixels %lldms, shading %lldms, demosaic+tone %lldms, total %lldms",
@@ -1531,8 +1626,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nShadingBench(
  * useful quantity but not the same as what it would cost on its own.
  *
  * `[a0, b0, a1, b1, ...]` in microseconds, then the bytes on which the two
- * outputs disagreed -- meaningful only when the two variants are the same one --
- * then how many pixels the census found above the knee.
+ * outputs disagreed, then how many pixels the census found above the knee, then
+ * the largest of those disagreements. The last is what matters when the two
+ * variants are two ways of computing the same picture rather than an ablation:
+ * it is the claim about what the faster way costs the photograph.
  */
 JNIEXPORT jlongArray JNICALL
 Java_dev_multiframe_camera_pipeline_NativeMerge_nToneBench(
@@ -1559,6 +1656,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nToneBench(
 
     DisplayLut display;
     buildDisplayLut(display, tone);
+    ShoulderLut shoulder;
+    buildShoulderLut(shoulder, tone);
 
     const size_t pixels = static_cast<size_t>(width) * height;
     const int stride = width * 4;
@@ -1570,27 +1669,28 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nToneBench(
     // clock, both of which otherwise land on whichever variant went first.
     std::atomic<long> aboveKnee{0};
     runToneVariant(kToneCensus, plane.data(), width, height, dstA.data(), stride,
-                   cfa, m, tone, display, &aboveKnee);
+                   cfa, m, tone, display, shoulder, &aboveKnee);
     runToneVariant(variantA, plane.data(), width, height, dstA.data(), stride,
-                   cfa, m, tone, display, nullptr);
+                   cfa, m, tone, display, shoulder, nullptr);
     runToneVariant(variantB, plane.data(), width, height, dstB.data(), stride,
-                   cfa, m, tone, display, nullptr);
+                   cfa, m, tone, display, shoulder, nullptr);
 
-    std::vector<jlong> out(static_cast<size_t>(roundCount) * 2 + 2, 0);
+    std::vector<jlong> out(static_cast<size_t>(roundCount) * 2 + 3, 0);
     long differing = 0;
+    int worstByte = 0;
 
     for (int r = 0; r < roundCount; ++r) {
         int64_t tA = 0, tB = 0;
         auto slotA = [&]() {
             const int64_t t = nowMicros();
             runToneVariant(variantA, plane.data(), width, height, dstA.data(),
-                           stride, cfa, m, tone, display, nullptr);
+                           stride, cfa, m, tone, display, shoulder, nullptr);
             tA = nowMicros() - t;
         };
         auto slotB = [&]() {
             const int64_t t = nowMicros();
             runToneVariant(variantB, plane.data(), width, height, dstB.data(),
-                           stride, cfa, m, tone, display, nullptr);
+                           stride, cfa, m, tone, display, shoulder, nullptr);
             tB = nowMicros() - t;
         };
         if ((r & 1) == 0) { slotA(); slotB(); } else { slotB(); slotA(); }
@@ -1599,12 +1699,16 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nToneBench(
         out[static_cast<size_t>(r) * 2 + 1] = tB;
         if (r == 0) {
             for (size_t i = 0; i < dstA.size(); ++i) {
-                if (dstA[i] != dstB[i]) ++differing;
+                if (dstA[i] != dstB[i]) {
+                    ++differing;
+                    worstByte = std::max(worstByte, std::abs(dstA[i] - dstB[i]));
+                }
             }
         }
     }
     out[static_cast<size_t>(roundCount) * 2] = differing;
     out[static_cast<size_t>(roundCount) * 2 + 1] = aboveKnee.load();
+    out[static_cast<size_t>(roundCount) * 2 + 2] = worstByte;
 
     jlongArray result = env->NewLongArray(static_cast<jsize>(out.size()));
     if (result == nullptr) return nullptr;
