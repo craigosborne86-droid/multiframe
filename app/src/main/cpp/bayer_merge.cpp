@@ -1121,8 +1121,85 @@ enum ToneAblation {
     kToneNoExp = 7,      // the roll-off with its exponential taken out
     kToneExactShoulder = 8,  // the roll-off computed rather than tabulated
     kToneUnsplitDemosaic = 9,  // the demosaic dispatching per pixel on its site
-    kToneCensus = 10,    // as shipped, and counts which way the branches went
+    kToneScalarDemosaic = 10,  // the split loop, a pixel at a time
+    kToneCensus = 11,    // as shipped, and counts which way the branches went
 };
+
+#if defined(__ARM_NEON)
+/**
+ * The six taps a row supplies to an octet of pixels.
+ *
+ * A row of the plane is read three times with a deinterleaving load, at x-2, x
+ * and x+2, which yields the even and odd positions of each -- and those six
+ * vectors are every horizontal tap both halves of the octet need. `em2` is
+ * {x-2, x, x+2, x+4}, `o0` is {x+1, x+3, x+5, x+7}, and so on.
+ *
+ * Deinterleaving is what makes this work at all. The demosaic wants pixels two
+ * apart, because that is how far apart two sites of the same colour are, and a
+ * plain load gives four *adjacent* floats. `vld2q_f32` gives the evens and the
+ * odds of eight, which is exactly the shape of a Bayer row.
+ */
+struct RowTaps {
+    float32x4_t em2, om2, e0, o0, ep2, op2;
+};
+
+inline RowTaps rowTaps(const float* q) {
+    const float32x4x2_t a = vld2q_f32(q - 2);
+    const float32x4x2_t b = vld2q_f32(q);
+    const float32x4x2_t c = vld2q_f32(q + 2);
+    return {a.val[0], a.val[1], b.val[0], b.val[1], c.val[0], c.val[1]};
+}
+
+/** The thirteen taps of one lane-set, named as the scalar bodies name them. */
+struct Taps {
+    float32x4_t c0, nA, sA, eA, wA, nn, ss, ee, ww, diag;
+};
+
+/** Green site, four at a time. Mirrors `atGreen`, operation for operation. */
+inline void greenVec(const Taps& t, bool red,
+                     float32x4_t& r, float32x4_t& g, float32x4_t& b) {
+    float32x4_t h = vmulq_n_f32(t.c0, 5.0f);
+    h = vmlaq_n_f32(h, vaddq_f32(t.wA, t.eA), 4.0f);
+    h = vsubq_f32(h, vaddq_f32(t.ww, t.ee));
+    h = vsubq_f32(h, t.diag);
+    h = vmlaq_n_f32(h, vaddq_f32(t.nn, t.ss), 0.5f);
+
+    float32x4_t v = vmulq_n_f32(t.c0, 5.0f);
+    v = vmlaq_n_f32(v, vaddq_f32(t.nA, t.sA), 4.0f);
+    v = vsubq_f32(v, vaddq_f32(t.nn, t.ss));
+    v = vsubq_f32(v, t.diag);
+    v = vmlaq_n_f32(v, vaddq_f32(t.ww, t.ee), 0.5f);
+
+    const float32x4_t zero = vdupq_n_f32(0.0f);
+    r = vmaxq_f32(vmulq_n_f32(red ? h : v, 0.125f), zero);
+    g = vmaxq_f32(t.c0, zero);
+    b = vmaxq_f32(vmulq_n_f32(red ? v : h, 0.125f), zero);
+}
+
+/** Red or blue site, four at a time. Mirrors `atColour`. */
+inline void colourVec(const Taps& t, bool red,
+                      float32x4_t& r, float32x4_t& g, float32x4_t& b) {
+    const float32x4_t axis =
+        vaddq_f32(vaddq_f32(vaddq_f32(t.nA, t.sA), t.eA), t.wA);
+    const float32x4_t axis2 =
+        vaddq_f32(vaddq_f32(vaddq_f32(t.nn, t.ss), t.ee), t.ww);
+
+    float32x4_t gv = vmulq_n_f32(t.c0, 4.0f);
+    gv = vmlaq_n_f32(gv, axis, 2.0f);
+    gv = vmulq_n_f32(vsubq_f32(gv, axis2), 0.125f);
+
+    float32x4_t ov = vmulq_n_f32(t.c0, 6.0f);
+    ov = vmlaq_n_f32(ov, t.diag, 2.0f);
+    ov = vmlsq_n_f32(ov, axis2, 1.5f);
+    ov = vmulq_n_f32(ov, 0.125f);
+
+    const float32x4_t zero = vdupq_n_f32(0.0f);
+    r = vmaxq_f32(red ? t.c0 : ov, zero);
+    g = vmaxq_f32(gv, zero);
+    b = vmaxq_f32(red ? ov : t.c0, zero);
+}
+#endif  // __ARM_NEON
+
 
 /**
  * Demosaic, colour, tone and quantise, in one pass over the plane.
@@ -1191,31 +1268,13 @@ void demosaicAndTone(const float* plane, int width, int height,
             uint8_t* row = dstBase + static_cast<size_t>(y) * stride;
             const float* const p0 = plane + static_cast<size_t>(y) * width;
 
-            auto emit = [&](int x, Rgb v) {
+            // Split in two so that the vector path can reach the second half
+            // directly: it has the colour matrix's inputs in registers already
+            // and has no reason to spill them for nine scalar multiplies. What
+            // is below the split is a table lookup and two data-dependent
+            // branches, which is the part that does not want to be a vector.
+            auto emitTone = [&](int x, float r, float g, float b) {
                 uint8_t* q = row + static_cast<size_t>(x) * 4;
-                if constexpr (Ablation == kToneNone) {
-                    // Still three bytes out of three demosaiced values, so the
-                    // pass above it cannot be deleted as unused.
-                    q[0] = toByte(v.r);
-                    q[1] = toByte(v.g);
-                    q[2] = toByte(v.b);
-                    q[3] = 255;
-                    return;
-                }
-
-                float r, g, b;
-                if constexpr (Ablation == kToneNoMatrix) {
-                    r = v.r; g = v.g; b = v.b;
-                } else {
-                    r = m[0] * v.r + m[1] * v.g + m[2] * v.b;
-                    g = m[3] * v.r + m[4] * v.g + m[5] * v.b;
-                    b = m[6] * v.r + m[7] * v.g + m[8] * v.b;
-                }
-
-                r *= tone.exposureGain;
-                g *= tone.exposureGain;
-                b *= tone.exposureGain;
-
                 if constexpr (Ablation == kToneCensus) {
                     if (std::max(r, std::max(g, b)) > tone.knee) ++overKnee;
                 }
@@ -1243,6 +1302,52 @@ void demosaicAndTone(const float* plane, int width, int height,
                 }
                 q[3] = 255;
             };
+
+            auto emit = [&](int x, Rgb v) {
+                if constexpr (Ablation == kToneNone) {
+                    // Still three bytes out of three demosaiced values, so the
+                    // pass above it cannot be deleted as unused.
+                    uint8_t* q = row + static_cast<size_t>(x) * 4;
+                    q[0] = toByte(v.r);
+                    q[1] = toByte(v.g);
+                    q[2] = toByte(v.b);
+                    q[3] = 255;
+                    return;
+                }
+
+                float r, g, b;
+                if constexpr (Ablation == kToneNoMatrix) {
+                    r = v.r; g = v.g; b = v.b;
+                } else {
+                    r = m[0] * v.r + m[1] * v.g + m[2] * v.b;
+                    g = m[3] * v.r + m[4] * v.g + m[5] * v.b;
+                    b = m[6] * v.r + m[7] * v.g + m[8] * v.b;
+                }
+                emitTone(x, r * tone.exposureGain, g * tone.exposureGain,
+                         b * tone.exposureGain);
+            };
+
+#if defined(__ARM_NEON)
+            auto matrixVec = [&](float32x4_t r0, float32x4_t g0, float32x4_t b0,
+                                 float32x4_t& r, float32x4_t& g, float32x4_t& b) {
+                if constexpr (Ablation == kToneNoMatrix) {
+                    r = r0; g = g0; b = b0;
+                } else {
+                    r = vmulq_n_f32(r0, m[0]);
+                    r = vmlaq_n_f32(r, g0, m[1]);
+                    r = vmlaq_n_f32(r, b0, m[2]);
+                    g = vmulq_n_f32(r0, m[3]);
+                    g = vmlaq_n_f32(g, g0, m[4]);
+                    g = vmlaq_n_f32(g, b0, m[5]);
+                    b = vmulq_n_f32(r0, m[6]);
+                    b = vmlaq_n_f32(b, g0, m[7]);
+                    b = vmlaq_n_f32(b, b0, m[8]);
+                }
+                r = vmulq_n_f32(r, tone.exposureGain);
+                g = vmulq_n_f32(g, tone.exposureGain);
+                b = vmulq_n_f32(b, tone.exposureGain);
+            };
+#endif
 
             // Border: no 5x5 support, so the simple gather, with the bounds
             // checks that only these pixels need.
@@ -1315,6 +1420,87 @@ void demosaicAndTone(const float* plane, int width, int height,
             // test. The interior starts at x = 2, but the parity is written out
             // rather than assumed.
             int x = 2;
+#if defined(__ARM_NEON)
+            // Eight at a time: four green sites and four of the row's colour,
+            // out of one set of deinterleaving loads. Both halves want the same
+            // six vectors per row, which is why the octet rather than the
+            // quartet is the natural unit here.
+            //
+            // The loads reach x-2 to x+9 on five rows, so the guard is about the
+            // widest tap and not about the last output pixel; what it cannot
+            // cover falls through to the pair loop below.
+            if constexpr (Ablation != kToneScalarDemosaic) {
+                for (; x + 9 < width && x + 7 < trailFrom; x += 8) {
+                    const float* const q = p0 + x;
+                    const RowTaps R0 = rowTaps(q - w2);
+                    const RowTaps R1 = rowTaps(q - w1);
+                    const RowTaps R2 = rowTaps(q);
+                    const RowTaps R3 = rowTaps(q + w1);
+                    const RowTaps R4 = rowTaps(q + w2);
+
+                    Taps ev;
+                    ev.c0 = R2.e0;  ev.wA = R2.om2; ev.eA = R2.o0;
+                    ev.ww = R2.em2; ev.ee = R2.ep2;
+                    ev.nA = R1.e0;  ev.sA = R3.e0;
+                    ev.nn = R0.e0;  ev.ss = R4.e0;
+                    ev.diag = vaddq_f32(vaddq_f32(vaddq_f32(R1.om2, R1.o0), R3.om2),
+                                        R3.o0);
+
+                    Taps od;
+                    od.c0 = R2.o0;  od.wA = R2.e0;  od.eA = R2.ep2;
+                    od.ww = R2.om2; od.ee = R2.op2;
+                    od.nA = R1.o0;  od.sA = R3.o0;
+                    od.nn = R0.o0;  od.ss = R4.o0;
+                    od.diag = vaddq_f32(vaddq_f32(vaddq_f32(R1.e0, R1.ep2), R3.e0),
+                                        R3.ep2);
+
+                    // Named by position, not by site: which of the two bodies a
+                    // position gets is the row's business, settled once above.
+                    float32x4_t er, eg, eb, orr, og, ob;
+                    if (greenFirst) {
+                        greenVec(ev, red, er, eg, eb);
+                        colourVec(od, red, orr, og, ob);
+                    } else {
+                        colourVec(ev, red, er, eg, eb);
+                        greenVec(od, red, orr, og, ob);
+                    }
+
+                    float ar[4], ag[4], ab[4], br[4], bg[4], bb[4];
+                    if constexpr (Ablation == kToneNone) {
+                        vst1q_f32(ar, er);  vst1q_f32(ag, eg);  vst1q_f32(ab, eb);
+                        vst1q_f32(br, orr); vst1q_f32(bg, og);  vst1q_f32(bb, ob);
+                        for (int i = 0; i < 4; ++i) {
+                            emit(x + 2 * i, Rgb{ar[i], ag[i], ab[i]});
+                            emit(x + 2 * i + 1, Rgb{br[i], bg[i], bb[i]});
+                        }
+                        continue;
+                    }
+
+                    // The colour matrix and the exposure gain stay in the
+                    // vectors. They were scalar in the first version of this and
+                    // it was waste: nine multiplies and six adds a pixel, on
+                    // values already sitting in registers, spilled to the stack
+                    // to be done one lane at a time. The harness had the matrix
+                    // at 1.09 to 1.25x of the pass by then -- it had risen above
+                    // the resolution floor precisely because the demosaic around
+                    // it got faster.
+                    float32x4_t ER, EG, EB, OR, OG, OB;
+                    matrixVec(er, eg, eb, ER, EG, EB);
+                    matrixVec(orr, og, ob, OR, OG, OB);
+
+                    // Back to scalar here, and no further down: what is left is
+                    // a table lookup and two data-dependent branches. Through
+                    // the stack, which is L1.
+                    vst1q_f32(ar, ER); vst1q_f32(ag, EG); vst1q_f32(ab, EB);
+                    vst1q_f32(br, OR); vst1q_f32(bg, OG); vst1q_f32(bb, OB);
+                    for (int i = 0; i < 4; ++i) {
+                        emitTone(x + 2 * i, ar[i], ag[i], ab[i]);
+                        emitTone(x + 2 * i + 1, br[i], bg[i], bb[i]);
+                    }
+                }
+            }
+#endif
+
             if (greenFirst == ((x & 1) == 0)) {
                 for (; x + 1 < trailFrom; x += 2) {
                     emit(x, atGreen(p0 + x, red));
@@ -1370,6 +1556,9 @@ void runToneVariant(int variant, const float* plane, int width, int height,
         case kToneUnsplitDemosaic:
             demosaicAndTone<kToneUnsplitDemosaic>(plane, width, height, dst, stride,
                                                   cfa, m, tone, display, shoulder); break;
+        case kToneScalarDemosaic:
+            demosaicAndTone<kToneScalarDemosaic>(plane, width, height, dst, stride,
+                                                 cfa, m, tone, display, shoulder); break;
         case kToneCensus:
             demosaicAndTone<kToneCensus>(plane, width, height, dst, stride,
                                          cfa, m, tone, display, shoulder, aboveKnee); break;

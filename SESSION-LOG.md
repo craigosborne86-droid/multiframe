@@ -2792,6 +2792,79 @@ against 313-379 ms rested. **Watch `/proc/meminfo`, not only the temperature.**
 359 unit tests pass. 121 device tests, with the consistency check failing on a
 phone in the state described above.
 
+## Vectorising the demosaic, and an item that grew because its neighbour shrank
+
+The previous entry ended by saying the demosaic's cost was the thirteen loads
+across five rows and the arithmetic on them, and that what was left was a
+vectorisation job. This is that job.
+
+### Why an octet and not a quartet
+
+The demosaic wants pixels *two* apart, because that is how far apart two sites
+of the same colour are, and a plain NEON load gives four adjacent floats.
+`vld2q_f32` gives the evens and the odds of eight, which is the shape of a Bayer
+row: one deinterleaving load supplies four green sites and four of the row's
+colour at once.
+
+Read each of the five rows three times — at x-2, x and x+2 — and the six vectors
+that come back are **every horizontal tap both halves of the octet need**. The
+even-position pixels take `c0` from the evens of the middle load and `wA` from
+the odds of the left one; the odd-position pixels take `c0` from those same odds
+and `wA` from those same evens. Nothing is loaded twice for the two halves,
+which is why the octet rather than the quartet is the unit.
+
+The tail stays scalar. It is a table lookup and two data-dependent branches, and
+it does not want to be a vector; the eight results go out through the stack,
+which is L1.
+
+    the vector demosaic against the scalar one   78 of 80 rounds
+    per-round ratio                              0.67 - 0.80, median 0.72
+    against the original per-pixel form          0.66x, 0 of 16
+
+**1.39x of the whole pass**, and 1.52x against the shape this had two entries
+ago. 83 bytes of 50,135,040 differ, every one by a single code, identical in
+every run. The develop parity tests pass at 0/255 — and at 64 to 67 pixels wide
+the vector loop really does run, seven octets and a remainder, so that fixture
+covers the thing it needs to cover.
+
+### The colour matrix grew, then shrank again
+
+Partway through, the harness put the colour matrix at 1.09 to 1.25x of the pass,
+57 rounds of 64. It had been *below the resolution floor* every time it was
+measured before — 1.01x to 1.13x, win counts of 8 to 11 of 16, one real reading
+and three coin flips.
+
+Nothing about the matrix had changed. **What changed is that the demosaic around
+it got faster**, so the same nine multiplies and six adds became a larger share
+of a smaller total, and rose above what sixteen rounds can see.
+
+So it was vectorised too, which was nine lines: its inputs were already sitting
+in the registers the demosaic left them in, and the first version of this had
+been spilling them to the stack to do the work one lane at a time. Afterwards
+the matrix reads 1.00x and 8 of 16 — back under the floor, from the other side.
+
+**An item's share is not a property of the item.** This log has now watched the
+same figure be invisible, then significant, then invisible again, without the
+code between those readings ever being touched.
+
+### What is left
+
+    renderLinear                      1.82x   16 of 16
+      its highlight roll-off          1.25x   15 of 16
+      its highlight desaturation      1.24x   15 of 16
+    everything after the demosaic     2.36x   16 of 16
+    the colour matrix, the display table       below the floor
+
+The rendering curve is the largest item again, as it was before the roll-off was
+tabulated, and the desaturation has come up with it — it was under the floor for
+three sessions and is now level with the roll-off. Both are behind the same kind
+of data-dependent branch, and both would want the same treatment.
+
+359 unit tests pass. **121 device tests pass in a clean full suite.** On the
+capture path `demosaic+tone` reads 96-130 ms, on a phone at 38.9 C and 50%
+battery whose other stages are all reading half again what a rested one gives —
+which is why that figure is written down and not compared with any other entry's.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a

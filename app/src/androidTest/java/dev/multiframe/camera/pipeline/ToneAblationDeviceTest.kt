@@ -88,7 +88,8 @@ class ToneAblationDeviceTest {
             "its roll-off" to ToneAblation.NO_SHOULDER,
             "its desaturation" to ToneAblation.NO_DESAT,
             "the roll-off's table, for the arithmetic" to ToneAblation.EXACT_SHOULDER,
-            "the split demosaic, for the per-pixel one" to ToneAblation.UNSPLIT_DEMOSAIC,
+            "the vector demosaic, for the scalar one" to ToneAblation.SCALAR_DEMOSAIC,
+            "both, for the per-pixel one" to ToneAblation.UNSPLIT_DEMOSAIC,
             "of the computed roll-off, its exponential" to ToneAblation.NO_EXP,
             "everything after the demosaic" to ToneAblation.NONE,
         )
@@ -183,20 +184,20 @@ class ToneAblationDeviceTest {
      * So the bar is bytes again, and stated rather than assumed.
      */
     @Test
-    fun splittingTheDemosaicByParityReconstructsTheSamePicture() {
+    fun vectorisingTheDemosaicReconstructsTheSamePicture() {
         assertThat(NativeMerge.isAvailable()).isTrue()
-        val raw = bench(ToneAblation.FULL, ToneAblation.UNSPLIT_DEMOSAIC, ROUNDS)
+        val raw = bench(ToneAblation.FULL, ToneAblation.SCALAR_DEMOSAIC, ROUNDS)
         assertThat(raw).isNotNull()
         val run = Run(raw!!)
         val total = width.toLong() * height * 4
         Log.i(
             TAG,
-            "split against per-pixel: %d of %d bytes differ, worst by %d".format(
+            "vector against scalar: %d of %d bytes differ, worst by %d".format(
                 run.differing, total, run.worstByte,
             ),
         )
         // The same call answers both questions, so it may as well report both.
-        Log.i(TAG, "split against per-pixel: ${run.pairing()}")
+        Log.i(TAG, "vector against scalar: ${run.pairing()}")
         assertThat(run.worstByte).isAtMost(1L)
         assertThat(run.differing).isLessThan(total / 20_000)
     }

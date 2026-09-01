@@ -59,4 +59,11 @@ object ToneAblation {
      * against [FULL] is what the restructuring bought.
      */
     const val UNSPLIT_DEMOSAIC = 9
+
+    /**
+     * The split loop taken a pixel at a time rather than eight at a time, which
+     * is what shipped between the parity split and the NEON kernels. Not an
+     * ablation: same reconstruction, one lane wide.
+     */
+    const val SCALAR_DEMOSAIC = 10
 }

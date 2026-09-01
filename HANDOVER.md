@@ -10,10 +10,10 @@ holds the reasoning behind everything below.
 no release paperwork — deferred by the owner's decision, and nothing in the
 current work depends on any of it.
 
-Everything builds. **359 unit tests pass**, and **121 device tests** run on the
-phone. A clean full suite was recorded this session on a rested device; the
-capture consistency check fails once the phone is short of memory, which is
-device state and not a regression — see the measurement rules below. The build on the phone is current HEAD, md5 verified.
+Everything builds. **359 unit tests pass**, and **121 device tests** pass on the
+phone in a clean full suite. The capture consistency check fails once the phone
+is short of memory, which is device state and not a regression — see the
+measurement rules below. The build on the phone is current HEAD, md5 verified.
 
 The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
 in about a second and writes a DNG and a JPEG to the gallery, and the status
@@ -21,11 +21,12 @@ line says what the merge bought: `8 frames · 91% kept`.
 
 Recent work, newest first:
 
-- **the demosaic's loop is split by parity**, which is worth about 4% — 105 of
-  176 rounds. The interesting part is that it is *only* 4%: taking out every
-  branch and CFA read the inner loop had barely moved it, so the cost is the
-  thirteen loads across five rows and the arithmetic, and what is left is a
-  vectorisation job
+- **the demosaic is vectorised**, eight pixels at a time out of one set of
+  deinterleaving loads: 1.39x of the whole pass, 78 of 80 rounds, and 1.52x
+  against the per-pixel form of two sessions ago. The colour matrix went into
+  the same vectors once the harness could see it
+- **the demosaic's loop was split by parity** first, worth about 4% — 105 of 176
+  rounds. Worth knowing it is *only* 4%: the cost was never the branching
 - **the highlight roll-off is a table now**, worth 1.13-1.18x of `demosaic+tone`
   on a bright frame and nothing on a dark one, at one display code on five bytes
   in a million. It is **the first approximation in the render** — everything
@@ -148,15 +149,22 @@ the 146 ms `demosaic+tone` in older entries.
 with one item removed. As paired ratios, which are what transfer, after the
 roll-off was tabulated:
 
-    everything after the demosaic     1.9 - 2.0x     16 of 16, every run
-    renderLinear                      1.42 - 1.51x   16 of 16, every run
-      its highlight roll-off          1.10x          14 of 16
-    the colour matrix, the display table, the desaturation   below the floor
+    renderLinear                      1.82x   16 of 16
+      its highlight roll-off          1.25x   15 of 16
+      its highlight desaturation      1.24x   15 of 16
+    everything after the demosaic     2.36x   16 of 16
+    the colour matrix, the display table       below the floor
 
-Before the table those read 2.2-3.0x, 1.9-2.5x and 1.44-1.6x. **The rendering
-curve was the cost and is now much less of it.** The demosaic is the larger half
-again, and the three items anyone would name first are still all smaller than
-the harness resolves in sixteen rounds.
+**The rendering curve is the largest item again**, and the desaturation has come
+up level with the roll-off after three sessions below the floor. Both sit behind
+the same kind of data-dependent branch and would want the treatment the roll-off
+got.
+
+**Read those as shares, not as costs.** The colour matrix was under the floor,
+then 1.09-1.25x with 57 of 64 rounds, then under the floor again, without the
+code between those readings being touched: vectorising the demosaic around it
+made it a larger part of a smaller total, and vectorising it in turn put it back.
+An item's share is not a property of the item.
 
 **The roll-off's price belongs to the photograph, not the code.** Its work sits
 behind `if (scenePeak > knee)`: at 82% of the frame above the knee `renderLinear`
@@ -194,16 +202,18 @@ half of the pass named after it, that a table would not need interpolating, and
 that the branch guarding the roll-off was its cost. The last two were written
 into the code as comments and refuted within the hour by the harness.
 
-**The demosaic is the larger half, and its cost is not its branching.** That has
-now been tried: splitting the loop by parity removes the border test, both CFA
-reads and the three-way branch, and buys 4%. So the cost is the thirteen loads
-spread across five rows and the arithmetic on them.
+**The demosaic is vectorised and is no longer where the time is.** Three shapes
+of it are in the binary and all three can be timed against each other:
+`kToneFull` (NEON octets), `kToneScalarDemosaic` (the parity-split scalar loop),
+and `kToneUnsplitDemosaic` (the original per-pixel dispatch).
 
-What is left is vectorisation, and one thing is already known about it:
-`__restrict` on the input and output — the textbook fix for a `uint8_t*` output
-that may alias anything — was measured at **21 of 48 rounds, nothing**, and
-reverted. That does not mean it is irrelevant to a hand-vectorised loop; it
-means the compiler was not going to auto-vectorise this one either way.
+If you extend it, the shape to keep is that one `vld2q_f32` pass over five rows
+supplies *both* halves of the octet — the evens and odds of eight are exactly a
+Bayer row's two sites, which is why the octet and not the quartet is the unit.
+And `__restrict` on the input and output, the textbook fix for a `uint8_t*`
+output that may alias anything, was measured at **21 of 48 rounds, nothing**; it
+did not stop the hand vectorisation working and it is not the lever it looks
+like.
 
 ## How to measure
 
