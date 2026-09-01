@@ -2677,6 +2677,121 @@ change**, twice, in the space of an hour.
 Develop on that phone: black 15-23ms, hotpixels 17-28ms, shading 20-32ms,
 demosaic+tone 113-141ms.
 
+## Going after the demosaic, and finding out it is not the branching
+
+With the roll-off tabulated the demosaic was the larger half of the pass again,
+and nothing had ever been tried on it. What it looked like from the outside was
+dispatch: every pixel asks whether it is on the border, reads its own site out
+of the CFA pattern, reads its neighbour's, and picks one of three bodies.
+
+### The fact the loop was not using
+
+**In a Bayer row the non-green sites are all one colour.** A row is
+red-and-green or green-and-blue, never both. So `here` alternates green / that
+colour with period two, and `redHorizontal` — the colour of the horizontal
+neighbour, which decides which way the green site interpolates — is a property
+of the *row*.
+
+That makes the whole dispatch loop-invariant. The row splits into a lead and a
+trail of border pixels and an interior unrolled two at a time, with the two
+bodies written as named functions of the site rather than as branches inside it.
+No border test, no CFA reads, no three-way branch.
+
+### It is worth about four per cent
+
+    the split against the per-pixel form   105 of 176 rounds, p = 0.006
+    per-round ratio                        0.92 - 1.02, clustered near 0.96
+
+Eleven runs of sixteen rounds, pooled, because no single run of sixteen could
+settle it. **That is the answer to the question, and it is not the answer the
+shape of the code suggested.** Taking out every branch and every table read the
+inner loop had bought four per cent, which means the demosaic's cost is the
+thirteen loads spread across five rows and the arithmetic on them — not the
+deciding of what to do with them. Whatever is left here is a vectorisation job.
+
+The picture is unchanged: 20 bytes of 50,135,040 differ, every one by a single
+code, which is `-ffast-math` reassociating two loop shapes differently and not
+an approximation. The develop parity tests pass at 0/255 including the widths
+that strand the vector loop, which is exactly the case a parity split could have
+broken.
+
+### A promise that bought nothing
+
+`uint8_t` is a character type, so under the aliasing rules the output pointer
+may point at anything — including the input plane. Every byte written therefore
+kills what the compiler knows about the plane, and no load for the next pixel
+can be hoisted above the stores for this one. That is a textbook reason a loop
+will not vectorise, and the promise is true here: the plane is scratch and the
+destination is a Bitmap's pixel store.
+
+Made as `__restrict` and measured against itself: **21 of 48 rounds, ratios
+straddling one in both directions.** Nothing. Reverted, with the template
+machinery that made it measurable, which makes it the sixth experiment this log
+has backed out rather than kept on faith. Recorded because the next person to
+try vectorising this by hand will think of it too, and should know it has
+already been asked.
+
+### The roll-off's table was costing dark frames, and its own test said so
+
+`whatTheRollOffCostsDependsOnHowBrightTheSceneIs` runs the comparison at two
+exposures. At 1% of the frame above the knee it started failing: the tabulated
+roll-off lost **46 rounds of 64** to the arithmetic it replaced.
+
+The branch was already back, so a dark frame reaches the table a hundred
+thousand times against twelve million pixels of plane — and was paying 16 KB of
+L1 for the privilege. Halving the table to 8 KB and indexing it from the knee
+rather than from zero (everything below the knee was a twelfth of it that the
+branch guarantees is never read) put the dark frame back to a coin flip, 28 of
+48, while the bright frame kept 1.05 to 1.13x, 37 of 48.
+
+A quarter-size table was no faster than half and four times less accurate, so
+half is where it stopped. Accuracy went from 265 differing bytes to 800 — one in
+62,000, still none of them more than a single code.
+
+**Neither the regression nor its size would have been visible without the
+two-exposure form of that test**, which exists because an earlier session
+decided a figure for this pass without the scene beside it is not a figure.
+
+### A threshold set from a round number, again
+
+The assertion guarding that — the table must not be slower on a dark frame —
+was written as `wins <= ROUNDS / 2`. Half the rounds is exactly where a true
+null sits, so **it fails 40% of the time when nothing is wrong.** Three quarters
+costs 1.1%.
+
+That is the second time in three commits a threshold here has been set from a
+round number instead of from the distribution, having written the lesson down
+the first time.
+
+### The emulator earned its keep, at the thing it is for
+
+Halfway through, the phone dropped off wireless adb entirely — nothing on mDNS,
+`adb kill-server` no help. The emulator on the external volume booted and ran
+the parity tests: **10 of 10 at 0/255**, including the odd widths. It could say
+nothing whatever about whether the restructuring was faster, and this log's rule
+about that stands. But correctness is not speed, and for correctness it was the
+whole difference between waiting and working.
+
+It needed the app launched once by hand before instrumentation would start; the
+first two attempts died as `failed to complete startup`, which looks like a
+crash in the log and is not one.
+
+### Memory pressure is a separate hazard from heat
+
+The phone spent much of this at 850-1300 MB free of 15.5 GB with **5.8 GB of
+7.8 GB of swap in use**, at 30 C. Rounds that normally take 110-160 ms came back
+at 400-780 ms, roughly one in three, at random. The A/A stayed honest through it
+— 20 to 22 of 40, ratio 1.00 to 1.03 — so the pairing was not biased, but the
+power to see a four per cent effect was gone, which is why that one took eleven
+runs.
+
+`repeatedCapturesTakeAConsistentTime` fails in this state and passed a clean full
+suite earlier the same day. Its develop-less-publish reads 446-853 ms here
+against 313-379 ms rested. **Watch `/proc/meminfo`, not only the temperature.**
+
+359 unit tests pass. 121 device tests, with the consistency check failing on a
+phone in the state described above.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a

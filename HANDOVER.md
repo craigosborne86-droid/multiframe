@@ -10,8 +10,10 @@ holds the reasoning behind everything below.
 no release paperwork — deferred by the owner's decision, and nothing in the
 current work depends on any of it.
 
-Everything builds. **359 unit tests pass**, and **120 device tests** pass on the
-phone, in a clean full suite. The build on the phone is current HEAD, md5 verified.
+Everything builds. **359 unit tests pass**, and **121 device tests** run on the
+phone. A clean full suite was recorded this session on a rested device; the
+capture consistency check fails once the phone is short of memory, which is
+device state and not a regression — see the measurement rules below. The build on the phone is current HEAD, md5 verified.
 
 The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
 in about a second and writes a DNG and a JPEG to the gallery, and the status
@@ -19,6 +21,11 @@ line says what the merge bought: `8 frames · 91% kept`.
 
 Recent work, newest first:
 
+- **the demosaic's loop is split by parity**, which is worth about 4% — 105 of
+  176 rounds. The interesting part is that it is *only* 4%: taking out every
+  branch and CFA read the inner loop had barely moved it, so the cost is the
+  thirteen loads across five rows and the arithmetic, and what is left is a
+  vectorisation job
 - **the highlight roll-off is a table now**, worth 1.13-1.18x of `demosaic+tone`
   on a bright frame and nothing on a dark one, at one display code on five bytes
   in a million. It is **the first approximation in the render** — everything
@@ -187,8 +194,16 @@ half of the pass named after it, that a table would not need interpolating, and
 that the branch guarding the roll-off was its cost. The last two were written
 into the code as comments and refuted within the hour by the harness.
 
-**The demosaic is the larger half now.** It is five-by-five gathers, thirteen
-neighbours and three branches a pixel, and nothing has been tried on it.
+**The demosaic is the larger half, and its cost is not its branching.** That has
+now been tried: splitting the loop by parity removes the border test, both CFA
+reads and the three-way branch, and buys 4%. So the cost is the thirteen loads
+spread across five rows and the arithmetic on them.
+
+What is left is vectorisation, and one thing is already known about it:
+`__restrict` on the input and output — the textbook fix for a `uint8_t*` output
+that may alias anything — was measured at **21 of 48 rounds, nothing**, and
+reverted. That does not mean it is irrelevant to a hand-vectorised loop; it
+means the compiler was not going to auto-vectorise this one either way.
 
 ## How to measure
 
@@ -204,12 +219,16 @@ In decreasing order of authority:
   binary, the order alternates within a round, and the comparison is paired
   rather than pooled. Their A/A tests are not a formality and run first. Copy
   these rather than the two below.
-- **Set a threshold from the distribution, not from a round number.** A 30-70%
-  band on a paired A/A sounds strict and is not: at twenty rounds a fair coin
-  falls outside it 4.1% of the time. Buy the tightness with rounds — at forty
-  the same band costs 0.6%. A test that fails one run in twenty-five gets
-  written down as flakiness, which is what happened to
-  `repeatedCapturesTakeAConsistentTime` for four sessions.
+- **Set a threshold from the distribution, not from a round number.** This has
+  now been got wrong twice, the second time after writing the lesson down. A
+  30-70% band on a paired A/A sounds strict and is not: at twenty rounds a fair
+  coin falls outside it 4.1% of the time. Worse, a one-sided "must not be slower"
+  written as `wins <= ROUNDS / 2` fails **40%** of the time when nothing is
+  wrong, because half the rounds is exactly where a true null sits. Buy the
+  tightness with rounds — at forty, 30-70% costs 0.6% — and put the one-sided
+  bound at three quarters, which costs 1.1% and still catches the regression it
+  is there for. A test that cries wolf gets written down as flakiness, which is
+  what happened to `repeatedCapturesTakeAConsistentTime` for four sessions.
 - **Report the paired ratio, not a difference of medians.** The same comparison
   read 104 ms of 320 and, twenty seconds later, 269 ms of 419: both true,
   neither transferable, because the phone had slowed by half in between. The
@@ -223,6 +242,14 @@ In decreasing order of authority:
   measured across runs that *shared one install*, and an A/B cannot: reinstall
   between runs and it swings two and a half times. Never quote it as what a
   capture costs, and never trust it without an A/A.
+- **The emulator settles correctness when the phone is unreachable.** When
+  wireless adb dropped the phone entirely this session, the AVD on
+  `/Volumes/MultiframeAVD` booted and ran the develop parity tests at 0/255,
+  including the widths that strand the vector loop. It says nothing about speed
+  and the rule below stands. Note it needs the app launched once by hand
+  (`adb shell monkey -p dev.multiframe.camera -c android.intent.category.LAUNCHER 1`)
+  before instrumentation will start; the first attempts die as `failed to
+  complete startup`, which reads like a crash and is not one.
 - **The emulator is not slow, it is fast**, which is worse. An arm64 image on
   Apple silicon runs sharpening in 6 ms where the phone takes 37-100, and the
   JPEG strips in 8 ms against 48-107. A regression that doubled a phone's cost
@@ -244,6 +271,12 @@ Hard-won notes that still apply:
   alternations affordable. To build a before-APK that shares a new harness,
   splice the old implementation back into the current tree, build, save the APK,
   then restore — that is how this session's sharpening comparison was made.
+- **Memory pressure is a separate hazard from heat, and looks nothing like it.**
+  At 30 C with 850 MB free of 15.5 GB and 5.8 GB of swap in use, rounds that
+  take 110-160 ms come back at 400-780 ms, about one in three, at random. The
+  paired A/A stays honest through it — 20 of 40, ratio 1.00 — so nothing is
+  *biased*, but the power to see a few per cent is gone and a comparison needs
+  ten runs instead of one. Read `/proc/meminfo`, not only `dumpsys battery`.
 - **The device degrades over an afternoon, and a short rest does not fix it.**
   Watch `dumpsys battery` and `/proc/meminfo`, and know that both can look fine
   while everything runs at half speed. Over one session the same pass went 172

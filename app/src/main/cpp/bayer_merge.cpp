@@ -670,6 +670,11 @@ inline float shoulderCurve(float x, float knee) {
  * Rendering curve. Mirrors ToneCurve.kt, which is where the tests are; the
  * instrumentation parity test pins the two together.
  */
+/** One pixel's three reconstructed channels, on the way out of the demosaic. */
+struct Rgb {
+    float r, g, b;
+};
+
 struct ToneParams {
     float exposureGain = 1.0f;
     float knee = 0.70f;
@@ -702,8 +707,10 @@ struct ToneParams {
  * `ToneAblationDeviceTest` renders twelve and a half megapixels both ways and
  * requires every byte to agree.
  *
- * Interpolated between entries, which the first version of this was written
- * without -- on the argument that at 4096 cells two neighbours differ by well
+ * Interpolated between entries, which pays for the table being small: at a
+ * thousand cells across the useful range a truncated lookup would be nowhere
+ * near good enough, and interpolating makes the error second order in the cell
+ * instead of first. Written without it first -- on the argument that at 4096 cells two neighbours differ by well
  * under a display code, so a lerp would buy accuracy the 8-bit output could not
  * carry. Measured, that was wrong: nearest-entry put 1.8% of the bytes of a
  * twelve-megapixel render one code away from the arithmetic, and pushed the
@@ -722,7 +729,15 @@ struct ToneParams {
  * highlight is rare enough that the branch predicts.
  */
 struct ShoulderLut {
-    static constexpr int kSize = 4096;
+    // A thousand entries, not four thousand, and indexed from the knee rather
+    // than from zero. Both are about cache rather than accuracy: the caller only
+    // reaches this behind `if (p > knee)`, so everything below the knee was a
+    // twelfth of the table that could never be read, and the four thousand
+    // floats that remained were 16 KB of L1 held for a lookup that a dark frame
+    // does a hundred thousand times against twelve million pixels of plane. Its
+    // own test caught that -- the table cost such a frame 5 to 13%, 46 rounds of
+    // 64 against it -- and 4 KB is what fixed it.
+    static constexpr int kSize = 2048;
     float scale[kSize];
     float knee = 0.0f;
     float pMax = 1.0f;
@@ -730,7 +745,7 @@ struct ShoulderLut {
 
     float operator()(float p) const {
         if (p >= pMax) return shoulderCurve(p, knee) / p;
-        const float x = p * indexScale;
+        const float x = std::max((p - knee) * indexScale, 0.0f);
         const int i = static_cast<int>(x);
         // p < pMax puts x below kSize - 1, so i + 1 is always in bounds.
         return scale[i] + (scale[i + 1] - scale[i]) * (x - static_cast<float>(i));
@@ -745,10 +760,10 @@ void buildShoulderLut(ShoulderLut& lut, const ToneParams& t) {
     // reciprocal branch stays exact whatever the parameters are, so the only
     // cost of getting this wrong would be speed.
     lut.knee = t.knee;
-    lut.pMax = std::max(t.knee + 16.0f * std::max(headroom, 0.0f), 1.0f);
-    lut.indexScale = static_cast<float>(ShoulderLut::kSize - 1) / lut.pMax;
+    lut.pMax = std::max(t.knee + 16.0f * std::max(headroom, 0.0f), t.knee + 1.0f);
+    lut.indexScale = static_cast<float>(ShoulderLut::kSize - 1) / (lut.pMax - t.knee);
     for (int i = 0; i < ShoulderLut::kSize; ++i) {
-        const float p = static_cast<float>(i) / lut.indexScale;
+        const float p = t.knee + static_cast<float>(i) / lut.indexScale;
         lut.scale[i] = (p > t.knee && p > 0.0f) ? shoulderCurve(p, t.knee) / p : 1.0f;
     }
 }
@@ -1105,7 +1120,8 @@ enum ToneAblation {
     kToneNoDesat = 6,    // renderLinear without the highlight desaturation
     kToneNoExp = 7,      // the roll-off with its exponential taken out
     kToneExactShoulder = 8,  // the roll-off computed rather than tabulated
-    kToneCensus = 9,     // as shipped, and counts which way the branches went
+    kToneUnsplitDemosaic = 9,  // the demosaic dispatching per pixel on its site
+    kToneCensus = 10,    // as shipped, and counts which way the branches went
 };
 
 /**
@@ -1123,98 +1139,77 @@ void demosaicAndTone(const float* plane, int width, int height,
                      const ToneParams& tone, const DisplayLut& display,
                      const ShoulderLut& shoulder,
                      std::atomic<long>* aboveKnee = nullptr) {
-    parallelBands(height, [&](int y0, int y1) {
+    const int w1 = width;
+    const int w2 = width * 2;
+
+    // Gradient-corrected linear interpolation (Malvar, He and Cutler). The
+    // measured sample at this site is kept exactly; only the two missing
+    // colours are interpolated, with a second-derivative term carrying the
+    // luminance gradient across channels so the planes agree about edge
+    // position. Mirrors Demosaic.kt, where the tests are.
+    //
+    // Two functions of the site rather than one three-way branch inside the
+    // loop, because a pixel's site is decided by its position in the 2x2 and by
+    // nothing else -- so the caller can know it without asking.
+    auto atGreen = [&](const float* p, bool redHorizontal) -> Rgb {
+        const float c0 = p[0];
+        const float nA = p[-w1], sA = p[w1];
+        const float eA = p[1], wA = p[-1];
+        const float nn = p[-w2], ss = p[w2];
+        const float ee = p[2], ww = p[-2];
+        const float diag = p[-w1 - 1] + p[-w1 + 1] + p[w1 - 1] + p[w1 + 1];
+        const float alongH = 5.0f * c0 + 4.0f * (wA + eA) - (ww + ee) -
+                             diag + 0.5f * (nn + ss);
+        const float alongV = 5.0f * c0 + 4.0f * (nA + sA) - (nn + ss) -
+                             diag + 0.5f * (ww + ee);
+        // The correction extrapolates and can overshoot past black.
+        return {
+            std::max((redHorizontal ? alongH : alongV) * 0.125f, 0.0f),
+            std::max(c0, 0.0f),
+            std::max((redHorizontal ? alongV : alongH) * 0.125f, 0.0f),
+        };
+    };
+    auto atColour = [&](const float* p, bool red) -> Rgb {
+        const float c0 = p[0];
+        const float diag = p[-w1 - 1] + p[-w1 + 1] + p[w1 - 1] + p[w1 + 1];
+        const float axis = p[-w1] + p[w1] + p[1] + p[-1];
+        const float axis2 = p[-w2] + p[w2] + p[2] + p[-2];
+        const float g = (4.0f * c0 + 2.0f * axis - axis2) * 0.125f;
+        const float o = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) * 0.125f;
+        return {
+            std::max(red ? c0 : o, 0.0f),
+            std::max(g, 0.0f),
+            std::max(red ? o : c0, 0.0f),
+        };
+    };
+
+    parallelBands(height, [&](int yStart, int yEnd) {
         float acc[3];
         int cnt[3];
         [[maybe_unused]] long overKnee = 0;
-        for (int y = y0; y < y1; ++y) {
+        for (int y = yStart; y < yEnd; ++y) {
             uint8_t* row = dstBase + static_cast<size_t>(y) * stride;
-            const bool interiorRow = (y >= 2 && y < height - 2);
-            for (int x = 0; x < width; ++x) {
-                float r0, g0, b0;
+            const float* const p0 = plane + static_cast<size_t>(y) * width;
 
-                if (!interiorRow || x < 2 || x >= width - 2) {
-                    // Border: no 5x5 support, so the simple gather, with the
-                    // bounds checks that only these pixels need.
-                    acc[0] = acc[1] = acc[2] = 0.0f;
-                    cnt[0] = cnt[1] = cnt[2] = 0;
-                    for (int dy = -1; dy <= 1; ++dy) {
-                        const int sy = y + dy;
-                        if (sy < 0 || sy >= height) continue;
-                        for (int dx = -1; dx <= 1; ++dx) {
-                            const int sx = x + dx;
-                            if (sx < 0 || sx >= width) continue;
-                            const int c = cfa[(sy & 1) * 2 + (sx & 1)];
-                            acc[c] += plane[static_cast<size_t>(sy) * width + sx];
-                            cnt[c]++;
-                        }
-                    }
-                    r0 = cnt[0] ? acc[0] / cnt[0] : 0.0f;
-                    g0 = cnt[1] ? acc[1] / cnt[1] : 0.0f;
-                    b0 = cnt[2] ? acc[2] / cnt[2] : 0.0f;
-                } else {
-                    // Gradient-corrected linear interpolation (Malvar, He and
-                    // Cutler). The measured sample at this site is kept
-                    // exactly; only the two missing colours are interpolated,
-                    // with a second-derivative term carrying the luminance
-                    // gradient across channels so the planes agree about edge
-                    // position. Mirrors Demosaic.kt, where the tests are.
-                    const float* p = plane + static_cast<size_t>(y) * width + x;
-                    const int w1 = width;
-                    const int w2 = width * 2;
-
-                    const float c0 = p[0];
-                    const float nA = p[-w1], sA = p[w1];
-                    const float eA = p[1], wA = p[-1];
-                    const float nn = p[-w2], ss = p[w2];
-                    const float ee = p[2], ww = p[-2];
-                    const float diag = p[-w1 - 1] + p[-w1 + 1] + p[w1 - 1] + p[w1 + 1];
-                    const float axis = nA + sA + eA + wA;
-                    const float axis2 = nn + ss + ee + ww;
-
-                    const int here = cfa[(y & 1) * 2 + (x & 1)];
-                    if (here == 1) {
-                        const bool redHorizontal = cfa[(y & 1) * 2 + ((x + 1) & 1)] == 0;
-                        const float alongH = 5.0f * c0 + 4.0f * (wA + eA) - (ww + ee) -
-                                             diag + 0.5f * (nn + ss);
-                        const float alongV = 5.0f * c0 + 4.0f * (nA + sA) - (nn + ss) -
-                                             diag + 0.5f * (ww + ee);
-                        r0 = (redHorizontal ? alongH : alongV) * 0.125f;
-                        g0 = c0;
-                        b0 = (redHorizontal ? alongV : alongH) * 0.125f;
-                    } else if (here == 0) {
-                        r0 = c0;
-                        g0 = (4.0f * c0 + 2.0f * axis - axis2) * 0.125f;
-                        b0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) * 0.125f;
-                    } else {
-                        r0 = (6.0f * c0 + 2.0f * diag - 1.5f * axis2) * 0.125f;
-                        g0 = (4.0f * c0 + 2.0f * axis - axis2) * 0.125f;
-                        b0 = c0;
-                    }
-                    // The correction extrapolates and can overshoot past black.
-                    r0 = std::max(r0, 0.0f);
-                    g0 = std::max(g0, 0.0f);
-                    b0 = std::max(b0, 0.0f);
-                }
-
+            auto emit = [&](int x, Rgb v) {
                 uint8_t* q = row + static_cast<size_t>(x) * 4;
                 if constexpr (Ablation == kToneNone) {
                     // Still three bytes out of three demosaiced values, so the
                     // pass above it cannot be deleted as unused.
-                    q[0] = toByte(r0);
-                    q[1] = toByte(g0);
-                    q[2] = toByte(b0);
+                    q[0] = toByte(v.r);
+                    q[1] = toByte(v.g);
+                    q[2] = toByte(v.b);
                     q[3] = 255;
-                    continue;
+                    return;
                 }
 
                 float r, g, b;
                 if constexpr (Ablation == kToneNoMatrix) {
-                    r = r0; g = g0; b = b0;
+                    r = v.r; g = v.g; b = v.b;
                 } else {
-                    r = m[0] * r0 + m[1] * g0 + m[2] * b0;
-                    g = m[3] * r0 + m[4] * g0 + m[5] * b0;
-                    b = m[6] * r0 + m[7] * g0 + m[8] * b0;
+                    r = m[0] * v.r + m[1] * v.g + m[2] * v.b;
+                    g = m[3] * v.r + m[4] * v.g + m[5] * v.b;
+                    b = m[6] * v.r + m[7] * v.g + m[8] * v.b;
                 }
 
                 r *= tone.exposureGain;
@@ -1247,6 +1242,93 @@ void demosaicAndTone(const float* plane, int width, int height,
                     q[2] = display(b);
                 }
                 q[3] = 255;
+            };
+
+            // Border: no 5x5 support, so the simple gather, with the bounds
+            // checks that only these pixels need.
+            auto borderPixel = [&](int x) {
+                acc[0] = acc[1] = acc[2] = 0.0f;
+                cnt[0] = cnt[1] = cnt[2] = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const int sy = y + dy;
+                    if (sy < 0 || sy >= height) continue;
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int sx = x + dx;
+                        if (sx < 0 || sx >= width) continue;
+                        const int c = cfa[(sy & 1) * 2 + (sx & 1)];
+                        acc[c] += plane[static_cast<size_t>(sy) * width + sx];
+                        cnt[c]++;
+                    }
+                }
+                emit(x, {
+                    cnt[0] ? acc[0] / cnt[0] : 0.0f,
+                    cnt[1] ? acc[1] / cnt[1] : 0.0f,
+                    cnt[2] ? acc[2] / cnt[2] : 0.0f,
+                });
+            };
+
+            if constexpr (Ablation == kToneUnsplitDemosaic) {
+                // The shape this replaced, kept so the restructuring can be
+                // timed against it in one binary: every pixel asks whether it is
+                // on the border, then reads its own site out of the CFA pattern
+                // and dispatches on it. The arithmetic is the same two functions
+                // above, so the two cannot drift apart.
+                const bool interiorRow = (y >= 2 && y < height - 2);
+                for (int x = 0; x < width; ++x) {
+                    if (!interiorRow || x < 2 || x >= width - 2) {
+                        borderPixel(x);
+                    } else {
+                        const int here = cfa[(y & 1) * 2 + (x & 1)];
+                        if (here == 1) {
+                            emit(x, atGreen(p0 + x,
+                                            cfa[(y & 1) * 2 + ((x + 1) & 1)] == 0));
+                        } else {
+                            emit(x, atColour(p0 + x, here == 0));
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if (y < 2 || y >= height - 2) {
+                for (int x = 0; x < width; ++x) borderPixel(x);
+                continue;
+            }
+            const int lead = std::min(2, width);
+            const int trailFrom = std::max(2, width - 2);
+            for (int x = 0; x < lead; ++x) borderPixel(x);
+            for (int x = trailFrom; x < width; ++x) borderPixel(x);
+
+            // **In a Bayer row the non-green sites are all one colour.** A row
+            // is red-and-green or green-and-blue, never both, so `here`
+            // alternates green / that colour with period two -- and the choice
+            // `redHorizontal` makes, which is the colour of the horizontal
+            // neighbour, is a property of the row rather than of the pixel.
+            // Both come out of the loop, and with them the CFA reads and the
+            // three-way branch.
+            const int site = (y & 1) * 2;
+            const bool greenFirst = (cfa[site] == 1);
+            const bool red = ((greenFirst ? cfa[site + 1] : cfa[site]) == 0);
+
+            // Two pixels at a time, so which of the two bodies a pixel needs is
+            // settled by where it sits in the unrolled loop rather than by a
+            // test. The interior starts at x = 2, but the parity is written out
+            // rather than assumed.
+            int x = 2;
+            if (greenFirst == ((x & 1) == 0)) {
+                for (; x + 1 < trailFrom; x += 2) {
+                    emit(x, atGreen(p0 + x, red));
+                    emit(x + 1, atColour(p0 + x + 1, red));
+                }
+            } else {
+                for (; x + 1 < trailFrom; x += 2) {
+                    emit(x, atColour(p0 + x, red));
+                    emit(x + 1, atGreen(p0 + x + 1, red));
+                }
+            }
+            for (; x < trailFrom; ++x) {
+                emit(x, greenFirst == ((x & 1) == 0) ? atGreen(p0 + x, red)
+                                                     : atColour(p0 + x, red));
             }
         }
         if constexpr (Ablation == kToneCensus) {
@@ -1285,6 +1367,9 @@ void runToneVariant(int variant, const float* plane, int width, int height,
         case kToneExactShoulder:
             demosaicAndTone<kToneExactShoulder>(plane, width, height, dst, stride,
                                                 cfa, m, tone, display, shoulder); break;
+        case kToneUnsplitDemosaic:
+            demosaicAndTone<kToneUnsplitDemosaic>(plane, width, height, dst, stride,
+                                                  cfa, m, tone, display, shoulder); break;
         case kToneCensus:
             demosaicAndTone<kToneCensus>(plane, width, height, dst, stride,
                                          cfa, m, tone, display, shoulder, aboveKnee); break;

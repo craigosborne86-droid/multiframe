@@ -50,4 +50,13 @@ object ToneAblation {
      * bought, and comparing the two outputs is what it cost.
      */
     const val EXACT_SHOULDER = 8
+
+    /**
+     * The demosaic asking each pixel whether it is on the border and reading
+     * its own site out of the CFA pattern, which is what shipped until the loop
+     * was split by parity. Not an ablation: it reconstructs the same picture
+     * the slow way, through the same two arithmetic bodies, so timing it
+     * against [FULL] is what the restructuring bought.
+     */
+    const val UNSPLIT_DEMOSAIC = 9
 }
