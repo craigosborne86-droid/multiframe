@@ -63,6 +63,45 @@ class ShadingSpeedDeviceTest {
     /** As shot on this phone under tungsten: R x2.05, B x1.44. */
     private val balance = floatArrayOf(2.052f, 1f, 1f, 1.442f)
 
+    /**
+     * What folding one of the develop's three preparatory passes would save.
+     *
+     * `black`, `hotpixels` and `shading` are three separate sweeps of a 50 MB
+     * plane. Folding all three is possible but not free to write: hot pixels
+     * has to see values that are black-subtracted and not yet shaded, so it
+     * needs a two-row-lag pipeline and a halo at every band edge. Before
+     * building that, this prices it -- the second slot folds the first and third
+     * passes and runs hot pixels afterwards, which renders the wrong picture on
+     * purpose and costs exactly one sweep less.
+     */
+    @Test
+    fun foldingOneOfTheThreePreparatoryPassesIsPricedBeforeItIsBuilt() {
+        assertThat(NativeMerge.isAvailable()).isTrue()
+        val raw = NativeMerge.prepassBench(
+            width, height, SensorProfile.DEFAULT, balance, cameraLikeMap(),
+            DevelopParams().hotPixelThreshold, PREPASS_ROUNDS,
+        )
+        assertThat(raw).isNotNull()
+        val rounds = raw!!.size / 2
+        val a = LongArray(rounds) { raw[it * 2] }
+        val b = LongArray(rounds) { raw[it * 2 + 1] }
+        val wins = a.indices.count { b[it] < a[it] }
+        val ratios = a.indices.map { a[it].toDouble() / b[it] }.sorted()
+        Log.i(
+            TAG,
+            ("three passes median %dms range %d-%d; two passes median %dms " +
+                "range %d-%d; folding one is %.2fx, %d of %d rounds").format(
+                a.sorted()[rounds / 2] / 1000, a.min() / 1000, a.max() / 1000,
+                b.sorted()[rounds / 2] / 1000, b.min() / 1000, b.max() / 1000,
+                ratios[ratios.size / 2], wins, rounds,
+            ),
+        )
+        DeviceKind.warnIfNotAPhone(TAG)
+        // Reported, not asserted on: what this is for is the size of a prize,
+        // and a threshold would only encode today's answer to that.
+        assertThat(a.min()).isGreaterThan(0L)
+    }
+
     @Test
     fun theHarnessCannotSeparateTheShadingPassFromItself() {
         assertThat(NativeMerge.isAvailable()).isTrue()
@@ -190,5 +229,8 @@ class ShadingSpeedDeviceTest {
 
     private companion object {
         const val ROUNDS = 40
+
+        /** Fewer: each round is two runs of three full-frame passes. */
+        const val PREPASS_ROUNDS = 20
     }
 }

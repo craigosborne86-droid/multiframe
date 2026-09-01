@@ -3063,6 +3063,83 @@ The work that remains is the work.
 359 unit tests pass. **121 device tests pass in a clean full suite**, the
 capture consistency check included.
 
+## Fewer passes: can black, hotpixels and shading fold into one
+
+The per-pixel tail refused every peephole, so the question moved up a level. The
+develop's three preparatory stages are three separate sweeps of a 50 MB plane:
+
+    black       normalise and clamp, per pixel
+    hotpixels   a five-tap plus-shape at +/-2, in place
+    shading     interpolated gain and white balance, per pixel
+
+The first and third are pure per-pixel maps and fold trivially with each other.
+The second sits between them, and by design has to see values that are
+black-subtracted and **not yet shaded** — that is what lets the Kotlin fallback,
+which corrects the CFA in place with no plane at all, reach the same answer.
+
+### What folding one is worth
+
+Before designing a pipeline, price the prize. `nPrepassBench` runs the three as
+they ship against a version that folds the first and third and runs hot pixels
+afterwards — the wrong order on purpose, the right cost:
+
+    three passes   median 76, 76, 85 ms
+    two passes     median 54, 61, 63 ms
+    folding one    1.25 - 1.29x        57 of 60 rounds
+
+**A quarter of the three, for one fewer sweep.** So these stages are dominated by
+moving the plane, not by the arithmetic on it — which is the opposite of what the
+per-pixel tail turned out to be, and the reason the same trick failed there and
+works here.
+
+### The two shapes that would fold all three
+
+**A two-row-lag pipeline.** Black-subtract row y+2, hot-pixel row y, shade row
+y-2, all in one sweep. A pixel is last read by the one two rows below it, so
+shading can follow at that distance and nothing reads a shaded value. Each band
+needs its own two-row halo black-subtracted at each end, which is about 6% of
+rows done twice.
+
+**Or move the detection into the raw domain, which is algebraically free.** Hot
+pixels compares a site against four neighbours at +/-2 — and +/-2 preserves
+parity, so all five are the *same CFA site* and share the same black level. The
+subtraction is therefore an order-isomorphism on the comparison:
+
+    (v-b)/r > (n-b)/r + t     <=>     v > n + t*r
+
+Detection could run on the merged `uint16` with the threshold scaled by `range`,
+and then black and shading fold with nothing between them. The exception is the
+`max(..., 0)` clamp, which is monotone but not affine, so the equivalence breaks
+for sites below the black level — deep shadow noise. That is a real caveat and it
+is why this is written down rather than done.
+
+### A data race, found on the way
+
+`suppressHotPixels` splits the plane into bands, and each band reads rows y-2 and
+y+2 while writing row y. At the last two rows of a band those reads land in the
+*next* band, which another thread may be writing at that moment.
+
+**So the develop is not deterministic.** The window is small — a defective site
+within two rows of a band edge, and a read that happens to race the write — and
+the value differs by at most one hot-pixel correction. But every A/A in this
+project assumes the pass is a function of its input, and this one is not quite.
+It has never shown up because the benches that assert bit-equality do not run the
+hot pixel stage.
+
+Worth fixing on its own account, and it also decides the fusion's semantics:
+whichever shape gets built, the halo rows are black-subtracted but *not*
+hot-pixel-corrected, which is a deterministic answer where the current one is a
+racy one.
+
+### What is here
+
+The bench and the extracted `applyBlackLevel`, and nothing else. The prize is
+measured, the two designs are written down with the arithmetic that justifies
+them, and the race is recorded. Building the pipeline is a session's work on its
+own and it should start from a green suite, not from the end of a long one.
+
+359 unit tests pass. **122 device tests pass in a clean full suite.**
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a

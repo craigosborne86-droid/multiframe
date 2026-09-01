@@ -1008,6 +1008,88 @@ void applyShadingHoisted(float* plane, int width, int height,
     });
 }
 
+/** Black level, normalise and clamp. The develop's first pass, on its own. */
+void applyBlackLevel(const uint16_t* src, float* plane, int width, int height,
+                     const int* black, float range) {
+    parallelBands(height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y) {
+            const int rowParity = (y & 1) * 2;
+            const size_t rowBase = static_cast<size_t>(y) * width;
+            for (int x = 0; x < width; ++x) {
+                const int site = rowParity + (x & 1);
+                plane[rowBase + x] =
+                    std::max((static_cast<float>(src[rowBase + x]) - black[site]) / range, 0.0f);
+            }
+        }
+    });
+}
+
+/**
+ * The first and third passes in one, for the harness.
+ *
+ * Both are pure per-pixel maps, so they fold trivially -- *if* nothing has to
+ * happen between them. Something does: the hot pixel pass sits in the middle
+ * and has to see values that are black-subtracted and not yet shaded. So this
+ * is not a shipping path and it renders a wrong picture; it exists to price one
+ * fewer sweep of a 50 MB plane before anyone builds the pipeline that would
+ * fold all three honestly.
+ */
+void applyBlackAndShading(const uint16_t* src, float* plane, int width, int height,
+                          const int* black, float range,
+                          const float* shadingPtr, int columns, int rows,
+                          const float* wb) {
+    const bool tabulated =
+        shadingPtr != nullptr && columns > 0 && rows > 0 && width > 1 && height > 1;
+    ShadingPlan plan;
+    if (tabulated) plan = buildShadingPlan(columns, width);
+
+    parallelBands(height, [&](int yStart, int yEnd) {
+        for (int y = yStart; y < yEnd; ++y) {
+            const int rowParity = (y & 1) * 2;
+            const size_t rowBase = static_cast<size_t>(y) * width;
+
+            auto blackAt = [&](int x) {
+                const int site = rowParity + (x & 1);
+                return std::max(
+                    (static_cast<float>(src[rowBase + x]) - black[site]) / range, 0.0f);
+            };
+
+            if (!tabulated) {
+                for (int x = 0; x < width; ++x) {
+                    plane[rowBase + x] = blackAt(x) * wb[rowParity + (x & 1)];
+                }
+                continue;
+            }
+
+            const float fy = (static_cast<float>(y) / (height - 1)) * (rows - 1);
+            const int y0 = std::clamp(static_cast<int>(fy), 0, rows - 1);
+            const int y1 = std::min(y0 + 1, rows - 1);
+            const float ty = std::clamp(fy - y0, 0.0f, 1.0f);
+            const float* upper = shadingPtr + static_cast<size_t>(y0) * columns * 4;
+            const float* lower = shadingPtr + static_cast<size_t>(y1) * columns * 4;
+
+            for (const ShadingPlan::Run& run : plan.runs) {
+                float a0[2], a1[2], b0[2], b1[2];
+                for (int p = 0; p < 2; ++p) {
+                    const int channel = rowParity + p;
+                    a0[p] = upper[static_cast<size_t>(run.x0) * 4 + channel];
+                    a1[p] = upper[static_cast<size_t>(run.x1) * 4 + channel];
+                    b0[p] = lower[static_cast<size_t>(run.x0) * 4 + channel];
+                    b1[p] = lower[static_cast<size_t>(run.x1) * 4 + channel];
+                }
+                for (int x = run.from; x < run.to; ++x) {
+                    const int p = x & 1;
+                    const float tx = plan.tx[static_cast<size_t>(x)];
+                    const float top = a0[p] * (1.0f - tx) + a1[p] * tx;
+                    const float bottom = b0[p] * (1.0f - tx) + b1[p] * tx;
+                    plane[rowBase + x] =
+                        blackAt(x) * (top * (1.0f - ty) + bottom * ty) * wb[rowParity + p];
+                }
+            }
+        }
+    });
+}
+
 /**
  * Replaces defective sensor sites in a normalised CFA plane.
  *
@@ -1767,17 +1849,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     // domain -- which is what lets the Kotlin fallback, which has no plane to
     // work on and corrects the CFA in place, arrive at the same answer.
     tBlack = nowMicros();
-    parallelBands(height, [&](int y0, int y1) {
-        for (int y = y0; y < y1; ++y) {
-            const int rowParity = (y & 1) * 2;
-            const size_t rowBase = static_cast<size_t>(y) * width;
-            for (int x = 0; x < width; ++x) {
-                const int site = rowParity + (x & 1);
-                plane[rowBase + x] =
-                    std::max((static_cast<float>(src[rowBase + x]) - black[site]) / range, 0.0f);
-            }
-        }
-    });
+    applyBlackLevel(src, plane.data(), width, height, black, range);
 
     tHotPixels = nowMicros();
     if (hotPixelThreshold > 0.0f) {
@@ -1814,6 +1886,102 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
 
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
+}
+
+/**
+ * What the develop's three preparatory passes cost, and what folding one saves.
+ *
+ * `black`, `hotpixels` and `shading` are three separate sweeps of a 50 MB plane
+ * and the obvious question is whether they can be one. The first and third are
+ * pure per-pixel maps and fold trivially; the second sits between them and has
+ * to see values that are black-subtracted and not yet shaded, so an honest fold
+ * needs a software pipeline with a two-row lag and a halo at every band edge.
+ *
+ * That is a lot to build on a guess. This prices the guess: slot A runs the
+ * three as they ship, slot B runs black-and-shading folded with hot pixels
+ * after. B renders the wrong picture -- the order is wrong on purpose -- and
+ * what it measures is one fewer sweep, which is the whole prize.
+ */
+JNIEXPORT jlongArray JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nPrepassBench(
+        JNIEnv* env, jobject, jint width, jint height,
+        jintArray jcfa, jintArray jblack, jint white, jfloatArray jgains,
+        jfloatArray jshading, jint columns, jint rows,
+        jfloat hotPixelThreshold, jint roundCount) {
+    if (width < 8 || height < 8 || roundCount <= 0) return nullptr;
+
+    int cfa[4], black[4];
+    float gains[4], wb[4];
+    env->GetIntArrayRegion(jcfa, 0, 4, cfa);
+    env->GetIntArrayRegion(jblack, 0, 4, black);
+    env->GetFloatArrayRegion(jgains, 0, 4, gains);
+    balanceBySite(cfa, gains, wb);
+
+    std::vector<float> map;
+    const float* shadingPtr = nullptr;
+    if (jshading != nullptr && columns > 0 && rows > 0) {
+        const jsize count = env->GetArrayLength(jshading);
+        if (count == columns * rows * 4) {
+            map.resize(static_cast<size_t>(count));
+            env->GetFloatArrayRegion(jshading, 0, count, map.data());
+            shadingPtr = map.data();
+        }
+    }
+
+    const int lo = std::min(std::min(black[0], black[1]), std::min(black[2], black[3]));
+    const float range = static_cast<float>(std::max(1, white - lo));
+
+    const size_t pixels = static_cast<size_t>(width) * height;
+    std::vector<uint16_t> src(pixels);
+    std::vector<float> plane(pixels);
+    // A merged frame's shape: a ramp with detail on it, sites tinted as a white
+    // balanced sensor's are, and one site in ten thousand stuck high so the hot
+    // pixel pass has something to find and to branch on.
+    for (size_t i = 0; i < pixels; ++i) {
+        const int x = static_cast<int>(i % static_cast<size_t>(width));
+        const int y = static_cast<int>(i / static_cast<size_t>(width));
+        const int site = (y & 1) * 2 + (x & 1);
+        const float tint = (site == 0) ? 1.18f : (site == 3) ? 1.09f : 1.0f;
+        float v = 64.0f + 700.0f * (0.35f * x / width + 0.65f * y / height);
+        v += 40.0f * std::sin(x * 0.21f) * std::sin(y * 0.17f);
+        v *= tint;
+        if ((i * 2654435761u % 10000u) == 0u) v += 600.0f;
+        src[i] = static_cast<uint16_t>(std::clamp(v, 0.0f, 1023.0f));
+    }
+
+    auto three = [&]() {
+        applyBlackLevel(src.data(), plane.data(), width, height, black, range);
+        if (hotPixelThreshold > 0.0f) {
+            suppressHotPixels(plane.data(), width, height, hotPixelThreshold);
+        }
+        applyShadingHoisted(plane.data(), width, height, shadingPtr, columns, rows, wb);
+    };
+    auto two = [&]() {
+        applyBlackAndShading(src.data(), plane.data(), width, height, black, range,
+                             shadingPtr, columns, rows, wb);
+        if (hotPixelThreshold > 0.0f) {
+            suppressHotPixels(plane.data(), width, height, hotPixelThreshold);
+        }
+    };
+
+    // Untimed: faults the pages in and lets the cores come up to clock.
+    three();
+    two();
+
+    std::vector<jlong> out(static_cast<size_t>(roundCount) * 2, 0);
+    for (int r = 0; r < roundCount; ++r) {
+        int64_t tA = 0, tB = 0;
+        auto slotA = [&]() { const int64_t t = nowMicros(); three(); tA = nowMicros() - t; };
+        auto slotB = [&]() { const int64_t t = nowMicros(); two();   tB = nowMicros() - t; };
+        if ((r & 1) == 0) { slotA(); slotB(); } else { slotB(); slotA(); }
+        out[static_cast<size_t>(r) * 2] = tA;
+        out[static_cast<size_t>(r) * 2 + 1] = tB;
+    }
+
+    jlongArray result = env->NewLongArray(static_cast<jsize>(out.size()));
+    if (result == nullptr) return nullptr;
+    env->SetLongArrayRegion(result, 0, static_cast<jsize>(out.size()), out.data());
+    return result;
 }
 
 /**

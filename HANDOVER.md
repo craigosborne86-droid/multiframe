@@ -10,7 +10,7 @@ holds the reasoning behind everything below.
 no release paperwork — deferred by the owner's decision, and nothing in the
 current work depends on any of it.
 
-Everything builds. **359 unit tests pass**, and **121 device tests** pass on the
+Everything builds. **359 unit tests pass**, and **122 device tests** pass on the
 phone in a clean full suite. The capture consistency check fails once the phone
 is short of memory, which is device state and not a regression — see the
 measurement rules below. The build on the phone is current HEAD, md5 verified.
@@ -200,7 +200,46 @@ critical path. The roll-off, the desaturation and the display chain each cost
 about a fifth of the pass and none of them has a part that can be made cheaper.
 Everything that has worked here was in the demosaic; nothing tried in the tail
 has. **If you want this pass faster, the honest next move is not another
-peephole — it is fewer passes, or a different shape for the whole tail.**
+peephole — it is fewer passes.**
+
+### Fewer passes, which is priced and not yet built
+
+`black`, `hotpixels` and `shading` are three sweeps of a 50 MB plane.
+`nPrepassBench` prices folding one of them — it runs the three as they ship
+against black-and-shading folded with hot pixels after, which is the wrong order
+on purpose:
+
+    three passes   median 76, 76, 85 ms
+    two passes     median 54, 61, 63 ms
+    folding one    1.25 - 1.29x        57 of 60 rounds
+
+**A quarter of the three for one fewer sweep.** These stages are dominated by
+moving the plane, not by the arithmetic on it — the opposite of the per-pixel
+tail, which is why the same trick fails there and works here.
+
+Two shapes would fold all three. Hot pixels has to see values black-subtracted
+and not yet shaded, so either:
+
+- **a two-row-lag pipeline** — black-subtract row y+2, hot-pixel row y, shade
+  row y-2, one sweep. A pixel is last read by the one two rows below it. Each
+  band needs a two-row halo black-subtracted at each end, about 6% of rows twice.
+- **or move detection into the raw domain**, which is free algebraically:
+  hot pixels compares a site against four neighbours at ±2, ±2 preserves parity,
+  so all five are the same CFA site with the same black level, and
+  `(v-b)/r > (n-b)/r + t` is exactly `v > n + t*r`. Run it on the merged
+  `uint16` with the threshold scaled by `range` and black and shading fold with
+  nothing between them. **Caveat:** the `max(...,0)` clamp is monotone but not
+  affine, so the equivalence breaks for sites below the black level — deep
+  shadow noise. Check that before relying on it.
+
+**And fix the race first.** `suppressHotPixels` reads rows y±2 while writing row
+y, and at a band's last two rows those reads land in the next band, which another
+thread may be writing. The develop is therefore not deterministic — a defective
+site within two rows of a band edge, read racing write. The window is tiny and it
+has never shown up because the benches that assert bit-equality do not run the
+hot pixel stage, but every A/A here assumes the pass is a function of its input.
+Whichever fusion gets built makes this deterministic anyway, since the halo rows
+are black-subtracted and not hot-pixel-corrected.
 
 **Read those as shares, not as costs.** The colour matrix was under the floor,
 then 1.09-1.25x with 57 of 64 rounds, then under the floor again, without the

@@ -171,6 +171,11 @@ class NativeMerge private constructor(
         minChroma: Float, innerRadius: Float,
     ): Int
     private external fun nReleaseScratch()
+    private external fun nPrepassBench(
+        width: Int, height: Int, cfa: IntArray, black: IntArray, white: Int,
+        gains: FloatArray, shading: FloatArray, columns: Int, rows: Int,
+        hotPixelThreshold: Float, rounds: Int,
+    ): LongArray?
     private external fun nShadingBench(
         width: Int, height: Int, cfa: IntArray, gains: FloatArray,
         shading: FloatArray, columns: Int, rows: Int,
@@ -286,6 +291,35 @@ class NativeMerge private constructor(
                 params.exposureGain, params.shoulderKnee, params.contrast,
                 params.highlightDesaturation, params.desaturationStart,
                 params.blackPoint, variantA, variantB, rounds,
+            )
+        }
+
+        /**
+         * What the develop's three preparatory passes cost, and what folding
+         * one of them saves.
+         *
+         * `black`, `hotpixels` and `shading` are three sweeps of a 50 MB plane.
+         * The first and third are pure per-pixel maps and fold trivially; the
+         * second sits between them and must see values black-subtracted and not
+         * yet shaded, so folding all three honestly needs a two-row-lag pipeline
+         * and a halo at every band edge. This prices that before it is built:
+         * the second slot folds the first and third and runs hot pixels after,
+         * which is the wrong picture and the right cost.
+         */
+        internal fun prepassBench(
+            width: Int,
+            height: Int,
+            profile: SensorProfile,
+            gains: FloatArray,
+            map: ShadingMap,
+            hotPixelThreshold: Float,
+            rounds: Int,
+        ): LongArray? {
+            if (!isAvailable()) return null
+            val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+            return NativeMerge(0L, 0, 0, profile).nPrepassBench(
+                width, height, profile.cfaPattern, black, profile.whiteLevel,
+                gains, map.gains, map.columns, map.rows, hotPixelThreshold, rounds,
             )
         }
 
