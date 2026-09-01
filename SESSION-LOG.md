@@ -2997,6 +2997,72 @@ per-pixel tail has failed, in the same way, for the same reason.
 
 359 unit tests pass. 121 device tests pass.
 
+## The roll-off's other half, which splits cleanly and then stops
+
+The table took the exponential and the divide out of the highlight roll-off and
+the block still costs a fifth of the pass. So the block was split again, with a
+variant that keeps the branch and the three multiplies and replaces the lookup
+with a constant:
+
+    the whole roll-off block                    1.16 - 1.22x   56 of 64 rounds
+    its lookup, keeping branch and multiplies   1.08 - 1.27x   51 of 64 rounds
+
+**This is the first part of the per-pixel tail to separate since the
+exponential.** The desaturation refused to — four of its parts measured at
+nothing while the whole block measured at a fifth — and so did the display
+chain. Here the halves come apart, and the lookup is the larger of the two.
+
+### And then it stops, which is a result with four numbers behind it
+
+Reading an interpolated table costs twelve operations. Exactly one of them is
+removable, and none of the cheaper shapes survives contact with a figure this log
+already has.
+
+**The dead clamp.** `std::max((p - knee) * indexScale, 0.0f)` cannot go negative:
+the caller only enters the lookup when `p > knee`. Removing it is exact and it is
+one operation of twelve in a block worth 1.10x — **1.008x at the very best**,
+against a harness whose floor is 1.05 to 1.10x. Writing a probe for it would be
+the same mistake as the display table's, made a day after writing that mistake
+down. So it is left alone and not claimed.
+
+**Storing the slope beside the value**, so the interpolation is one fma. It saves
+a single subtract and nothing else, because `scale[i]` and `scale[i + 1]` are
+already adjacent and already one cache line. It doubles the table to 16 KB, which
+is exactly the size that cost a dark frame 5 to 13 per cent, 46 rounds of 64,
+when that was measured directly.
+
+**Nearest entry, no interpolation at all**, which would take five operations out.
+The step would have to be fine enough that the scale moves by well under a
+display bin between entries: 13,366 entries, **52 KB** — three times the size
+that already regressed.
+
+**Folding the scale into the display's ×4095.** This one is real and worth
+writing down. The desaturation's blend factors the roll-off's scale out —
+`r'' = scale · (r(1−mix) + peak·mix)` — so the scale could ride into the display
+index as one multiply instead of two, saving three per pixel. It needs the
+display clamp's upper bound gone, which the arithmetic does support: values reach
+the display bounded by 1 plus about 5e-6, against a bin boundary at 1.000244.
+**A forty-fold margin, and still the wrong trade** — the failure mode is an
+out-of-bounds read of a 4 KB table, and the payoff is three operations of about
+thirty in a tail that has refused every previous attempt.
+
+### Nothing changed but the instrument
+
+No optimisation this round. What is kept is `kToneFlatShoulder`, because a
+future reader looking at `removing its roll-off: 1.20x` should be able to find
+out, without rebuilding anything, that it is half the lookup and half the work —
+and therefore that the half worth attacking has already been attacked.
+
+Three stages of the per-pixel tail have now been taken apart: the roll-off, the
+desaturation, the display chain. Between them they are most of what is left of
+`demosaic+tone`. **Every one of them costs about a fifth of the pass and none of
+them has a part that can be made cheaper.** The pattern is consistent enough to
+state as a finding rather than three coincidences: this tail is latency-bound.
+The work that remains is the work.
+
+359 unit tests pass. **121 device tests pass in a clean full suite**, the
+capture consistency check included.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a

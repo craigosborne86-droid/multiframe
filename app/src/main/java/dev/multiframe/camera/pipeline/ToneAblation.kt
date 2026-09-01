@@ -78,4 +78,13 @@ object ToneAblation {
      * it sees is a fifth of the pass. Renders noise on purpose.
      */
     const val NO_DISPLAY_CHAIN = 11
+
+    /**
+     * The roll-off with its branch and its three multiplies kept and the table
+     * lookup replaced by a constant. Splits what is left of the roll-off, after
+     * the table already took the exponential and the divide out of it, into the
+     * cost of *reading* the curve and the cost of applying it. Renders a wrong
+     * picture on purpose.
+     */
+    const val FLAT_SHOULDER = 12
 }

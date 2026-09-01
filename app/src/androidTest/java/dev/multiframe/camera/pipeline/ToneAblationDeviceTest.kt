@@ -87,6 +87,7 @@ class ToneAblationDeviceTest {
             "the whole display chain" to ToneAblation.NO_DISPLAY_CHAIN,
             "renderLinear" to ToneAblation.NO_RENDER,
             "its roll-off" to ToneAblation.NO_SHOULDER,
+            "the roll-off's lookup, keeping its multiplies" to ToneAblation.FLAT_SHOULDER,
             "its desaturation" to ToneAblation.NO_DESAT,
             "the roll-off's table, for the arithmetic" to ToneAblation.EXACT_SHOULDER,
             "the vector demosaic, for the scalar one" to ToneAblation.SCALAR_DEMOSAIC,

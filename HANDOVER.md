@@ -180,12 +180,27 @@ it. `kToneNoDisplayChain` is the probe that can see them, and it puts the chain
 at 1.06-1.32x. Vectorising those three operations bought nothing, through the
 stack or through lane extracts, 69 rounds of 128.
 
-**Both failures have the same cause and it is worth stating once.** The
+**The roll-off is the third fifth, and it does split** — unlike the other two.
+`kToneFlatShoulder` keeps its branch and its three multiplies and drops the
+lookup: the lookup is 1.08-1.27x, 51 of 64 rounds, and is the larger of the two
+halves. But
+every cheaper shape for the lookup is closed by a number this log already has:
+the one dead operation in it is worth 1.008x at best against a floor of
+1.05-1.10x; storing the slope beside the value saves a single subtract (the two
+entries are already one cache line) and doubles the table to the 16 KB that cost
+dark frames 5-13%; nearest-entry needs 13,366 entries, 52 KB; and folding the
+scale into the display's ×4095 saves three multiplies but buys them with an
+out-of-bounds read of a 4 KB table on the strength of an analysis.
+
+**All three failures have the same cause and it is worth stating once.** The
 per-pixel tail is latency-bound, not throughput-bound: the arithmetic already
 sits in the slack left by the dependency on `renderLinear`'s output and by the
 stores, so making it cheaper or wider compresses something that is not the
-critical path. Everything that has worked here was in the demosaic; nothing tried
-in the tail has.
+critical path. The roll-off, the desaturation and the display chain each cost
+about a fifth of the pass and none of them has a part that can be made cheaper.
+Everything that has worked here was in the demosaic; nothing tried in the tail
+has. **If you want this pass faster, the honest next move is not another
+peephole — it is fewer passes, or a different shape for the whole tail.**
 
 **Read those as shares, not as costs.** The colour matrix was under the floor,
 then 1.09-1.25x with 57 of 64 rounds, then under the floor again, without the

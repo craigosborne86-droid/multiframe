@@ -777,7 +777,8 @@ void buildShoulderLut(ShoulderLut& lut, const ToneParams& t) {
  * test holds it to -- within a tolerance now rather than exactly, because of the
  * table above.
  */
-template <bool Shoulder, bool Desat, bool RealExp = true, bool Tabulated = true>
+template <bool Shoulder, bool Desat, bool RealExp = true, bool Tabulated = true,
+          bool RealScale = true>
 inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t,
                               const ShoulderLut& shoulder) {
     r = std::max(r, 0.0f);
@@ -797,9 +798,14 @@ inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t,
         // been indistinguishable from one that skipped the roll-off entirely.
         // Branchless cost such a frame 0.89x, 14 rounds of 16 against it.
         if (scenePeak > t.knee) {
-            const float scale = Tabulated
-                ? shoulder(scenePeak)
-                : shoulderCurveParts<RealExp>(scenePeak, t.knee) / scenePeak;
+            // RealScale is false only for the harness. It keeps the branch and
+            // the three multiplies and drops the lookup entirely, which is what
+            // separates the cost of *reading* the curve from the cost of
+            // applying it. Renders a wrong picture on purpose.
+            const float scale = !RealScale
+                ? 0.9f
+                : (Tabulated ? shoulder(scenePeak)
+                             : shoulderCurveParts<RealExp>(scenePeak, t.knee) / scenePeak);
             r *= scale; g *= scale; b *= scale;
         }
     }
@@ -1123,7 +1129,8 @@ enum ToneAblation {
     kToneUnsplitDemosaic = 9,  // the demosaic dispatching per pixel on its site
     kToneScalarDemosaic = 10,  // the split loop, a pixel at a time
     kToneNoDisplayChain = 11,  // no clamp, no scale, no convert and no lookup
-    kToneCensus = 12,    // as shipped, and counts which way the branches went
+    kToneFlatShoulder = 12,    // the roll-off's branch and multiplies, no lookup
+    kToneCensus = 13,    // as shipped, and counts which way the branches went
 };
 
 /**
@@ -1306,6 +1313,9 @@ void demosaicAndTone(const float* plane, int width, int height,
                     renderLinearParts<true, false>(r, g, b, tone, shoulder);
                 } else if constexpr (Ablation == kToneNoExp) {
                     renderLinearParts<true, true, false, false>(r, g, b, tone, shoulder);
+                } else if constexpr (Ablation == kToneFlatShoulder) {
+                    renderLinearParts<true, true, true, true, false>(r, g, b, tone,
+                                                                     shoulder);
                 } else if constexpr (Ablation == kToneExactShoulder) {
                     renderLinearParts<true, true, true, false>(r, g, b, tone, shoulder);
                 } else if constexpr (Ablation != kToneNoRender) {
@@ -1588,6 +1598,9 @@ void runToneVariant(int variant, const float* plane, int width, int height,
         case kToneNoDisplayChain:
             demosaicAndTone<kToneNoDisplayChain>(plane, width, height, dst, stride,
                                                  cfa, m, tone, display, shoulder); break;
+        case kToneFlatShoulder:
+            demosaicAndTone<kToneFlatShoulder>(plane, width, height, dst, stride,
+                                               cfa, m, tone, display, shoulder); break;
         case kToneCensus:
             demosaicAndTone<kToneCensus>(plane, width, height, dst, stride,
                                          cfa, m, tone, display, shoulder, aboveKnee); break;
