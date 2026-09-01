@@ -65,6 +65,14 @@ class ToneAblationDeviceTest {
         // The instrument passes by failing to tell the two apart, and the claim
         // it has to fail to make is the paired one, because that is the claim
         // the ablations will make.
+        //
+        // Thirty to seventy per cent is the band; the rounds are what make it
+        // affordable. At twenty rounds it is 6 to 14, which a fair coin falls
+        // outside of 4% of the time -- and it did, at 15 of 20, in a full-suite
+        // run. That is a test that cries wolf once a month and gets written
+        // down as flakiness, which is how the four failures this suite's other
+        // consistency test suffered were misread for four sessions. At forty it
+        // is 12 to 28 and the same band costs 0.6%.
         assertThat(run.wins()).isAtLeast(AA_ROUNDS * 3 / 10)
         assertThat(run.wins()).isAtMost(AA_ROUNDS * 7 / 10)
     }
@@ -179,6 +187,8 @@ class ToneAblationDeviceTest {
 
     private companion object {
         const val ROUNDS = 16
-        const val AA_ROUNDS = 20
+
+        /** Forty, not twenty, so the A/A's band is not a coin flip. See above. */
+        const val AA_ROUNDS = 40
     }
 }

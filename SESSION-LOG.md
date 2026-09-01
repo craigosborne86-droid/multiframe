@@ -2175,6 +2175,10 @@ been a second teardown path racing the one that works.
 consistency check failing once at 38.6 C after four minutes of load and passing
 on its own, which is the thermal flakiness this log has recorded twice before.
 
+> **It was not thermal.** It was the MediaStore publish, and the temperature
+> beside each of these failures was a coincidence of when the suite ran them.
+> See *Four failures blamed on heat, none of which were heat*.
+
 ## Looking at the photographs, which nothing here had done
 
 Every claim in this log about the pipeline had been a claim about *arithmetic*:
@@ -2355,6 +2359,11 @@ is a rearrangement *of*, and something has to say so.
 of load and passing on its own — the thermal flakiness this log has now
 recorded three times.
 
+> **Not thermal.** Recording a temperature next to a failure three times running
+> is not evidence that the temperature caused it, and this is what that looks
+> like from the inside. See *Four failures blamed on heat, none of which were
+> heat*.
+
 ## What the largest item in a capture is made of
 
 `demosaic+tone` is 170-250 ms of a develop and has always reported as one
@@ -2455,6 +2464,8 @@ still the only authority on that. The ratios are what transfers.
 `repeatedCapturesTakeAConsistentTime` failing once in the full-suite run after
 six minutes of load and passing on its own, which is now four times.
 
+> **The fourth and last.** It was never the heat; see the entry after next.
+
 ## A harness that was never reading high
 
 `MergeSpeedDeviceTest` times the burst accumulation, and every version of this
@@ -2511,6 +2522,82 @@ grounds for thinking it is not a regression are that all the parity tests pass,
 that the stage inflation is uniform rather than localised, and that a
 compile-time template cannot make a runtime spread wider. The next session
 should run it first, on a rested phone, before anything else.
+
+## Four failures blamed on heat, none of which were heat
+
+`ZslStreamDeviceTest#repeatedCapturesTakeAConsistentTime` asserts that the
+slowest of three shots is within 1.4x of the fastest. It had failed four times
+across this log and each was written down as thermal flakiness, on the evidence
+that it passed again later.
+
+Run on a phone at 35.6 C with 91% battery, off charge, it still failed.
+
+### The breakdown says what it is
+
+    shot   native   encode   publish   total
+    1      259      86       117       483
+    2      233      98        82       442
+    3      200      83       260       579
+    4      202      63       495       784
+
+**The pipeline settles and the MediaStore publish runs away.** The native
+develop falls 259, 233, 200, 202 — the 150 MB of develop buffers are retained
+across captures but not across processes, so the first shot of a run still
+faults them in. The encode holds between 63 and 98. The publish quadruples.
+
+That is content-provider work on a volume 90% full, into a folder holding
+eighty-odd captures this project's own instrumentation put there. It is the
+phone's storage, not this app's pipeline, and it is where essentially all the
+shot-to-shot variation lives.
+
+### Why it started failing when it did
+
+The test was written to defend a claim about the develop scratch buffers:
+freeing them between shots gave 925, 1259 and 959 ms, keeping them gave 849,
+826 and 840. Three consistent numbers. The publish was inside those too and
+nobody noticed, because at 850 ms a shot a 200 ms wobble is a quarter and the
+threshold is 1.4.
+
+**The denominator moved.** Four sessions of optimisation took a develop under
+400 ms and the publish did not shrink with it, so the same fixed wobble became
+half a shot. The threshold never drifted; the app got faster underneath it.
+
+### What the test does now
+
+It throws away a shot, which is what its own name asks for and what every other
+harness here does, and it asserts on the develop **less the publish** — which
+needed the publish naming in the result rather than only in a log line, the
+third time this log has had to split one reported figure into two.
+
+Both discarded quantities stay in the log. The warm-up is a real cost somebody
+pays on opening the app and the publish is a real cost they pay on every shot;
+neither belongs to this pipeline and both should stay visible.
+
+Ten runs standing alone and one full suite: all passed. **The full suite is the
+one that matters**, because that is where all four historical failures happened.
+
+### And a threshold that was a round number rather than a distribution
+
+The same suite run then failed the tone harness's A/A at 15 wins of 20, against
+a band of 30 to 70 per cent. That band is 6 to 14 at twenty rounds, and a fair
+coin falls outside it **4.1% of the time** — a test that cries wolf once a month
+and gets written down as flakiness, which is exactly the mistake the rest of
+this entry is about.
+
+Forty rounds, same band, 0.6%. It now reads 19 and 20 of 40.
+
+### The develop on a rested phone
+
+Worth recording, because every figure in the last two entries came from a phone
+that was not:
+
+    black 18-21ms, hotpixels 15-20ms, shading 18-20ms, demosaic+tone 99ms
+
+Settled shots, 4080x3072, 36 C. Not comparable with the 38 ms shading or the
+146 ms `demosaic+tone` recorded on other days, by this log's own rule.
+
+359 unit tests pass. 119 device tests pass on the phone — a clean full suite,
+which this log has not been able to record before.
 
 ## Outstanding for release
 

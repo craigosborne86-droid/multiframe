@@ -29,6 +29,14 @@ object ImageSaver {
         displayName: String,
         quality: Int = 95,
         metadata: CaptureMetadata? = null,
+        /**
+         * Filled with the MediaStore publish alone, for a caller that needs it
+         * separated from the encode. It is the volatile half by a long way --
+         * measured across four consecutive shots the encode held at 63-98 ms
+         * while the publish went 117, 82, 260, 495 -- so a figure that adds the
+         * two together is mostly a statement about the phone's storage.
+         */
+        publishMillis: LongArray? = null,
     ): Uri? {
         var encoder = "strips"
         var compressMillis = 0L
@@ -60,10 +68,12 @@ object ImageSaver {
         // Split because "encode and save" was measured at 284-375 ms without
         // anyone knowing which half it was -- and it was measured on a disk
         // that was 98% full, where the write and the publish are both suspect.
+        val published = System.currentTimeMillis() - tPublishStart[0]
+        publishMillis?.set(0, published)
         Log.i(
             TAG,
             "saveJpeg: %s compress+write %dms, publish %dms".format(
-                encoder, compressMillis, System.currentTimeMillis() - tPublishStart[0],
+                encoder, compressMillis, published,
             ),
         )
         return uri

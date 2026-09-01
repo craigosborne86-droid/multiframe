@@ -42,6 +42,14 @@ data class RawBurstResult(
     val burstSpanMillis: Long = 0,
     /** Streaming health at the moment of capture, when the ring supplied it. */
     val streamStats: String? = null,
+    /**
+     * The MediaStore publish inside [developMillis], which is the part of a
+     * shutter press that belongs to the phone's storage rather than to this
+     * app. Split out because it is where nearly all the shot-to-shot variation
+     * lives, and a consistency claim about the pipeline cannot be made through
+     * it.
+     */
+    val publishMillis: Long = 0,
 )
 
 /**
@@ -250,6 +258,7 @@ object RawBurstCapture {
         val rotateMillis = System.currentTimeMillis() - tRotate
 
         val tEncode = System.currentTimeMillis()
+        val publish = longArrayOf(0L)
         val jpegName = "MF_${stamp}_${tag}_${captured}f.jpg"
         // Bitmap.compress writes no metadata at all, so without this every
         // photograph arrives in a library with no camera, no lens and no
@@ -263,6 +272,7 @@ object RawBurstCapture {
                 lens = lens,
                 frames = captured,
             ),
+            publishMillis = publish,
         ) != null
         bitmap.recycle()
         val encodeMillis = System.currentTimeMillis() - tEncode
@@ -294,10 +304,11 @@ object RawBurstCapture {
         // being aimed at the wrong one, which has now happened twice.
         Log.i(
             TAG,
-            "develop breakdown: setup %dms, native %dms, rotate %dms, encode+save %dms".format(
+            ("develop breakdown: setup %dms, native %dms, rotate %dms, " +
+                "encode %dms, publish %dms").format(
                 setupMillis,
                 developMillis - setupMillis - rotateMillis - encodeMillis,
-                rotateMillis, encodeMillis,
+                rotateMillis, encodeMillis - publish[0], publish[0],
             ),
         )
 
@@ -313,6 +324,7 @@ object RawBurstCapture {
             if (parts.isEmpty()) "merge ok but nothing could be written"
             else "raw merge -> ${parts.joinToString(" + ")}, $captured frames",
             handoverMicros, burstSpanMillis, streamStats,
+            publishMillis = publish[0],
         )
     }
 

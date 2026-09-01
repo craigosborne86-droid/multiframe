@@ -11,23 +11,24 @@ no release paperwork — deferred by the owner's decision, and nothing in the
 current work depends on any of it.
 
 Everything builds. **359 unit tests pass**, and **119 device tests** pass on the
-phone. The build on the phone is current HEAD, md5 verified.
+phone — a clean full suite, which this log had not previously recorded: the
+consistency check that failed four runs in a row turned out not to be flaky at
+all. The build on the phone is current HEAD, md5 verified.
 
 The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
 in about a second and writes a DNG and a JPEG to the gallery, and the status
 line says what the merge bought: `8 frames · 91% kept`.
 
-**Run `ZslStreamDeviceTest#repeatedCapturesTakeAConsistentTime` first, on a
-rested phone.** It asserts the slowest of three shots is within 1.4x of the
-fastest, and by the end of the last session the device could not pass it in any
-state — every develop stage was reading about twice what it had four hours
-earlier. So it has not been demonstrated against the develop refactor. The
-grounds for thinking that is device state and not a regression are that all the
-parity tests pass, that the inflation is uniform across stages rather than
-localised, and that a compile-time template cannot widen a runtime spread. Check
-it before trusting anything else here.
-
 Recent work, newest first:
+
+- **`repeatedCapturesTakeAConsistentTime` failed four times and none of them
+  were thermal.** It was the MediaStore publish, which quadruples across four
+  shots on a 90%-full volume while the pipeline settles. The test drops a
+  warm-up shot and asserts on the develop less the publish now, and passes
+  standing alone and in a full suite — which is where all four failures were
+- **a threshold that was a round number rather than a distribution.** The tone
+  A/A's 30-70% band is 6 to 14 at twenty rounds, which a fair coin fails 4.1% of
+  the time, and did. Forty rounds, same band, 0.6%
 
 - **`demosaic+tone` has been split, and it is the rendering curve.** Not the
   demosaic, not the colour matrix, not the display lookup. `renderLinear` is
@@ -125,9 +126,13 @@ of what was left.
   any test here.
 
 **On the pipeline**, `demosaic+tone` is the develop and has now been split. A
-capture on a warm phone this session:
+capture on a **rested** phone at 36 C, settled shots:
 
-    black 18-35ms, hotpixels 20-50ms, shading 22-34ms, demosaic+tone 168-250ms
+    black 18-21ms, hotpixels 15-20ms, shading 18-20ms, demosaic+tone 99ms
+
+The same phone four hours into a session of measuring reads roughly twice all of
+those. Do not mix the two, and do not compare either with the 38 ms shading or
+the 146 ms `demosaic+tone` in older entries.
 
 `ToneAblationDeviceTest` takes that last figure apart by running the whole pass
 with one item removed. As paired ratios, which are what transfer:
@@ -191,6 +196,12 @@ In decreasing order of authority:
   binary, the order alternates within a round, and the comparison is paired
   rather than pooled. Their A/A tests are not a formality and run first. Copy
   these rather than the two below.
+- **Set a threshold from the distribution, not from a round number.** A 30-70%
+  band on a paired A/A sounds strict and is not: at twenty rounds a fair coin
+  falls outside it 4.1% of the time. Buy the tightness with rounds — at forty
+  the same band costs 0.6%. A test that fails one run in twenty-five gets
+  written down as flakiness, which is what happened to
+  `repeatedCapturesTakeAConsistentTime` for four sessions.
 - **Report the paired ratio, not a difference of medians.** The same comparison
   read 104 ms of 320 and, twenty seconds later, 269 ms of 419: both true,
   neither transferable, because the phone had slowed by half in between. The
