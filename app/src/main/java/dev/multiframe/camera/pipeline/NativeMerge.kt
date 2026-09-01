@@ -174,7 +174,7 @@ class NativeMerge private constructor(
     private external fun nPrepassBench(
         width: Int, height: Int, cfa: IntArray, black: IntArray, white: Int,
         gains: FloatArray, shading: FloatArray, columns: Int, rows: Int,
-        hotPixelThreshold: Float, rounds: Int,
+        hotPixelThreshold: Float, rounds: Int, selfCheck: Boolean,
     ): LongArray?
     private external fun nShadingBench(
         width: Int, height: Int, cfa: IntArray, gains: FloatArray,
@@ -295,16 +295,15 @@ class NativeMerge private constructor(
         }
 
         /**
-         * What the develop's three preparatory passes cost, and what folding
-         * one of them saves.
+         * The develop's three preparatory passes against the one that replaced
+         * them.
          *
-         * `black`, `hotpixels` and `shading` are three sweeps of a 50 MB plane.
-         * The first and third are pure per-pixel maps and fold trivially; the
-         * second sits between them and must see values black-subtracted and not
-         * yet shaded, so folding all three honestly needs a two-row-lag pipeline
-         * and a halo at every band edge. This prices that before it is built:
-         * the second slot folds the first and third and runs hot pixels after,
-         * which is the wrong picture and the right cost.
+         * `black`, `hotpixels` and `shading` were three sweeps of a 50 MB plane
+         * and are now one. The first slot still runs the three, as the reference
+         * the fold is held to; the second runs the fold. Both write a plane and
+         * the two are compared, so the same instrument reports the speed and
+         * whether the answers agree. With [selfCheck] the fold runs in both
+         * slots, which is the A/A this project demands before believing an A/B.
          */
         internal fun prepassBench(
             width: Int,
@@ -314,12 +313,14 @@ class NativeMerge private constructor(
             map: ShadingMap,
             hotPixelThreshold: Float,
             rounds: Int,
+            selfCheck: Boolean,
         ): LongArray? {
             if (!isAvailable()) return null
             val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
             return NativeMerge(0L, 0, 0, profile).nPrepassBench(
                 width, height, profile.cfaPattern, black, profile.whiteLevel,
                 gains, map.gains, map.columns, map.rows, hotPixelThreshold, rounds,
+                selfCheck,
             )
         }
 

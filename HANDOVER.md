@@ -4,32 +4,34 @@ A short brief for picking this up in a fresh session. Delete it once it has
 served its purpose; [SESSION-LOG.md](SESSION-LOG.md) is the real record and
 holds the reasoning behind everything below.
 
-## Start here: fold the develop's three preparatory passes
+## Start here: two things need the owner, and they outrank the code
 
-**This is the agreed next task**, decided at the end of the last session. The
-design, the numbers and the caveats are in *Fewer passes, which is priced and
-not yet built* below — read that section before writing anything. In short:
+The last agreed task — folding the develop's three preparatory passes — is
+**done and measured**; see *One sweep, and what it left behind* below. Nothing in
+the code is queued behind it, and the two items that have been waiting longest
+need a person and a scene rather than a session:
 
-1. **Fix the race in `suppressHotPixels` first.** It reads rows y±2 while
-   writing row y, and at a band's last two rows those reads land in the next
-   band. The develop is not deterministic today, and everything else here
-   assumes it is.
-2. **Then fold.** Two shapes are written up: a two-row-lag pipeline with a halo
-   at each band edge, or moving hot-pixel detection into the raw `uint16`
-   domain, which is free algebraically because ±2 preserves CFA parity. The
-   second is cleaner if its one caveat holds — check the `max(...,0)` clamp
-   below the black level.
-3. **The prize is measured, not guessed:** folding one of the three is worth
-   1.25-1.29x of the three, 57 of 60 rounds. `nPrepassBench` is already in the
-   binary and is how to check the real fold when it exists.
+- **Nobody has swept a real scene with the mosaic.** Every stitching claim rests
+  on synthetic frames cut from a generated image. That is the right way to test
+  the algorithm and it is not evidence about a building. Until it has been
+  pointed at one, super-res should not be the thing anyone is shown first.
+- **Nobody has looked hard at a batch of real photographs.** The parity tests
+  prove the native path matches the Kotlin one; neither proves the picture is
+  good. Twenty frames in mixed light, looked at properly, would tell more than
+  any test here.
 
-Before starting, confirm a green baseline on a **rested, charged** phone:
+If the next session is a code session anyway, the one unpriced question with a
+strong prior is in *The next fold, which is not priced* below. Price it before
+building it — that is what made the last one worth doing.
+
+Before measuring anything, confirm a green baseline on a **rested, charged**
+phone:
 
 ```bash
 adb shell am instrument -w dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-122 tests should pass. If `repeatedCapturesTakeAConsistentTime` fails, check
+124 tests should pass. If `repeatedCapturesTakeAConsistentTime` fails, check
 `/proc/meminfo` and the battery before suspecting the code — see the measurement
 rules.
 
@@ -39,10 +41,10 @@ rules.
 no release paperwork — deferred by the owner's decision, and nothing in the
 current work depends on any of it.
 
-Everything builds. **359 unit tests pass**, and **122 device tests** pass on the
+Everything builds. **359 unit tests pass**, and **124 device tests** pass on the
 phone in a clean full suite. The capture consistency check fails once the phone
 is short of memory, which is device state and not a regression — see the
-measurement rules below. The build on the phone is current HEAD, md5 verified.
+measurement rules below. The build on the phone is current HEAD.
 
 The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
 in about a second and writes a DNG and a JPEG to the gallery, and the status
@@ -50,6 +52,17 @@ line says what the merge bought: `8 frames · 91% kept`.
 
 Recent work, newest first:
 
+- **the develop's three preparatory passes are one pass.** `black`, `hotpixels`
+  and `shading` fold into a single sweep that reads the merged `uint16` and
+  writes the plane once: 1.36-1.45x of the three, 116 of 120 rounds. Hot pixel
+  detection moved into the raw domain, which is exact once the clamp at the
+  black level is carried as `max(code, black)` — it is not exact without it
+- **a race in `suppressHotPixels` is fixed**, which had made the develop not
+  quite a function of its input. Replacements are collected and applied once the
+  bands have finished, so no decision reads a value another band is writing —
+  and a corrected site is no longer its neighbour's reference, which is what the
+  Kotlin the develop falls back to has always done. The parity fixture that can
+  see that difference was checked against the old pass: it fails by 45 codes
 - **the demosaic is vectorised**, eight pixels at a time out of one set of
   deinterleaving loads: 1.39x of the whole pass, 78 of 80 rounds, and 1.52x
   against the per-pixel form of two sessions ago. The colour matrix went into
@@ -134,8 +147,13 @@ Six rules, all of them earned rather than assumed, and worth keeping:
   equality, and say what the bound rules out.
 - **A null result needs a harness that could have seen the effect**, and a
   parity test needs a fixture that could have shown the difference. The develop
-  parity test now renders each width a second time with sharpening off and
-  asserts the two differ, so it cannot pass by sharpening nothing.
+  parity test renders each width a second time with sharpening off and asserts
+  the two differ, so it cannot pass by sharpening nothing. The newest of them,
+  `aDefectDoesNotBecomeItsNeighboursReference`, was built and then run against
+  the pass it exists to catch: 45 display codes apart there, equal here. Do that
+  rather than reason about whether a fixture is live — most arrangements of two
+  defects cannot tell those two implementations apart at all, and it takes an
+  argument to see why.
 - **No timing is ever taken from the emulator.** It settles framework behaviour,
   never performance.
 - **Third-party code is a last resort, and there is exactly one piece of it.**
@@ -157,27 +175,26 @@ alignment was 83% of the "merge", that the JPEG encode — not the demosaic — 
 the largest item inside "develop", and this session that sharpening was a third
 of what was left.
 
-## Next step
+## What the develop is made of
 
-**Two things need the owner and a real scene, and they outrank all the code.**
-
-- **Nobody has swept a real scene with the mosaic.** Every stitching claim rests
-  on synthetic frames cut from a generated image. That is the right way to test
-  the algorithm and it is not evidence about a building. Until it has been
-  pointed at one, super-res should not be the thing anyone is shown first.
-- **Nobody has looked hard at a batch of real photographs.** The parity tests
-  prove the native path matches the Kotlin one; neither proves the picture is
-  good. Twenty frames in mixed light, looked at properly, would tell more than
-  any test here.
-
-**On the pipeline**, `demosaic+tone` is the develop and has now been split. A
-capture on a **rested** phone at 36 C, settled shots:
+A capture is now two passes: the prepass and `demosaic+tone`. On a **rested**
+phone at 36 C, settled shots, before the fold:
 
     black 18-21ms, hotpixels 15-20ms, shading 18-20ms, demosaic+tone 99ms
 
-The same phone four hours into a session of measuring reads roughly twice all of
-those. Do not mix the two, and do not compare either with the 38 ms shading or
-the 146 ms `demosaic+tone` in older entries.
+At the end of a measuring session, 48% and 38 C, with the fold in:
+
+    prepass 57-87ms, demosaic+tone 81-114ms
+
+**Those two lines are not comparable and subtracting them is the mistake this
+log has made before.** The same three passes read 76-85 ms in `nPrepassBench`
+last session and 94-117 ms in it today; the phone, not the code, is most of the
+difference. What transfers is the paired ratio: the fold is 1.36-1.45x of the
+three, 116 of 120 rounds, measured inside one binary in one process.
+
+The same phone four hours into a session of measuring reads roughly twice
+everything. Do not mix the two, and do not compare either with the 38 ms shading
+or the 146 ms `demosaic+tone` in older entries.
 
 `ToneAblationDeviceTest` takes that last figure apart by running the whole pass
 with one item removed. As paired ratios, which are what transfer, after the
@@ -231,45 +248,6 @@ Everything that has worked here was in the demosaic; nothing tried in the tail
 has. **If you want this pass faster, the honest next move is not another
 peephole — it is fewer passes.**
 
-### Fewer passes, which is priced and not yet built
-
-`black`, `hotpixels` and `shading` are three sweeps of a 50 MB plane.
-`nPrepassBench` prices folding one of them — it runs the three as they ship
-against black-and-shading folded with hot pixels after, which is the wrong order
-on purpose:
-
-    three passes   median 76, 76, 85 ms
-    two passes     median 54, 61, 63 ms
-    folding one    1.25 - 1.29x        57 of 60 rounds
-
-**A quarter of the three for one fewer sweep.** These stages are dominated by
-moving the plane, not by the arithmetic on it — the opposite of the per-pixel
-tail, which is why the same trick fails there and works here.
-
-Two shapes would fold all three. Hot pixels has to see values black-subtracted
-and not yet shaded, so either:
-
-- **a two-row-lag pipeline** — black-subtract row y+2, hot-pixel row y, shade
-  row y-2, one sweep. A pixel is last read by the one two rows below it. Each
-  band needs a two-row halo black-subtracted at each end, about 6% of rows twice.
-- **or move detection into the raw domain**, which is free algebraically:
-  hot pixels compares a site against four neighbours at ±2, ±2 preserves parity,
-  so all five are the same CFA site with the same black level, and
-  `(v-b)/r > (n-b)/r + t` is exactly `v > n + t*r`. Run it on the merged
-  `uint16` with the threshold scaled by `range` and black and shading fold with
-  nothing between them. **Caveat:** the `max(...,0)` clamp is monotone but not
-  affine, so the equivalence breaks for sites below the black level — deep
-  shadow noise. Check that before relying on it.
-
-**And fix the race first.** `suppressHotPixels` reads rows y±2 while writing row
-y, and at a band's last two rows those reads land in the next band, which another
-thread may be writing. The develop is therefore not deterministic — a defective
-site within two rows of a band edge, read racing write. The window is tiny and it
-has never shown up because the benches that assert bit-equality do not run the
-hot pixel stage, but every A/A here assumes the pass is a function of its input.
-Whichever fusion gets built makes this deterministic anyway, since the halo rows
-are black-subtracted and not hot-pixel-corrected.
-
 **Read those as shares, not as costs.** The colour matrix was under the floor,
 then 1.09-1.25x with 57 of 64 rounds, then under the floor again, without the
 code between those readings being touched: vectorising the demosaic around it
@@ -286,6 +264,67 @@ it.
 put the colour matrix at 1.11x, 1.05x, 1.13x and 1.04x with win counts of 16, 11,
 9 and 8 — one real reading and three coin flips. Below that floor, raise the
 rounds or shrink the enclosing pass; do not read the ratio.
+
+### One sweep, and what it left behind
+
+`black`, `hotpixels` and `shading` were three sweeps of a 50 MB plane and are now
+`applyPrepass`, which reads the merged `uint16`, corrects defective sites on the
+way past, and writes the plane once:
+
+    three passes   median 102, 117, 94 ms
+    one pass       median  75,  81, 69 ms
+    the fold       1.36 - 1.45x     116 of 120 rounds
+
+Four things are worth knowing before touching it.
+
+- **Detection runs on the raw codes, and the clamp is what makes that exact.**
+  ±2 preserves CFA parity, so all five sites share a black level, and the
+  develop's comparison survives the change of domain — *provided* the clamp
+  underneath the black level is carried as `max(code, black)` on all five. It is
+  monotone but not affine, and the naive `v > n + t*r` fires where the develop
+  cannot: wherever all four neighbours read below the black level, anything
+  within ~96 codes above the largest of them gets zeroed. Deep shadow, a tenth of
+  full scale a site. Two integer maxima remove the caveat entirely.
+- **Only the winner is converted.** `max((x-black)/range, 0)` is monotone, so the
+  largest of the four normalised neighbours is the normalised largest. Take the
+  max and min of the four as integers; convert two values, not five.
+- **There is no halo and no lag.** Nothing is written before it is read, which is
+  what killed the race rather than working around it: `nPrepassBench`'s A/A gets
+  the same plane bit for bit, twice, across whatever bands the threads claim.
+- **The two planes differ, and the bound is the point.** A quarter of the plane
+  comes back one unit in the last place away (worst 9.53e-07), for the reason the
+  shading rearrangement recorded: `-ffast-math` fuses and reassociates the same
+  expression differently in different surroundings. A *decision* that differed
+  would show as a tenth of full scale, four orders up. That is what the bound
+  rules out and what the test says it rules out.
+
+**It is less than the traffic model predicts, and that is the finding.** Three
+passes move about 225 MB and one moves 75 MB; folding one was worth 1.25-1.29x,
+which extrapolates to 1.74x for folding all three. Neither model survives: the
+fused sweep is a fatter sweep, reading five `uint16` per interior pixel and
+converting three values where the black pass converted one. **Taking the traffic
+away exposes the arithmetic that was hiding behind it.** Do not price the next
+fusion by counting bytes alone.
+
+### The next fold, which is not priced
+
+The develop is now two passes, and the same question applies to the pair that is
+left. `applyPrepass` writes a 50 MB plane and `demosaicAndTone` reads it back;
+the demosaic reads thirteen neighbours spanning ±2 rows, which is the same
+stencil shape the hot pixel pass had and the reason the plane exists at all — the
+comment in `nDevelop` says preparing inline would repeat the work thirteen times.
+
+A sliding window of about five prepared rows — 80 KB at this width, which is L2 —
+answers that objection without repeating anything, and would take 100 MB of DRAM
+traffic out of the develop. It is the same trick that just worked, one level up.
+
+**It is a guess until it is priced, and the last one overshot by a factor of
+two.** `nPrepassBench` is the pattern to copy: build the wrong-but-cheap version
+first — a demosaic reading from a five-row cache that has been filled by the
+existing prepass, which renders the wrong picture at band edges — time it against
+the two passes as they ship, and only then decide whether the real thing is worth
+writing. Note that the demosaic is hand-vectorised and reads a *contiguous* row;
+a circular row cache must keep that property or it will measure its own indexing.
 
 ### That move is done, and here is what it cost
 
@@ -440,9 +479,8 @@ Hard-won notes that still apply:
 
 ## What needs you rather than me
 
-- **Nobody has swept a real scene with the mosaic.** Every stitching claim rests
-  on synthetic frames cut from a generated image. That is the right way to test
-  the algorithm and no substitute for pointing it at a building.
+The two at the top of this file, and:
+
 - The release checklist in the session log: privacy policy, release keystore,
   Play Data safety form, store screenshots, and a proper trademark clearance on
   whichever name ships. [NAMES.md](NAMES.md) recommends *Coadd* over the working

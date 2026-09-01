@@ -444,6 +444,94 @@ class DevelopParityTest {
     }
 
     /**
+     * A defect two pixels from another defect, which the fixture above cannot see.
+     *
+     * The test above keeps its defective sites "well apart so none shields
+     * another", which is the right fixture for the question it asks and blind to
+     * this one: whether a *corrected* site becomes its neighbour's reference. The
+     * two implementations disagreed about that for as long as both have existed.
+     * `HotPixels.suppress` corrects the plane in place and the native pass
+     * mirrored it; `suppressInFrame`, which is the one the develop actually falls
+     * back to, reads from a copy precisely so that a defect cannot propagate
+     * along a row. The native pass reads the values it was handed now, which is
+     * the same change that stopped its bands racing each other.
+     *
+     * Building a fixture that can tell those apart takes some care, because most
+     * arrangements cannot. A site is replaced by the extreme of its four
+     * neighbours, and a defect two pixels away is one of them -- so a
+     * high defect corrected downwards can never make its neighbour a high
+     * outlier, whichever order the two are decided in. The case that does
+     * separate them runs the other way:
+     *
+     *  - `dark` sits below its neighbours by more than the threshold and is
+     *    replaced by the lowest of them, which is the 350 background.
+     *  - `bright` is two pixels along. Measured against the frame as it arrived,
+     *    the largest of its four neighbours is one of the 260s, and it is an
+     *    outlier. Measured after `dark` has been lifted to 350, the largest is
+     *    350 and it is not.
+     *
+     * So the Kotlin path replaces `bright` and an in-place native pass leaves it
+     * alone, about 25 display codes apart -- an order above what the parity
+     * assertion allows.
+     */
+    @Test
+    fun aDefectDoesNotBecomeItsNeighboursReference() {
+        val w = 96
+        val h = 72
+        val dim = fixedGain.copy(exposureGain = 0.5f)
+        // All four sites are two apart and so share a CFA colour; on this GBRG
+        // pattern an even column of an even row is green, which is the channel
+        // read below.
+        val x = 30
+        val y = 40
+        val background = 350
+        val dark = 220
+        val bright = 400
+        val beyond = 260
+
+        val data = ShortArray(w * h) { background.toShort() }
+        data[y * w + x] = dark.toShort()
+        data[y * w + x + 2] = bright.toShort()
+        for (site in listOf(y * w + x + 4, (y - 2) * w + x + 2, (y + 2) * w + x + 2)) {
+            data[site] = beyond.toShort()
+        }
+        val frame = BayerFrame(w, h, data)
+
+        val corrected = RawDeveloper.develop(
+            BayerFrame(w, h, data.copyOf()), profile, ColorProfile.NEUTRAL, dim,
+        )
+        val nativeBitmap = NativeMerge.create(w, h, profile)!!.use {
+            it.develop(directBufferOf(frame), ColorProfile.NEUTRAL, dim)
+        }!!
+        val untouched = NativeMerge.create(w, h, profile)!!.use {
+            it.develop(
+                directBufferOf(BayerFrame(w, h, data.copyOf())),
+                ColorProfile.NEUTRAL,
+                dim.copy(hotPixelThreshold = 0f),
+            )
+        }!!
+
+        val kotlinBright = (corrected[y * w + x + 2] shr 8) and 0xFF
+        val nativeBright = Color.green(nativeBitmap.getPixel(x + 2, y))
+        val uncorrectedBright = Color.green(untouched.getPixel(x + 2, y))
+        Log.i(
+            TAG,
+            "adjacent defects: bright native $nativeBright Kotlin $kotlinBright, " +
+                "uncorrected $uncorrectedBright",
+        )
+        nativeBitmap.recycle()
+        untouched.recycle()
+
+        // The parity claim, and on this fixture it is also the propagation
+        // claim: an in-place native pass would land on the uncorrected value.
+        assertThat(abs(nativeBright - kotlinBright)).isAtMost(2)
+
+        // And the fixture is live rather than vacuously equal: the site really
+        // is one both paths correct, and correcting it really does move it.
+        assertThat(uncorrectedBright).isGreaterThan(nativeBright + 10)
+    }
+
+    /**
      * Sharpening actually runs in the binary that ships.
      *
      * The parity test cannot show this: if sharpening were silently disabled in

@@ -34,7 +34,7 @@ APK lands in `~/Library/Caches/MultiframeBuild/app/outputs/apk/debug/`.
 ## Tests
 
     ./gradlew :app:testDebugUnitTest          # 359 tests, no device needed
-    ./gradlew :app:connectedDebugAndroidTest  # 122 tests, needs a device or emulator
+    ./gradlew :app:connectedDebugAndroidTest  # 124 tests, needs a device or emulator
 
 ## Emulator, for when no phone is attached
 

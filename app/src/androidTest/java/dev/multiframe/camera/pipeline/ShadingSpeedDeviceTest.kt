@@ -64,42 +64,98 @@ class ShadingSpeedDeviceTest {
     private val balance = floatArrayOf(2.052f, 1f, 1f, 1.442f)
 
     /**
-     * What folding one of the develop's three preparatory passes would save.
+     * The fold, measured against itself before it is measured against the three.
      *
-     * `black`, `hotpixels` and `shading` are three separate sweeps of a 50 MB
-     * plane. Folding all three is possible but not free to write: hot pixels
-     * has to see values that are black-subtracted and not yet shaded, so it
-     * needs a two-row-lag pipeline and a halo at every band edge. Before
-     * building that, this prices it -- the second slot folds the first and third
-     * passes and runs hot pixels afterwards, which renders the wrong picture on
-     * purpose and costs exactly one sweep less.
+     * Same reason as the shading A/A below, and one more that is specific to
+     * this pair: the two slots do not write the same amount. The three-pass slot
+     * sweeps a 50 MB plane three times and the folded one sweeps it once, so if
+     * the harness had any bias from the order or from the state one slot leaves
+     * the cache in, it would land on exactly the difference being claimed.
      */
     @Test
-    fun foldingOneOfTheThreePreparatoryPassesIsPricedBeforeItIsBuilt() {
+    fun theHarnessCannotSeparateTheFoldedPrepassFromItself() {
         assertThat(NativeMerge.isAvailable()).isTrue()
-        val raw = NativeMerge.prepassBench(
+        val result = NativeMerge.prepassBench(
             width, height, SensorProfile.DEFAULT, balance, cameraLikeMap(),
-            DevelopParams().hotPixelThreshold, PREPASS_ROUNDS,
+            DevelopParams().hotPixelThreshold, PREPASS_ROUNDS, selfCheck = true,
         )
-        assertThat(raw).isNotNull()
-        val rounds = raw!!.size / 2
-        val a = LongArray(rounds) { raw[it * 2] }
-        val b = LongArray(rounds) { raw[it * 2 + 1] }
-        val wins = a.indices.count { b[it] < a[it] }
-        val ratios = a.indices.map { a[it].toDouble() / b[it] }.sorted()
+        assertThat(result).isNotNull()
+        val (left, right, differing, worst) = split(result!!)
+
+        Log.i(TAG, "prepass A/A left:  ${describe(left)}")
+        Log.i(TAG, "prepass A/A right: ${describe(right)}")
+        Log.i(TAG, "prepass A/A ${pairing(left, right)}")
+        DeviceKind.warnIfNotAPhone(TAG)
+
+        // The same code in both slots must produce the same plane. It is one
+        // sweep with no ordering between its bands, so this is bit equality and
+        // not a bound -- and it is the claim the race fix made true: reading a
+        // site that another band is correcting used to make the develop depend
+        // on which thread arrived first.
+        assertThat(differing).isEqualTo(0L)
+        assertThat(worst).isEqualTo(0L)
+
+        val wins = wins(left, right)
+        assertThat(wins).isAtLeast(PREPASS_ROUNDS * 3 / 10)
+        assertThat(wins).isAtMost(PREPASS_ROUNDS * 7 / 10)
+    }
+
+    /**
+     * Three sweeps of a 50 MB plane against one, and the same plane out of both.
+     *
+     * `black`, `hotpixels` and `shading` were three passes because the middle
+     * one has to compare values black-subtracted and not yet shaded. It does not
+     * have to compare them in the plane: the four nearest sites of the same
+     * colour are two pixels away, +-2 preserves CFA parity, so all five share a
+     * black level and can be read straight out of the merged `uint16`. Nothing
+     * is written before it is read, so there is no halo and no lag -- and no
+     * band edge to race on.
+     *
+     * Before it was built, folding *one* of the three priced at 1.25-1.29x, 57
+     * of 60 rounds. This is what folding all three came to.
+     */
+    @Test
+    fun foldingTheThreePreparatoryPassesIntoOneIsFasterAndDoesNotChangeThePlane() {
+        assertThat(NativeMerge.isAvailable()).isTrue()
+        val result = NativeMerge.prepassBench(
+            width, height, SensorProfile.DEFAULT, balance, cameraLikeMap(),
+            DevelopParams().hotPixelThreshold, PREPASS_ROUNDS, selfCheck = false,
+        )
+        assertThat(result).isNotNull()
+        val (three, folded, differing, worst) = split(result!!)
+
+        val total = width.toLong() * height * PREPASS_ROUNDS
+        Log.i(TAG, "three passes: ${describe(three)}")
+        Log.i(TAG, "folded:       ${describe(folded)}")
+        Log.i(TAG, "folded ${pairing(three, folded)}")
         Log.i(
             TAG,
-            ("three passes median %dms range %d-%d; two passes median %dms " +
-                "range %d-%d; folding one is %.2fx, %d of %d rounds").format(
-                a.sorted()[rounds / 2] / 1000, a.min() / 1000, a.max() / 1000,
-                b.sorted()[rounds / 2] / 1000, b.min() / 1000, b.max() / 1000,
-                ratios[ratios.size / 2], wins, rounds,
+            "%.2fx by paired median; %d of %d values differ, worst by %.3g".format(
+                median(three).toDouble() / median(folded),
+                differing, total, worst / 1e9,
             ),
         )
         DeviceKind.warnIfNotAPhone(TAG)
-        // Reported, not asserted on: what this is for is the size of a prize,
-        // and a threshold would only encode today's answer to that.
-        assertThat(a.min()).isGreaterThan(0L)
+
+        // Not bit equality, for the reason the shading rearrangement below
+        // records: -ffast-math lets the compiler fuse and reassociate the same
+        // expression differently in two different surroundings, and a last-place
+        // difference on a normalised value is around 1e-7.
+        //
+        // What this bound rules out is the thing that would matter, and it is
+        // not rounding. A site the two disagreed about would be one the fold
+        // called defective and the three passes did not, or the reverse, and
+        // replacing a site moves it by at least the threshold -- a tenth of full
+        // scale, four orders of magnitude above this bound. So does dropping the
+        // clamp at the black level, which is what makes the raw-domain
+        // comparison exact rather than nearly exact.
+        assertThat(worst / 1e9).isLessThan(1e-5)
+
+        // One-sided, and at three quarters rather than at half: half the rounds
+        // is exactly where a true null sits, so "must not be slower" written as
+        // half fails 40% of the time when nothing is wrong. Three quarters of
+        // forty costs 1.1%.
+        assertThat(wins(three, folded)).isAtLeast(PREPASS_ROUNDS * 3 / 4)
     }
 
     @Test
@@ -230,7 +286,12 @@ class ShadingSpeedDeviceTest {
     private companion object {
         const val ROUNDS = 40
 
-        /** Fewer: each round is two runs of three full-frame passes. */
-        const val PREPASS_ROUNDS = 20
+        /**
+         * Forty here too, and for the reason in the log rather than for
+         * symmetry: at twenty rounds the 30-70% band an A/A is held to is
+         * outside a fair coin's range 4.1% of the time, which is a test that
+         * cries wolf once a session. At forty it is 0.6%.
+         */
+        const val PREPASS_ROUNDS = 40
     }
 }

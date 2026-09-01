@@ -3140,6 +3140,128 @@ own and it should start from a green suite, not from the end of a long one.
 
 359 unit tests pass. **122 device tests pass in a clean full suite.**
 
+## The three preparatory passes are one pass
+
+Priced last session, designed on paper with a caveat attached, and built this
+one. Both survived contact; the caveat needed correcting first.
+
+### The race, because everything after it assumed the race away
+
+`suppressHotPixels` read rows y±2 while writing row y, so a band's first two rows
+read the band above it and its last two read the band below, either of which
+another thread might have been correcting at that moment. The develop was
+therefore not a function of its input.
+
+The fix is neither a halo nor a copy of the plane. A defective site is rare — far
+below a tenth of a percent on a healthy sensor — so the pass now collects the
+replacements it finds and applies them once every band has finished. Each
+decision reads the values the pass was handed, whatever the bands turn out to be,
+and no two entries share an index, so the order they are applied in cannot
+matter.
+
+That also settles a semantic the two Kotlin implementations quietly disagreed
+about. `HotPixels.suppress` corrects the plane in place, so a corrected site
+becomes its neighbour's reference; `suppressInFrame`, which is the one the
+develop actually falls back to, reads from a copy precisely so that it cannot —
+"which would let one defect propagate along a row". The native pass now does what
+the shipping fallback does, and the develop parity test still reads **worst
+0/255** against it.
+
+### The caveat was real, and it costs two integer maxima
+
+The plan was to compare in the raw domain, on the strength of ±2 preserving CFA
+parity: all five sites are the same colour, share a black level, and
+
+    (v-b)/r > (n-b)/r + t     <=>     v > n + t*r
+
+The clamp underneath the black level was written down as the thing to check
+before relying on it. It does break the equivalence, and not in a corner: where
+all four neighbours read below the black level the develop's form cannot fire at
+all, while the raw form flags anything in a band of `t*r` ≈ 96 codes above the
+largest of them. Deep shadow noise, zeroed, a tenth of full scale at a time.
+
+The way round it is one operation. With `c(x) = max(x, black)`,
+
+    max((x - black)/range, 0)  =  (c(x) - black)/range        exactly
+
+and `c` is monotone, so the largest of the four normalised neighbours is the
+normalised largest and only the winner needs converting. Clamp the five raw codes
+at the black level, take the maximum and minimum of the four as integers, convert
+those two, and the comparison is the develop's own — not an approximation of it.
+
+### One sweep
+
+`applyPrepass` reads the merged `uint16`, corrects on the way past, and writes the
+plane once. Nothing is written before it is read, so there is no halo, no two-row
+lag, and no band edge to race on: the fusion the race fix was going to have to
+be careful about turned out to be the thing that removes the hazard.
+
+    black + hotpixels + shading   median 102, 117, 94 ms
+    one pass                      median  75,  81, 69 ms
+    the fold                      1.36 - 1.45x     116 of 120 rounds
+
+`nPrepassBench` now holds the three passes in one slot and the fold in the other,
+alternates them within a round, and compares the two planes every round. Its A/A
+runs the fold in both slots: 21, 18 and 21 of 40, ratio 1.01x, 0.98x and 1.03x
+— a fair instrument, and the same plane every time, bit for bit, which is the
+race fix showing up as a property rather than as an argument.
+
+Against the three passes, 125,787,680 values of 501,350,400 differ — a quarter of
+the plane — by at most **9.53e-07**. That is one unit in the last place, the same
+`-ffast-math` story the shading rearrangement recorded, and it is the right bound
+to assert because of what it rules out: a site the two disagreed *about* would
+differ by at least the threshold, a tenth of full scale, four orders of magnitude
+above this. So would dropping the clamp.
+
+### It is less than the traffic model predicts, and that is the finding
+
+Three passes move about 225 MB and the fold moves 75 MB, which would be 3x if
+these stages were pure traffic. Folding one was 1.25-1.29x, which fits a fixed
+cost plus a per-sweep cost and predicts 1.74x for folding all three. The measured
+1.36-1.45x beats neither model.
+
+The fused sweep is a fatter sweep: it reads five `uint16` per interior pixel,
+does the shading interpolation, and converts three values where the black pass
+converted one. **Taking the traffic away exposes the arithmetic that was hiding
+behind it** — which is the same lesson as the per-pixel tail, arriving from the
+other side. An item's cost is not a property of the item; it is a property of
+what else is competing for the machine at the time.
+
+A capture on the phone today reads `prepass 57-87ms, demosaic+tone 81-114ms`.
+That is **not** to be set beside the 18/15/18 breakdown in the entry above: those
+were taken on a rested phone on another day, this one is 48% and 38 C at the end
+of a measuring session, and the same three passes that read 76-85 ms in the bench
+last session read 94-117 ms in it today. The paired instrument is the claim; the
+capture line is only what a capture pays right now.
+
+### A fixture that could have shown the difference
+
+The develop parity test keeps its defective sites "well apart so none shields
+another", which is the right fixture for the question it asks and blind to the
+one the race fix answered. Building one that can tell the two semantics apart
+takes some care, because most arrangements cannot: a site is replaced by the
+extreme of its four neighbours and a defect two pixels away is one of them, so a
+high defect corrected downwards can never make its neighbour a high outlier,
+whichever order they are decided in. The case that separates them runs the other
+way — a *dark* defect lifted to the background makes a bright neighbour stop
+being an outlier, because the largest of its four neighbours went up.
+
+`aDefectDoesNotBecomeItsNeighboursReference` is that fixture, and it was checked
+against the pass it is there to catch rather than argued for: built against HEAD
+as it was this morning, it fails by **45 display codes** — native 116, Kotlin 71
+— and passes at 71 against 71 with the fold in.
+
+### What is kept
+
+`applyBlackLevel` and `suppressHotPixels` stay in the binary as the reference the
+fold is held to, in the same way and for the same reason as
+`applyShadingReference`. `applyBlackAndShading` — the deliberately wrong-order
+fold that priced the prize — is gone, having done its job.
+
+359 unit tests pass. **124 device tests pass in a clean full suite** — two more
+than before: the prepass A/A that the old single-slot bench had no need of, and
+the parity fixture above.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a

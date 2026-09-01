@@ -1008,7 +1008,15 @@ void applyShadingHoisted(float* plane, int width, int height,
     });
 }
 
-/** Black level, normalise and clamp. The develop's first pass, on its own. */
+/**
+ * Black level, normalise and clamp, on its own.
+ *
+ * This was the develop's first pass; [applyPrepass] does it now, along with the
+ * two that used to follow. It is kept for the same reason
+ * [applyShadingReference] is: the fold is only permitted to be a rearrangement
+ * of these three, and something has to say what it is a rearrangement *of*.
+ * `nPrepassBench` runs them against it.
+ */
 void applyBlackLevel(const uint16_t* src, float* plane, int width, int height,
                      const int* black, float range) {
     parallelBands(height, [&](int y0, int y1) {
@@ -1025,38 +1033,198 @@ void applyBlackLevel(const uint16_t* src, float* plane, int width, int height,
 }
 
 /**
- * The first and third passes in one, for the harness.
+ * Replaces defective sensor sites in a normalised CFA plane.
  *
- * Both are pure per-pixel maps, so they fold trivially -- *if* nothing has to
- * happen between them. Something does: the hot pixel pass sits in the middle
- * and has to see values that are black-subtracted and not yet shaded. So this
- * is not a shipping path and it renders a wrong picture; it exists to price one
- * fewer sweep of a 50 MB plane before anyone builds the pipeline that would
- * fold all three honestly.
+ * Mirrors HotPixels.kt, where the tests are. Compares against the four sites two
+ * pixels away, which on a Bayer grid are the nearest of the same colour, and
+ * only replaces a site that lies outside the range of all four by a margin --
+ * so a genuine highlight shared with a neighbour survives.
+ *
+ * The merge cannot do this job: it suppresses whatever varies between frames,
+ * and a defective site is wrong identically in all of them. Cleaning up the
+ * surrounding noise only makes the dots more obvious.
+ *
+ * The develop no longer calls this -- [applyPrepass] folded it into one sweep
+ * with the two passes around it -- and it is kept as the reference that fold is
+ * held to.
+ *
+ * ### Why the replacements are held back rather than written where they are found
+ *
+ * A corrected site is a neighbour of the four sites two away from it, so writing
+ * one in place changes what the next comparison sees. Over bands claimed by
+ * several threads that is a race: a band's first two rows read rows y-2 and y-1
+ * from the band above, its last two read y+1 and y+2 from the band below, and
+ * either may be under a thread's pen at the time. The develop was therefore not
+ * a function of its input -- a defect within two rows of a band edge came out
+ * corrected or not depending on which thread arrived first -- and every A/A in
+ * this project assumes it is.
+ *
+ * Collecting the replacements and applying them afterwards makes each decision
+ * read the values the pass was handed, whatever the bands turn out to be. That
+ * is also what [HotPixels.suppressInFrame] does, which is the Kotlin the develop
+ * actually falls back to, and for the reason stated there: a corrected site
+ * becoming a neighbour's reference lets one defect propagate along a row. It
+ * costs a vector of a few hundred entries -- a healthy sensor sits far below a
+ * tenth of a percent of sites, and the pass is a read of 50 MB either way.
  */
-void applyBlackAndShading(const uint16_t* src, float* plane, int width, int height,
-                          const int* black, float range,
-                          const float* shadingPtr, int columns, int rows,
-                          const float* wb) {
+long suppressHotPixels(float* plane, int width, int height, float threshold) {
+    if (width < 5 || height < 5 || threshold <= 0.0f) return 0;
+
+    struct Fix {
+        size_t index;
+        float value;
+    };
+    std::mutex lock;
+    std::vector<Fix> fixes;
+
+    parallelBands(height, [&](int y0, int y1) {
+        const int from = std::max(y0, 2);
+        const int to = std::min(y1, height - 2);
+        std::vector<Fix> local;
+        for (int y = from; y < to; ++y) {
+            const size_t row = static_cast<size_t>(y) * width;
+            for (int x = 2; x < width - 2; ++x) {
+                const float here = plane[row + x];
+                const float a = plane[row + x - 2];
+                const float b = plane[row + x + 2];
+                const float c = plane[row - 2 * static_cast<size_t>(width) + x];
+                const float d = plane[row + 2 * static_cast<size_t>(width) + x];
+
+                const float highest = std::max(std::max(a, b), std::max(c, d));
+                const float lowest = std::min(std::min(a, b), std::min(c, d));
+
+                if (here > highest + threshold) {
+                    local.push_back({row + x, highest});
+                } else if (here < lowest - threshold) {
+                    local.push_back({row + x, lowest});
+                }
+            }
+        }
+        if (local.empty()) return;
+        std::lock_guard<std::mutex> guard(lock);
+        fixes.insert(fixes.end(), local.begin(), local.end());
+    });
+
+    // Order does not matter: a site is decided once, by one band, and no two
+    // entries share an index.
+    for (const Fix& fix : fixes) plane[fix.index] = fix.value;
+    return static_cast<long>(fixes.size());
+}
+
+/**
+ * The develop's three preparatory passes in one sweep.
+ *
+ * `black`, `hotpixels` and `shading` were three separate reads of a 50 MB float
+ * plane, and these stages are dominated by moving the plane rather than by the
+ * arithmetic on it -- the opposite of the per-pixel tail, where four attempts at
+ * cheaper arithmetic each bought nothing. `nPrepassBench` priced one fewer sweep
+ * at 1.25-1.29x of the three before this was written.
+ *
+ * ### What made the fold possible
+ *
+ * Hot pixels has to compare values that are black-subtracted and not yet shaded,
+ * which is why it sat between the other two. It does not have to compare them
+ * *in the plane*. The four nearest sites of the same colour are two pixels away
+ * in each direction, and +-2 preserves CFA parity, so all five share a black
+ * level and a shading cell is irrelevant to them. Reading the five straight out
+ * of the merged `uint16` and correcting on the way past means nothing has to be
+ * written before it is read, and the whole pass is one read of 25 MB and one
+ * write of 50 MB where it was 225 MB of traffic before.
+ *
+ * The comparison itself is the develop's, unchanged. Only the winner of the four
+ * neighbours is normalised, which is the same value the old pass compared
+ * against: `max((n - black)/range, 0)` is monotone in `n`, so the largest of the
+ * four normalised is the normalised largest, and likewise for the smallest. The
+ * clamp at the black level is carried on the raw side as `max(n, black)`, and
+ * has to be: it is monotone but not affine, so comparing raw codes directly --
+ * the obvious version of this trick -- would flag sites the develop does not,
+ * wherever all four neighbours read below the black level. That is deep shadow,
+ * not a corner case.
+ *
+ * ### What it changes
+ *
+ * A corrected site is no longer a neighbour's reference, for the reason given
+ * above [suppressHotPixels]: it never deterministically was. Two defects within
+ * two pixels of each other are now both measured against the values the pass was
+ * handed, which is what the Kotlin the develop falls back to has always done.
+ */
+void applyPrepass(const uint16_t* src, float* plane, int width, int height,
+                  const int* black, float range, float threshold,
+                  const float* shadingPtr, int columns, int rows,
+                  const float* wb, long* replacedOut) {
     const bool tabulated =
         shadingPtr != nullptr && columns > 0 && rows > 0 && width > 1 && height > 1;
+    const bool correcting = threshold > 0.0f && width >= 5 && height >= 5;
     ShadingPlan plan;
     if (tabulated) plan = buildShadingPlan(columns, width);
 
+    std::atomic<long> replaced{0};
+
     parallelBands(height, [&](int yStart, int yEnd) {
+        long local = 0;
         for (int y = yStart; y < yEnd; ++y) {
             const int rowParity = (y & 1) * 2;
             const size_t rowBase = static_cast<size_t>(y) * width;
+            // The two-pixel border is left alone, as it has to be: the
+            // same-colour neighbours do not exist there.
+            const bool correctingRow = correcting && y >= 2 && y < height - 2;
+            // Read only on a correcting row, which is where both are in range.
+            const size_t above =
+                correctingRow ? rowBase - 2 * static_cast<size_t>(width) : rowBase;
+            const size_t below =
+                correctingRow ? rowBase + 2 * static_cast<size_t>(width) : rowBase;
 
-            auto blackAt = [&](int x) {
+            // The value the demosaic will read, before shading and balance:
+            // black-subtracted, normalised, and replaced if this site is an
+            // outlier. `Correcting` is a compile-time flag so the border spans
+            // do not carry the test into the loop.
+            auto valueAt = [&](int x, auto correctingHere) {
                 const int site = rowParity + (x & 1);
-                return std::max(
-                    (static_cast<float>(src[rowBase + x]) - black[site]) / range, 0.0f);
+                const float level = static_cast<float>(black[site]);
+                const float here =
+                    std::max((static_cast<float>(src[rowBase + x]) - level) / range, 0.0f);
+                if constexpr (decltype(correctingHere)::value) {
+                    const int floorCode = black[site];
+                    const int a = std::max(static_cast<int>(src[rowBase + x - 2]), floorCode);
+                    const int b = std::max(static_cast<int>(src[rowBase + x + 2]), floorCode);
+                    const int c = std::max(static_cast<int>(src[above + x]), floorCode);
+                    const int d = std::max(static_cast<int>(src[below + x]), floorCode);
+
+                    // Only the winner is converted: the largest of the four
+                    // normalised is the normalised largest, because the
+                    // subtraction and the clamp are both monotone.
+                    const int highestCode = std::max(std::max(a, b), std::max(c, d));
+                    const int lowestCode = std::min(std::min(a, b), std::min(c, d));
+                    const float highest = (static_cast<float>(highestCode) - level) / range;
+                    const float lowest = (static_cast<float>(lowestCode) - level) / range;
+
+                    if (here > highest + threshold) {
+                        ++local;
+                        return highest;
+                    }
+                    if (here < lowest - threshold) {
+                        ++local;
+                        return lowest;
+                    }
+                }
+                return here;
             };
 
             if (!tabulated) {
-                for (int x = 0; x < width; ++x) {
-                    plane[rowBase + x] = blackAt(x) * wb[rowParity + (x & 1)];
+                // shadingGain answers 1 to every one of these, so only balance
+                // is left.
+                auto span = [&](int from, int to, auto correctingHere) {
+                    for (int x = from; x < to; ++x) {
+                        plane[rowBase + x] =
+                            valueAt(x, correctingHere) * wb[rowParity + (x & 1)];
+                    }
+                };
+                if (correctingRow) {
+                    span(0, 2, std::false_type{});
+                    span(2, width - 2, std::true_type{});
+                    span(width - 2, width, std::false_type{});
+                } else {
+                    span(0, width, std::false_type{});
                 }
                 continue;
             }
@@ -1077,63 +1245,35 @@ void applyBlackAndShading(const uint16_t* src, float* plane, int width, int heig
                     b0[p] = lower[static_cast<size_t>(run.x0) * 4 + channel];
                     b1[p] = lower[static_cast<size_t>(run.x1) * 4 + channel];
                 }
-                for (int x = run.from; x < run.to; ++x) {
-                    const int p = x & 1;
-                    const float tx = plan.tx[static_cast<size_t>(x)];
-                    const float top = a0[p] * (1.0f - tx) + a1[p] * tx;
-                    const float bottom = b0[p] * (1.0f - tx) + b1[p] * tx;
-                    plane[rowBase + x] =
-                        blackAt(x) * (top * (1.0f - ty) + bottom * ty) * wb[rowParity + p];
-                }
-            }
-        }
-    });
-}
-
-/**
- * Replaces defective sensor sites in a normalised CFA plane.
- *
- * Mirrors HotPixels.kt, where the tests are. Compares against the four sites two
- * pixels away, which on a Bayer grid are the nearest of the same colour, and
- * only replaces a site that lies outside the range of all four by a margin --
- * so a genuine highlight shared with a neighbour survives.
- *
- * The merge cannot do this job: it suppresses whatever varies between frames,
- * and a defective site is wrong identically in all of them. Cleaning up the
- * surrounding noise only makes the dots more obvious.
- */
-long suppressHotPixels(float* plane, int width, int height, float threshold) {
-    if (width < 5 || height < 5 || threshold <= 0.0f) return 0;
-    std::atomic<long> replaced{0};
-
-    parallelBands(height, [&](int y0, int y1) {
-        const int from = std::max(y0, 2);
-        const int to = std::min(y1, height - 2);
-        long local = 0;
-        for (int y = from; y < to; ++y) {
-            const size_t row = static_cast<size_t>(y) * width;
-            for (int x = 2; x < width - 2; ++x) {
-                const float here = plane[row + x];
-                const float a = plane[row + x - 2];
-                const float b = plane[row + x + 2];
-                const float c = plane[row - 2 * static_cast<size_t>(width) + x];
-                const float d = plane[row + 2 * static_cast<size_t>(width) + x];
-
-                const float highest = std::max(std::max(a, b), std::max(c, d));
-                const float lowest = std::min(std::min(a, b), std::min(c, d));
-
-                if (here > highest + threshold) {
-                    plane[row + x] = highest;
-                    ++local;
-                } else if (here < lowest - threshold) {
-                    plane[row + x] = lowest;
-                    ++local;
+                // The gain is grouped exactly as the shading pass grouped it --
+                // the plane's value times one product of the four corners and
+                // the balance -- so that the two forms have the same rounding to
+                // whatever extent -ffast-math lets any two forms agree.
+                auto span = [&](int from, int to, auto correctingHere) {
+                    for (int x = from; x < to; ++x) {
+                        const int p = x & 1;
+                        const float tx = plan.tx[static_cast<size_t>(x)];
+                        const float top = a0[p] * (1.0f - tx) + a1[p] * tx;
+                        const float bottom = b0[p] * (1.0f - tx) + b1[p] * tx;
+                        plane[rowBase + x] = valueAt(x, correctingHere) *
+                            ((top * (1.0f - ty) + bottom * ty) * wb[rowParity + p]);
+                    }
+                };
+                if (correctingRow) {
+                    const int from = std::min(std::max(run.from, 2), run.to);
+                    const int to = std::max(std::min(run.to, width - 2), from);
+                    span(run.from, from, std::false_type{});
+                    span(from, to, std::true_type{});
+                    span(to, run.to, std::false_type{});
+                } else {
+                    span(run.from, run.to, std::false_type{});
                 }
             }
         }
         replaced.fetch_add(local);
     });
-    return replaced.load();
+
+    if (replacedOut != nullptr) *replacedOut = replaced.load();
 }
 
 /** Smootherstep blended with identity: monotonic for any amount in 0..1. */
@@ -1782,7 +1922,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     ensureGammaLut();
 
     // Stage clocks, declared here so they outlive the blocks they are taken in.
-    int64_t tBlack = 0, tHotPixels = 0, tShading = 0, tDemosaic = 0;
+    int64_t tPrepass = 0, tDemosaic = 0;
 
     // Lens shading, when the camera reported a map for this capture. Raw is
     // defined as uncorrected, so without this every frame carries a stop and a
@@ -1844,28 +1984,21 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     std::lock_guard<std::mutex> scratchGuard(gScratchLock);
     std::vector<float>& plane = gScratch.floats(static_cast<size_t>(width) * height);
 
-    // Black level only, first. Defective sites are found before shading and
-    // white balance are applied, so the comparison happens in the sensor's own
-    // domain -- which is what lets the Kotlin fallback, which has no plane to
-    // work on and corrects the CFA in place, arrive at the same answer.
-    tBlack = nowMicros();
-    applyBlackLevel(src, plane.data(), width, height, black, range);
-
-    tHotPixels = nowMicros();
-    if (hotPixelThreshold > 0.0f) {
-        const long replaced = suppressHotPixels(plane.data(), width, height, hotPixelThreshold);
-        if (replaced > 0) {
-            LOGI("replaced %ld defective sites (%.4f%% of the sensor)",
-                 replaced, 100.0 * replaced / (static_cast<double>(width) * height));
-        }
-    }
-
-    // Then shading and white balance, on the corrected values.
-    tShading = nowMicros();
+    // Black level, defective sites and shading in one sweep. Defective sites
+    // are still judged before shading and white balance are applied, so the
+    // comparison happens in the sensor's own domain -- which is what lets the
+    // Kotlin fallback, which has no plane to work on and corrects the CFA in
+    // place, arrive at the same answer.
+    tPrepass = nowMicros();
     float wb[4];
     balanceBySite(cfa, gains, wb);
-    applyShadingHoisted(plane.data(), width, height, shadingPtr,
-                        shadingColumns, shadingRows, wb);
+    long replaced = 0;
+    applyPrepass(src, plane.data(), width, height, black, range, hotPixelThreshold,
+                 shadingPtr, shadingColumns, shadingRows, wb, &replaced);
+    if (replaced > 0) {
+        LOGI("replaced %ld defective sites (%.4f%% of the sensor)",
+             replaced, 100.0 * replaced / (static_cast<double>(width) * height));
+    }
 
     // Built once for this capture's tone parameters, then read by every band.
     // On the stack rather than in a global: two develops on different threads
@@ -1880,34 +2013,41 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
                                cfa, m, tone, display, shoulder);
 
     const int64_t tEnd = nowMicros();
-    LOGI("develop: black %lldms, hotpixels %lldms, shading %lldms, demosaic+tone %lldms, total %lldms",
-         (tHotPixels - tBlack) / 1000, (tShading - tHotPixels) / 1000,
-         (tDemosaic - tShading) / 1000, (tEnd - tDemosaic) / 1000, (tEnd - tBlack) / 1000);
+    LOGI("develop: prepass %lldms, demosaic+tone %lldms, total %lldms",
+         (tDemosaic - tPrepass) / 1000, (tEnd - tDemosaic) / 1000, (tEnd - tPrepass) / 1000);
 
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
 }
 
 /**
- * What the develop's three preparatory passes cost, and what folding one saves.
+ * The develop's three preparatory passes against the one that replaced them.
  *
- * `black`, `hotpixels` and `shading` are three separate sweeps of a 50 MB plane
- * and the obvious question is whether they can be one. The first and third are
- * pure per-pixel maps and fold trivially; the second sits between them and has
- * to see values that are black-subtracted and not yet shaded, so an honest fold
- * needs a software pipeline with a two-row lag and a halo at every band edge.
+ * Slot A is `black`, `hotpixels` and `shading` run as three sweeps of a 50 MB
+ * plane, which is what the develop did and is now only the reference. Slot B is
+ * [applyPrepass], which does all three in one. Both write a plane and the two
+ * planes are compared every round, so the speed claim and the claim that they
+ * agree are made by the same instrument on the same data.
  *
- * That is a lot to build on a guess. This prices the guess: slot A runs the
- * three as they ship, slot B runs black-and-shading folded with hot pixels
- * after. B renders the wrong picture -- the order is wrong on purpose -- and
- * what it measures is one fewer sweep, which is the whole prize.
+ * Before this was built the second slot folded only the first and third and ran
+ * hot pixels afterwards -- the wrong picture, priced on purpose to find out
+ * whether one fewer sweep was worth the pipeline. It was: 1.25-1.29x of the
+ * three, 57 of 60 rounds.
+ *
+ * `selfCheck` runs the fold in both slots, which is this project's A/A: an
+ * instrument that can separate the fold from the fold is not one that can be
+ * believed about the fold against the three.
+ *
+ * The result is `[a0, b0, a1, b1, ...]` in microseconds, then the number of
+ * values on which the two planes disagreed, then the largest such disagreement
+ * in nano-units.
  */
 JNIEXPORT jlongArray JNICALL
 Java_dev_multiframe_camera_pipeline_NativeMerge_nPrepassBench(
         JNIEnv* env, jobject, jint width, jint height,
         jintArray jcfa, jintArray jblack, jint white, jfloatArray jgains,
         jfloatArray jshading, jint columns, jint rows,
-        jfloat hotPixelThreshold, jint roundCount) {
+        jfloat hotPixelThreshold, jint roundCount, jboolean selfCheck) {
     if (width < 8 || height < 8 || roundCount <= 0) return nullptr;
 
     int cfa[4], black[4];
@@ -1933,7 +2073,9 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nPrepassBench(
 
     const size_t pixels = static_cast<size_t>(width) * height;
     std::vector<uint16_t> src(pixels);
-    std::vector<float> plane(pixels);
+    // A plane each, so neither slot reads back what the other left warm in the
+    // cache, and so the two answers can be compared at the end of a round.
+    std::vector<float> a(pixels), b(pixels);
     // A merged frame's shape: a ramp with detail on it, sites tinted as a white
     // balanced sensor's are, and one site in ten thousand stuck high so the hot
     // pixel pass has something to find and to branch on.
@@ -1949,34 +2091,51 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nPrepassBench(
         src[i] = static_cast<uint16_t>(std::clamp(v, 0.0f, 1023.0f));
     }
 
-    auto three = [&]() {
-        applyBlackLevel(src.data(), plane.data(), width, height, black, range);
+    auto three = [&](float* plane) {
+        applyBlackLevel(src.data(), plane, width, height, black, range);
         if (hotPixelThreshold > 0.0f) {
-            suppressHotPixels(plane.data(), width, height, hotPixelThreshold);
+            suppressHotPixels(plane, width, height, hotPixelThreshold);
         }
-        applyShadingHoisted(plane.data(), width, height, shadingPtr, columns, rows, wb);
+        applyShadingHoisted(plane, width, height, shadingPtr, columns, rows, wb);
     };
-    auto two = [&]() {
-        applyBlackAndShading(src.data(), plane.data(), width, height, black, range,
-                             shadingPtr, columns, rows, wb);
-        if (hotPixelThreshold > 0.0f) {
-            suppressHotPixels(plane.data(), width, height, hotPixelThreshold);
-        }
+    auto one = [&](float* plane) {
+        applyPrepass(src.data(), plane, width, height, black, range, hotPixelThreshold,
+                     shadingPtr, columns, rows, wb, nullptr);
     };
 
-    // Untimed: faults the pages in and lets the cores come up to clock.
-    three();
-    two();
+    // Untimed: faults 100 MB of freshly allocated vector in and lets the cores
+    // come up to clock. Both costs used to land on whichever ran first.
+    three(a.data());
+    one(b.data());
 
-    std::vector<jlong> out(static_cast<size_t>(roundCount) * 2, 0);
+    std::vector<jlong> out(static_cast<size_t>(roundCount) * 2 + 2, 0);
+    long differing = 0;
+    double worst = 0.0;
+
     for (int r = 0; r < roundCount; ++r) {
         int64_t tA = 0, tB = 0;
-        auto slotA = [&]() { const int64_t t = nowMicros(); three(); tA = nowMicros() - t; };
-        auto slotB = [&]() { const int64_t t = nowMicros(); two();   tB = nowMicros() - t; };
+        auto slotA = [&]() {
+            const int64_t t = nowMicros();
+            if (selfCheck) one(a.data()); else three(a.data());
+            tA = nowMicros() - t;
+        };
+        auto slotB = [&]() {
+            const int64_t t = nowMicros();
+            one(b.data());
+            tB = nowMicros() - t;
+        };
         if ((r & 1) == 0) { slotA(); slotB(); } else { slotB(); slotA(); }
         out[static_cast<size_t>(r) * 2] = tA;
         out[static_cast<size_t>(r) * 2 + 1] = tB;
+        for (size_t i = 0; i < pixels; ++i) {
+            if (a[i] != b[i]) {
+                ++differing;
+                worst = std::max(worst, std::fabs(static_cast<double>(a[i]) - b[i]));
+            }
+        }
     }
+    out[static_cast<size_t>(roundCount) * 2] = differing;
+    out[static_cast<size_t>(roundCount) * 2 + 1] = static_cast<jlong>(worst * 1e9);
 
     jlongArray result = env->NewLongArray(static_cast<jsize>(out.size()));
     if (result == nullptr) return nullptr;
