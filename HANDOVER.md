@@ -31,7 +31,7 @@ phone:
 adb shell am instrument -w dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-124 tests should pass. If `repeatedCapturesTakeAConsistentTime` fails, check
+128 tests should pass. If `repeatedCapturesTakeAConsistentTime` fails, check
 `/proc/meminfo` and the battery before suspecting the code — see the measurement
 rules.
 
@@ -43,8 +43,11 @@ changes* at the end. No Play Store, no other devices, no release paperwork —
 deferred by the owner's decision, and nothing in the current work depends on any
 of it.
 
-Everything builds. **359 unit tests pass**, and **124 device tests** pass on the
-phone in a clean full suite. The capture consistency check fails once the phone
+Everything builds. **359 unit tests pass.** The device suite is **128 tests**,
+of which 124 were last seen green in one clean run (`d40f7fd`, see
+[BASELINE.md](BASELINE.md)); the four `GpuCrossingDeviceTest` cases pass standing
+alone and inside a suite run that the phone's battery cut short. **Run the full
+128 on a charged phone before believing anything here.** The capture consistency check fails once the phone
 is short of memory, which is device state and not a regression — see the
 measurement rules below. The build on the phone is current HEAD.
 
@@ -308,6 +311,36 @@ converting three values where the black pass converted one. **Taking the traffic
 away exposes the arithmetic that was hiding behind it.** Do not price the next
 fusion by counting bytes alone.
 
+### The GPU, which is priced on the old phone and asks to be priced on the new one
+
+`GpuCrossingDeviceTest` answers the cheap prior question to the Vulkan idea:
+what does a GPU develop pay before it does any work? 25 MB of merged CFA in, a
+shader too cheap to matter, 50 MB of RGBA out. On komodo, forty rounds:
+
+    staging   37ms      shared (uncached)  36ms
+    cached    10ms      imported            7ms
+
+**Against a develop of 112-199 ms, the cheapest crossing is 6-7 ms** — so on
+that phone the crossing is not what would make a GPU develop lose. Three things
+to carry rather than re-derive:
+
+- **It says nothing about whether a GPU develop would be faster.** The dispatch
+  is a floor and a real kernel is added to it. This closes the question only in
+  the direction where the answer is "no".
+- **The route matters more than the API, and it is two findings.** Going from the
+  driver's first coherent memory (uncached) to host-cached memory is 36 to 10 ms;
+  going from cached to an imported `AHardwareBuffer` is 10 to 7 ms. The first is
+  a choice of memory type, the second needs the ring rebuilt around hardware
+  buffers. Do not quote the 36-to-7 span as though the import earned all of it —
+  the benchmark did exactly that until a fourth route was added to separate them.
+- **The download is the cost.** Upload is 2-5 ms for 25 MB on every route;
+  download is 4-33 ms for 50 MB. Reading back is the thing to design around.
+
+On the new phone this is one test run, and the number it produces is the one that
+decides. Nothing in the shipping capture path links against Vulkan, so if the
+answer there is unfavourable, `GpuCrossing.cpp`, `crossing.comp` and their test
+delete cleanly.
+
 ### The next fold, which is not priced
 
 The develop is now two passes, and the same question applies to the pair that is
@@ -542,6 +575,7 @@ surprising.
 5. Look at the control row. **Six, because a phone shows six** was judged by eye
    on a 6.8" screen; this one is 6.3" and 1280 px across. The number may still
    be six. It should be looked at rather than inherited.
+6. Run `GpuCrossingDeviceTest`. It exists to be run here — see below.
 
 ## What needs you rather than me
 

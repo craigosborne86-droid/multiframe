@@ -3262,6 +3262,95 @@ fold that priced the prize — is gone, having done its job.
 than before: the prepass A/A that the old single-slot bench had no need of, and
 the parity fixture above.
 
+## The GPU question, asked cheaply before it is asked expensively
+
+The Vulkan plan was dropped in Phase 7 for a reason the log keeps: the merge was
+assumed to be dominated by accumulation, the timer was split, and accumulation
+was 9% of it. The note written then was that the idea was premature rather than
+wrong, and that `AHardwareBuffer` would matter *when there is something on the
+GPU worth the crossing*.
+
+The develop is now that something — two passes, per-pixel, and the largest thing
+left in a capture. But writing a GPU develop to find out is a fortnight, and
+there is a much cheaper question underneath it: **what does a GPU develop pay
+before it does any work at all?** If the round trip alone costs more than the CPU
+develop, no kernel wins it back and the idea is closed for good.
+
+`GpuCrossingDeviceTest` and `GpuCrossing.cpp` answer that. 25 MB of merged CFA
+to the GPU, a shader chosen to be too cheap to matter, 50 MB of RGBA back, four
+routes, forty rounds, paired and alternated like everything else here.
+
+    route       setup   upload   dispatch   download   round trip
+    staging     14ms      5ms       3ms       32ms       37ms
+    shared      14ms      3ms       5ms       33ms       36ms
+    cached      21ms      3ms       4ms        6ms       10ms
+    imported    17ms      2ms       3ms        4ms        7ms
+
+**Against a develop of 112-199 ms, the cheapest crossing is 6-7 ms.** On this
+phone the crossing is not what would make a GPU develop lose. That is the whole
+claim, and it is deliberately one-directional: the dispatch above is a floor, any
+real kernel is added to it, and nothing here says a GPU develop would be faster.
+
+### The figure that was true and confounded
+
+The first version had three routes and reported that importing an
+`AHardwareBuffer` is 4.4x cheaper than copying into shared memory, 20 of 20
+rounds. Both numbers were real. The conclusion was not.
+
+`memoryTypeFor` takes the first memory satisfying the flags asked of it, and the
+shared route asked for `HOST_VISIBLE | HOST_COHERENT | DEVICE_LOCAL`. On this
+driver the first such type is **uncached**, and reading 50 MB back through an
+uncached mapping is slow for reasons that have nothing to do with Vulkan. An
+imported hardware buffer asks for `CPU_READ_OFTEN` and gets **cached** memory. So
+the comparison was measuring the cache policy at least as much as the import.
+
+A fourth route holds the policy fixed — host-cached memory with the flush and the
+invalidate paid by hand — and splits the one figure into two:
+
+    uncached coherent -> host cached      36ms -> 10ms
+    host cached -> imported hardware      10ms ->  7ms
+
+**The cache policy is most of it.** That changes what the finding is worth: the
+first step is a choice of memory type in a benchmark, and the second is the one
+that would need `RawRing` rebuilt around `AHardwareBuffer`. Quoting 36-to-7 as
+the import's achievement would have justified a large piece of work with a number
+that mostly belonged to a one-line allocation flag.
+
+This is the recurring lesson of this log, arriving for the sixth time and in a
+new place: **a single reported figure usually bundles two very different things.**
+It has now cost alignment-versus-accumulate, encode-versus-demosaic,
+sharpening-versus-the-rest, the roll-off versus its lookup, the develop's three
+prepasses, and now the import versus the cache.
+
+### Two more things the benchmark says
+
+**The download is the whole cost.** Upload is 2-5 ms for 25 MB on every route;
+download is 4-33 ms for 50 MB. Getting the frame there is free and reading the
+result back is not, which is the opposite of the intuition that shaped the
+original Vulkan plan.
+
+**Setup is 14-23 ms**, which is a design constraint rather than a cost: an
+instance, device, pipeline and pool built per capture would be a tenth of a
+develop, so a GPU path would have to build them once and keep them.
+
+### What is here, and what it deliberately is not
+
+`GpuCrossing.cpp` and `crossing.comp`, compiled to SPIR-V at build time by the
+NDK's own `glslc`. Nothing in the shipping capture path links against Vulkan or
+touches any of it, so if the answer on the next phone is unfavourable the whole
+thing deletes cleanly.
+
+And the answer belongs to the next phone. Komodo's figures are here because a
+harness nobody has run is not evidence, and because the Pixel 11 Pro's reported
+doubling of memory bandwidth acts on the download — which this says is the entire
+cost. Re-run it there before quoting any of it.
+
+359 unit tests pass. The four tests above pass standing alone and again inside
+a suite run — but **that suite did not finish**: the phone ran out of battery
+inside `ShadingSpeedDeviceTest`, about a hundred tests in, with nothing failed to
+that point. The device count is 128 and 128 has not yet been seen green in one
+run. Re-run it on a charged phone before quoting it.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a

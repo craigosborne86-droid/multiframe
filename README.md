@@ -57,7 +57,7 @@ See [BUILD.md](BUILD.md). Short version:
     export JAVA_HOME="$HOME/Library/Java/JavaVirtualMachines/jdk-21.0.12.1+1/Contents/Home"
     ./gradlew :app:assembleDebug
     ./gradlew :app:testDebugUnitTest          # 359 tests, no device
-    ./gradlew :app:connectedDebugAndroidTest  # 124 tests, needs a device
+    ./gradlew :app:connectedDebugAndroidTest  # 128 tests, needs a device
 
 ## How the code is arranged
 
@@ -106,7 +106,7 @@ Every timing this project quotes was measured on one phone, and
 [BASELINE.md](BASELINE.md) is that phone's full reading with the device state
 stamped beside it.
 
-**A note on what is verified.** All 124 device tests run on the phone — a Pixel
+**A note on what is verified.** All 128 device tests run on the phone — a Pixel
 9 Pro XL on Android 17 — with none skipped *provided the screen is awake*,
 including the fourteen Compose tests
 that spent most of this project's life reporting as skipped, because an activity

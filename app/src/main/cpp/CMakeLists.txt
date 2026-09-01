@@ -145,6 +145,27 @@ target_include_directories(jpegturbo PUBLIC
 target_compile_options(jpegturbo PRIVATE -O3 -w -fvisibility=hidden)
 target_compile_definitions(jpegturbo PRIVATE NEON_INTRINSICS)
 
+# The crossing benchmark's compute shader, compiled to SPIR-V at build time.
+#
+# glslc ships with the NDK, so this adds no dependency on anything the project
+# did not already have. -mfmt=c emits an initialiser list rather than a binary,
+# which GpuCrossing.cpp includes directly: no asset to load, no file to find at
+# runtime, and the shader cannot drift out of step with the binary that runs it.
+set(GLSLC ${ANDROID_NDK}/shader-tools/${ANDROID_HOST_TAG}/glslc)
+if(NOT EXISTS ${GLSLC})
+    find_program(GLSLC NAMES glslc REQUIRED)
+endif()
+set(CROSSING_SPV ${CMAKE_CURRENT_BINARY_DIR}/crossing_comp.inc)
+add_custom_command(
+    OUTPUT ${CROSSING_SPV}
+    COMMAND ${GLSLC} -O -mfmt=c
+            ${CMAKE_CURRENT_SOURCE_DIR}/crossing.comp -o ${CROSSING_SPV}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/crossing.comp
+    COMMENT "Compiling crossing.comp to SPIR-V"
+    VERBATIM
+)
+add_custom_target(crossing_shader DEPENDS ${CROSSING_SPV})
+
 add_library(multiframe SHARED
     bayer_merge.cpp
     RingBuffer.cpp
@@ -152,7 +173,10 @@ add_library(multiframe SHARED
     Align.cpp
     Rotate.cpp
     Jpeg.cpp
+    GpuCrossing.cpp
 )
+add_dependencies(multiframe crossing_shader)
+target_include_directories(multiframe PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 target_compile_options(multiframe PRIVATE
     -O3
@@ -166,4 +190,11 @@ find_library(log-lib log)
 # jnigraphics lets native write straight into a Bitmap's pixel store, so the
 # developed image never passes through a Java array.
 find_library(jnigraphics-lib jnigraphics)
-target_link_libraries(multiframe ${log-lib} ${jnigraphics-lib} jpegturbo)
+# Vulkan and AHardwareBuffer are the crossing benchmark's only new dependencies,
+# both from the NDK's own sysroot. Nothing in the shipping capture path links
+# against either: if the answer is that the GPU is not worth crossing to, the
+# whole of GpuCrossing.cpp deletes cleanly.
+find_library(vulkan-lib vulkan)
+find_library(android-lib android)
+target_link_libraries(multiframe ${log-lib} ${jnigraphics-lib} ${vulkan-lib}
+    ${android-lib} jpegturbo)

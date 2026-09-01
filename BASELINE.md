@@ -114,6 +114,59 @@ explained why.
     merge, per frame        median 199-207ms, 176-234ms
     JPEG, strip encoder     134ms at 1912 KB, against the framework's 63ms at 2013 KB
 
+## What it costs to reach the GPU
+
+**A later reading than everything above, and it has to say so.** The suite above
+was run at `d40f7fd`; `GpuCrossingDeviceTest` did not exist then. This section
+was measured afterwards on the same phone, on a battery falling through the last
+of its charge and at 38-39 C — a worse state than the run above, and its state
+was not stamped at the time, which is the mistake this file exists to prevent.
+Treat these as indicative and re-take them. It is in this file because its whole
+purpose is to be re-run on the Pixel 11 Pro and compared, and because the
+comparison between its four routes is paired and survives a tired phone even
+where the absolute figures do not.
+
+The suite run that would have confirmed all 128 tests together did not finish:
+the battery gave out inside `ShadingSpeedDeviceTest` about a hundred tests in,
+with nothing failed to that point. So 124-of-124 at `d40f7fd` is the last
+complete reading this phone gave. `GpuCrossingDeviceTest` moves 25 MB
+of merged CFA to the GPU, runs a shader chosen to be too cheap to matter, and
+brings 50 MB of RGBA back. Forty rounds, medians:
+
+    route       setup   upload   dispatch   download   round trip
+    staging     14ms      5ms       3ms       32ms       37ms
+    shared      14ms      3ms       5ms       33ms       36ms
+    cached      21ms      3ms       4ms        6ms       10ms
+    imported    17ms      2ms       3ms        4ms        7ms
+
+Zero wrong pixels on every route, which is not a formality: a driver that
+silently dropped the dispatch would produce the fastest figures in this file.
+
+**Against a develop of 112-199 ms, the cheapest crossing is 6-7 ms.** So the
+prior question is answered on this phone: reaching the GPU is not what would
+make a GPU develop lose. Whether a GPU develop would *win* is a different and
+much more expensive question, and nothing here speaks to it — the dispatch above
+is a floor that any real kernel is added to.
+
+**The interesting part is the spread between routes, and it is two findings not
+one.** The first version of this benchmark reported "importing an
+AHardwareBuffer is 4x cheaper than copying into shared memory", which was true
+and confounded. The shared route takes the first coherent memory the driver
+offers, which here is *uncached*, and an imported buffer asks for
+`CPU_READ_OFTEN` and gets *cached* memory — so the comparison was measuring the
+cache policy at least as much as the import. Splitting them:
+
+    uncached coherent -> host cached      36ms -> 10ms
+    host cached -> imported hardware      10ms ->  7ms
+
+The cache policy is most of it. That matters, because the second step is the one
+that needs the ring rebuilt around `AHardwareBuffer` and the first is a choice of
+memory type.
+
+**The download is the whole cost.** Upload is 2-5 ms for 25 MB on every route;
+download is 4-33 ms for 50 MB. Reading GPU-written memory back is what a GPU
+develop would have to be careful about, not getting the frame there.
+
 ## The one failure, and why it is device state
 
 `repeatedCapturesTakeAConsistentTime` failed in the full suite:
