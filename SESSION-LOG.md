@@ -3196,13 +3196,13 @@ plane once. Nothing is written before it is read, so there is no halo, no two-ro
 lag, and no band edge to race on: the fusion the race fix was going to have to
 be careful about turned out to be the thing that removes the hazard.
 
-    black + hotpixels + shading   median 102, 117, 94 ms
-    one pass                      median  75,  81, 69 ms
-    the fold                      1.36 - 1.45x     116 of 120 rounds
+    black + hotpixels + shading   median 102, 117, 94, 91 ms
+    one pass                      median  75,  81, 69, 66 ms
+    the fold                      1.36 - 1.45x     155 of 160 rounds
 
 `nPrepassBench` now holds the three passes in one slot and the fold in the other,
 alternates them within a round, and compares the two planes every round. Its A/A
-runs the fold in both slots: 21, 18 and 21 of 40, ratio 1.01x, 0.98x and 1.03x
+runs the fold in both slots: 21, 18, 21 and 20 of 40, ratio 1.01x, 0.98x, 1.03x and 1.01x
 — a fair instrument, and the same plane every time, bit for bit, which is the
 race fix showing up as a property rather than as an argument.
 

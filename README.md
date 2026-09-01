@@ -102,6 +102,10 @@ a *defocused* frame as sharper, a demosaic that was destroying 43% of fine
 detail, a ratio test that kept precisely its worst matches, and two performance
 claims that had to be withdrawn for sitting inside the measurement noise.
 
+Every timing this project quotes was measured on one phone, and
+[BASELINE.md](BASELINE.md) is that phone's full reading with the device state
+stamped beside it.
+
 **A note on what is verified.** All 124 device tests run on the phone — a Pixel
 9 Pro XL on Android 17 — with none skipped *provided the screen is awake*,
 including the fourteen Compose tests

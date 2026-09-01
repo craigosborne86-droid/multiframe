@@ -56,7 +56,7 @@ Recent work, newest first:
 
 - **the develop's three preparatory passes are one pass.** `black`, `hotpixels`
   and `shading` fold into a single sweep that reads the merged `uint16` and
-  writes the plane once: 1.36-1.45x of the three, 116 of 120 rounds. Hot pixel
+  writes the plane once: 1.36-1.45x of the three, 155 of 160 rounds. Hot pixel
   detection moved into the raw domain, which is exact once the clamp at the
   black level is carried as `max(code, black)` — it is not exact without it
 - **a race in `suppressHotPixels` is fixed**, which had made the develop not
@@ -192,7 +192,7 @@ At the end of a measuring session, 48% and 38 C, with the fold in:
 log has made before.** The same three passes read 76-85 ms in `nPrepassBench`
 last session and 94-117 ms in it today; the phone, not the code, is most of the
 difference. What transfers is the paired ratio: the fold is 1.36-1.45x of the
-three, 116 of 120 rounds, measured inside one binary in one process.
+three, 155 of 160 rounds, measured inside one binary in one process.
 
 The same phone four hours into a session of measuring reads roughly twice
 everything. Do not mix the two, and do not compare either with the 38 ms shading
@@ -273,9 +273,9 @@ rounds or shrink the enclosing pass; do not read the ratio.
 `applyPrepass`, which reads the merged `uint16`, corrects defective sites on the
 way past, and writes the plane once:
 
-    three passes   median 102, 117, 94 ms
-    one pass       median  75,  81, 69 ms
-    the fold       1.36 - 1.45x     116 of 120 rounds
+    three passes   median 102, 117, 94, 91 ms
+    one pass       median  75,  81, 69, 66 ms
+    the fold       1.36 - 1.45x     155 of 160 rounds
 
 Four things are worth knowing before touching it.
 
@@ -515,11 +515,15 @@ measured:
   peepholes live again — which is a reason to re-run the ablations before
   believing the conclusion, not a reason to assume they changed.
 
-**Do not delete the old phone's baseline, and do not mix the two.** Run the full
-suite on komodo one more time before it goes, and keep it long enough to run the
-same suite on the new one. The rule that has cost this project the most time is
-setting a figure from one run beside a figure from another; a change of phone is
-that mistake with a hardware step in the middle.
+**The old phone's baseline is taken and committed: [BASELINE.md](BASELINE.md).**
+Correctness, the capture path, every paired ratio and every isolate, with the
+battery, temperature and free memory stamped beside them, because a figure
+without its device state is not a figure. Compare the new phone against that file
+rather than against anything quoted in the log, and compare *ratios* — the rule
+that has cost this project the most time is setting a figure from one run beside
+a figure from another, and a change of phone is that mistake with a hardware step
+in the middle. Keep komodo long enough to settle anything the new readings make
+surprising.
 
 **First day, in this order:**
 
