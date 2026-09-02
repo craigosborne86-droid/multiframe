@@ -185,3 +185,47 @@ pass that had just changed was 1.42x faster, 39 of 40 rounds.
 inside the full suite: settled shots of 556, 509 and 402 ms, spread 154 ms. The
 absolute figures are *worse* than run A's — the phone is warmer — and the test
 passes anyway, because what it asserts is a spread and not a time.
+
+## The same test a third time, and what its failure rate actually is
+
+`repeatedCapturesTakeAConsistentTime` failed again on 3 September 2026, inside a
+full suite run on a phone that had just been through one. This time it was
+measured rather than reasoned about, because a change to `ZslRawStream` was in
+the tree and the honest question was whether that change had caused it.
+
+**Seven consecutive runs of the test alone, same phone, same session:**
+
+| run | tree | result |
+|---|---|---|
+| 1 | changed | **fail** — slowest 674 ms against a 532 ms bound |
+| 2 | changed | **fail** — slowest 654 ms against a 554 ms bound |
+| 3 | **reverted** | pass |
+| 4-6 | changed | pass, pass, pass |
+| 7 | changed | **fail** — slowest 703 ms |
+
+Three failures in seven, so roughly **40% on a phone in this state**: 41%
+battery *and charging*, skin 40.7 C, little cores at 61 C, and 574 MB free of
+15.9 GB after a full suite and a 1.1 GB mosaic assembly.
+
+**The single reverted run is not the evidence, and it is worth saying why.** At
+a 40% failure rate one pass has about a 60% chance of happening anyway, so
+reverting-and-passing once demonstrates nothing at all. What rules the change
+out is the other column: four passes in six on the changed tree. A regression
+that adds 150 ms does not pass four times out of six.
+
+The mechanism agreed afterwards, which is the right order to check it in: the
+test drives `ZslRawStream` directly and never composes the UI, so the only new
+caller in that change is never invoked during it.
+
+**What the failures have in common is the bound, not the pipeline.** The
+assertion is `slowest < fastest * 1.4` — a spread, as the section above says.
+The failing ratios were 1.77 (674 against a fastest of 380) and 1.65 (654
+against 396). Nothing was slow in absolute terms; the *fastest* shot stayed at
+380-396 ms, which is quicker than run B's settled 402-556 ms. It is the
+consistency that goes, exactly as it does under memory pressure in run A.
+
+So the standing advice holds and now has a number behind it. Before suspecting
+the code, check `/proc/meminfo` and the battery — and if the phone is warm and
+charging, **one re-run is not a diagnosis.** Alternate the versions and count,
+or wait for a rested phone, which is what this file has been saying about every
+other figure in it.
