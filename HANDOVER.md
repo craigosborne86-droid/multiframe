@@ -4,12 +4,23 @@ A short brief for picking this up in a fresh session. Delete it once it has
 served its purpose; [SESSION-LOG.md](SESSION-LOG.md) is the real record and
 holds the reasoning behind everything below.
 
-## Start here: two things need the owner, and they outrank the code
+## Start here
 
-The last agreed task — folding the develop's three preparatory passes — is
-**done and measured**; see *One sweep, and what it left behind* below. Nothing in
-the code is queued behind it, and the two items that have been waiting longest
-need a person and a scene rather than a session:
+Nothing is half-finished. The tree is green, the last agreed task is done and
+measured, and the next move is a choice rather than a continuation. In order:
+
+### 1. The phone, when it arrives
+
+A Pixel 11 Pro is on order and it reorders everything below, because **any code
+measured on komodo has to be measured again anyway.** Do not start a performance
+session on the old phone. *When the phone changes* at the end of this file has
+the first-day checklist and what does and does not carry over;
+[BASELINE.md](BASELINE.md) is what to compare against, and it is ratios you
+compare, not milliseconds.
+
+### 2. Two things that need you rather than a session
+
+Both have been waiting longest and both still outrank the code:
 
 - **Nobody has swept a real scene with the mosaic.** Every stitching claim rests
   on synthetic frames cut from a generated image. That is the right way to test
@@ -18,22 +29,48 @@ need a person and a scene rather than a session:
 - **Nobody has looked hard at a batch of real photographs.** The parity tests
   prove the native path matches the Kotlin one; neither proves the picture is
   good. Twenty frames in mixed light, looked at properly, would tell more than
-  any test here.
+  any test here. Worth doing on the new sensor rather than this one.
 
-If the next session is a code session anyway, the one unpriced question with a
-strong prior is in *The next fold, which is not priced* below. Price it before
-building it — that is what made the last one worth doing.
+### 3. Then one decision, and it is between two things, not a queue
 
-Before measuring anything, confirm a green baseline on a **rested, charged**
-phone:
+The develop is the last large item in a capture, and there are two ways left to
+attack it. **They are alternatives.** If the develop moves to the GPU, the row
+cache is moot; if the row cache lands, the GPU has less left to win. Building
+either without deciding would waste one of them.
+
+- **Fuse the prepass into the demosaic** — a five-row sliding window, taking
+  100 MB of DRAM traffic out. Unpriced. See *The next fold, which is not priced*.
+- **Move the develop to the GPU** — the crossing is now priced at 5-6% of a
+  develop, so the door that Phase 7 closed is open again. See *The GPU, which is
+  priced on the old phone*.
+
+**And there is a cheap measurement that would decide between them**, which is
+what this project does instead of guessing. `GpuCrossingDeviceTest` already
+carries a compute shader, a paired harness and a correctness check; its shader is
+deliberately trivial. Replace it with a real demosaic and tone curve — the wrong
+picture at the edges is fine, it is a stopwatch and not a pipeline — and time the
+dispatch against the CPU's `demosaic+tone`. That is an afternoon and it answers
+the expensive question without building a GPU develop: crossing plus kernel
+against 77-157 ms decides the whole thing. If the GPU wins clearly, the row cache
+is dead and a real Vulkan develop is the work. If it loses, delete
+`GpuCrossing.cpp` and take the row cache.
+
+Do that on the new phone. The reported doubling of memory bandwidth acts on the
+crossing's download, which is its whole cost, and on the row cache's prize, which
+is entirely traffic — so it moves both sides of this decision and neither answer
+transfers from komodo.
+
+### Before measuring anything
+
+Confirm a green baseline on a **rested, charged** phone:
 
 ```bash
 adb shell am instrument -w dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
 128 tests should pass. If `repeatedCapturesTakeAConsistentTime` fails, check
-`/proc/meminfo` and the battery before suspecting the code — see the measurement
-rules.
+`/proc/meminfo` and the battery before suspecting the code — that has now
+happened twice and been device state twice.
 
 ## Where things stand
 
@@ -341,6 +378,16 @@ decides. Nothing in the shipping capture path links against Vulkan, so if the
 answer there is unfavourable, `GpuCrossing.cpp`, `crossing.comp` and their test
 delete cleanly.
 
+**The next thing to do with this file is to make its shader real.** Everything
+around the shader — the four routes, the paired harness, the alternation, the
+per-round correctness check — is written and does not care what the shader
+computes. Swapping `crossing.comp` for an actual demosaic and tone curve turns
+the benchmark from "can the GPU be reached" into "would the GPU win", which is
+the question that decides between this and the row cache. It does not need to be
+correct at the band edges or pinned to anything: it is a stopwatch, and it should
+be deleted after it has been read. Give it the same arithmetic the NEON path
+does, or the comparison is against a straw man.
+
 ### The next fold, which is not priced
 
 The develop is now two passes, and the same question applies to the pair that is
@@ -352,6 +399,11 @@ comment in `nDevelop` says preparing inline would repeat the work thirteen times
 A sliding window of about five prepared rows — 80 KB at this width, which is L2 —
 answers that objection without repeating anything, and would take 100 MB of DRAM
 traffic out of the develop. It is the same trick that just worked, one level up.
+
+**This and the GPU are alternatives.** Whichever is measured first should be
+measured knowing the other exists: a row cache that removes the plane also
+removes most of what a GPU develop would save, and a GPU develop makes the row
+cache pointless. Decide, then build one.
 
 **It is a guess until it is priced, and the last one overshot by a factor of
 two.** `nPrepassBench` is the pattern to copy: build the wrong-but-cheap version
