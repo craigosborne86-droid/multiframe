@@ -6,8 +6,10 @@ holds the reasoning behind everything below.
 
 ## Start here
 
-Nothing is half-finished. The tree is green, the last agreed task is done and
-measured, and the next move is a choice rather than a continuation. In order:
+The tree is green and the last agreed task is done and measured. One thing is
+half-finished, it is small, and it is named below: five changes to the interface
+are on main without ever having been seen on a phone. Past that, the next move
+is a choice rather than a continuation. In order:
 
 ### 1. The phone, when it arrives
 
@@ -18,7 +20,38 @@ the first-day checklist and what does and does not carry over;
 [BASELINE.md](BASELINE.md) is what to compare against, and it is ratios you
 compare, not milliseconds.
 
-### 2. Two things that need you rather than a session
+### 2. The interface, which needs a phone but not the new one
+
+The camera-facing UI has been through a build-and-screenshot pass and is on main
+in two commits, `08eec93` and `00b0d91`. Most of it was verified on komodo
+against a real scene: touch targets read off the accessibility tree in dp, the
+thumbnail and shutter measured to a 0px centre delta, the manual panel, and a
+live ISO/shutter/EV readout the app had never had.
+
+**Five changes were written after the phone disconnected and have only been seen
+on the emulator, which has no camera and so shows no lens strip and a black
+viewfinder:** the uniform lens circles, the drag handle's contrast, the sweep
+overlay, the countdown ground, and the capability summary moved to a footnote.
+
+This does not wait for the Pixel 11. It is a question about pixels rather than
+milliseconds, so komodo answers it perfectly well, and answers it today:
+
+```bash
+adb exec-out screencap -p > screenshot.png
+```
+
+Two things were deliberately left alone because they cannot be judged without a
+photograph behind them, and both are the kind of thing that only looks like
+carelessness once someone has seen it:
+
+- **The bottom scrim is 232dp under a cluster about 274dp tall**, so the lens
+  strip sits above the gradient that is meant to ground it. Raising it darkens
+  the composition, which is a trade to look at rather than to reason about.
+- **The histogram is pinned at `bottom = 130.dp`** and the bottom cluster was
+  restructured around it. It only draws with ZSL on, which the emulator cannot
+  do, so it may now collide with the thumbnail.
+
+### 3. Two things that need you rather than a session
 
 Both have been waiting longest and both still outrank the code:
 
@@ -31,7 +64,7 @@ Both have been waiting longest and both still outrank the code:
   good. Twenty frames in mixed light, looked at properly, would tell more than
   any test here. Worth doing on the new sensor rather than this one.
 
-### 3. Then one decision, and it is between two things, not a queue
+### 4. Then one decision, and it is between two things, not a queue
 
 The develop is the last large item in a capture, and there are two ways left to
 attack it. **They are alternatives.** If the develop moves to the GPU, the row
@@ -92,6 +125,22 @@ in about a second and writes a DNG and a JPEG to the gallery, and the status
 line says what the merge bought: `8 frames · 91% kept`.
 
 Recent work, newest first:
+
+- **the camera-facing interface was measured rather than looked at, and rebuilt
+  where it failed.** Every chip in the row over the viewfinder and beside the
+  shutter was 44dp against Material's 48dp minimum -- seven controls failing a
+  number that is not a matter of taste. The thumbnail and the shutter were 19dp
+  out of alignment. The manual panel drew its own ground while the action strip
+  and shutter stayed outside it, so the surface stopped in mid-air with the
+  photograph showing again beneath it. The About sheet was 95% opaque, which is
+  not opaque, and was a single tap target over the whole scrolling privacy
+  policy. There is now a permanent ISO/shutter/EV readout taken off the
+  repeating request rather than inferred from the settings, which under
+  auto-exposure are different numbers. `lintDebug` went from 32 errors to 0 in
+  the same pass -- one of them a real latent crash, because `openCamera`
+  reports a revoked permission by throwing rather than through its state
+  callback, and the retry loop then spent 750ms waiting for a permission to
+  come back.
 
 - **the develop's three preparatory passes are one pass.** `black`, `hotpixels`
   and `shading` fold into a single sweep that reads the merged `uint16` and
@@ -626,13 +675,26 @@ surprising.
    less.
 5. Look at the control row. **Six, because a phone shows six** was judged by eye
    on a 6.8" screen; this one is 6.3" and 1280 px across. The number may still
-   be six. It should be looked at rather than inherited.
+   be six. It should be looked at rather than inherited -- and the chips are
+   48dp rather than 44dp now, so six of them are wider than they were when that
+   number was picked. Both edges of the row fade when there is more that way, so
+   a row one too long reads as scrollable instead of as sliced through a chip;
+   that is a mitigation and not the answer.
 6. Run `GpuCrossingDeviceTest`. It exists to be run here — see below.
 
 ## What needs you rather than me
 
-The two at the top of this file, and:
+The two in *Two things that need you rather than a session* above, and:
 
+- **Three small user-visible calls the interface pass left open.**
+  `about_dismiss` read *"Tap anywhere to close"*, which was true until the
+  whole-document tap target was removed for being both an accidental-dismissal
+  hazard and a screen reader announcing the privacy policy as a button; it now
+  reads *"Close"*. `app_name` is still *Multiframe*, while CLAUDE.md calls the
+  project Aperture Zero and [NAMES.md](NAMES.md) recommends *Coadd* -- three
+  names for one app, and the store listing will need one of them. And 25 lint
+  warnings remain, all pre-existing: the `ExifInterface` pair is the one worth a
+  look in an app that writes EXIF.
 - The release checklist in the session log: privacy policy, release keystore,
   Play Data safety form, store screenshots, and a proper trademark clearance on
   whichever name ships. [NAMES.md](NAMES.md) recommends *Coadd* over the working
