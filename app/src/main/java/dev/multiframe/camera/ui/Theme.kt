@@ -25,7 +25,7 @@ object Ink {
     val Bone = Color(0xFFF2F0EA)
 
     /** An inactive control: a pane over the image, not a block of colour. */
-    val Pane = Color(0xB3161A1E)
+    val Pane = Color(0xD9141A1F)
 
     /** The edge of a pane. Enough to separate it from a dark photograph. */
     val Hairline = Color(0x26FFFFFF)
@@ -42,12 +42,6 @@ object Ink {
     /** Ink on a bone fill. */
     val OnBone = Color(0xFF0B0D0F)
 
-    /**
-     * Secondary text directly over the photograph, where a pane would be more
-     * furniture than the reading is worth.
-     */
-    val Subtle = Color(0x99FFFFFF)
-
     /** Secondary text on a bone fill: the lens strip's zoom factor. */
     val OnBoneMuted = Color(0xCC06121F)
 
@@ -62,14 +56,17 @@ object Ink {
      * overlay picks its own as it is written. Named by what sits on them:
      *
      *  * [Readout] is behind text that must be legible over anything, which is
-     *    most of them.
-     *  * [Dialogue] is behind something the user is meant to look at rather than
-     *    read past: the sweep's progress.
+     *    most of them, and behind the countdown.
      *  * [Faint] is behind a graphic that carries its own contrast, where a
      *    darker ground would fight the photograph for no gain.
+     *
+     * There was a third, `Dialogue`, at 0xAA. It was the sweep's ground, and
+     * 0xAA of black over a sunlit street is not a ground -- the numbers were
+     * competing with the photograph they were reporting on. The sweep now uses
+     * [Panel], the same surface as the manual controls, because it is the same
+     * kind of thing: something the app puts in front of you deliberately.
      */
     val Readout = Color(0xCC000000)
-    val Dialogue = Color(0xAA000000)
     val Faint = Color(0x66000000)
 
     /** The two ends of the scrims the controls sit on. */
@@ -81,7 +78,7 @@ object Ink {
      * faintest things here. A guide that competes with the photograph for
      * attention has stopped being a guide.
      */
-    val Guide = Color(0x33FFFFFF)
+    val Guide = Color(0x4DFFFFFF)
     val GuideStrong = Color(0x66FFFFFF)
     val GuideFaint = Color(0x1AFFFFFF)
     val GuideMid = Color(0x44FFFFFF)
@@ -103,7 +100,7 @@ object Ink {
     val Clipping = Color(0xFFFF6B6B)
 
     /** The About sheet, which covers the picture rather than floating on it. */
-    val Sheet = Color(0xF2070A0D)
+    val Sheet = Color(0xFF06090C)
     val SheetBody = Color(0xFFD4DDE6)
     val SheetMuted = Color(0xFF8A97A5)
     val SheetCode = Color(0xFF161C22)

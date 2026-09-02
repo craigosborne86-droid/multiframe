@@ -3,6 +3,7 @@ package dev.multiframe.camera
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.CaptureRequest as Camera2Request
 import android.hardware.camera2.TotalCaptureResult
 import android.util.Log
@@ -16,7 +17,6 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
 import android.app.ActivityManager
@@ -154,7 +154,12 @@ private const val RETICLE_PX = 180f
 private const val PEAK_W = 320
 private const val PEAK_H = 240
 
+// Both opt-ins are needed and they are not the same thing: Kotlin's satisfies
+// the compiler, and AndroidX's own is what its lint check looks for. With only
+// the first, `lintDebug` reported every interop call in this function as an
+// UnsafeOptInUsageError.
 @OptIn(ExperimentalCamera2Interop::class)
+@androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
 @Composable
 fun CameraScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -248,6 +253,25 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     val level = remember { LevelSensor(context) }
     var attitude by remember { mutableStateOf<Attitude?>(null) }
     var histogram by remember { mutableStateOf<IntArray?>(null) }
+
+    // What the sensor actually used, as opposed to what was asked for. In
+    // auto-exposure those are different numbers and only the first is worth
+    // showing, so it is read off the repeating request rather than inferred
+    // from `settings`.
+    //
+    // Written from a camera callback at frame rate and sampled at 5Hz: driving
+    // Compose state directly from that callback would recompose the whole
+    // screen sixty times a second to change two digits.
+    val liveExposure = remember { AtomicReference(0 to 0L) }
+    var exposureReadout by remember { mutableStateOf<Pair<Int, Long>?>(null) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            val (iso, ns) = liveExposure.get()
+            exposureReadout = if (iso > 0 && ns > 0L) iso to ns else null
+            kotlinx.coroutines.delay(200)
+        }
+    }
 
     // Focus peaking, shown only while manual focus is engaged, since that is
     // the only time it answers a question the user is asking.
@@ -380,9 +404,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     }
 
     // Live histogram, read in place from the ring so it costs no frames.
-    LaunchedEffect(zslStream, guides) {
+    // Gated on the raw stream only. It used to be gated on the guides as
+    // well, which meant the one instrument that tells you whether the
+    // highlights are gone was off unless you had also asked for a grid --
+    // two unrelated things behind one control.
+    LaunchedEffect(zslStream) {
         val stream = zslStream
-        if (stream == null || guides == GuideMode.OFF) {
+        if (stream == null) {
             histogram = null
             return@LaunchedEffect
         }
@@ -411,7 +439,27 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         zslStream?.close()
         zslStream = null
 
-        val preview = Preview.Builder().build().apply {
+        val preview = Preview.Builder().also { builder ->
+            // The repeating request reports what the sensor settled on for
+            // every frame, which is the only honest source for the readout
+            // while auto-exposure is running. Wrapped because a device that
+            // rejects the interop extension must still get a viewfinder.
+            runCatching {
+                Camera2Interop.Extender(builder).setSessionCaptureCallback(
+                    object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureCompleted(
+                            session: CameraCaptureSession,
+                            request: Camera2Request,
+                            result: TotalCaptureResult,
+                        ) {
+                            val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
+                            val ns = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+                            if (iso != null && ns != null) liveExposure.set(iso to ns)
+                        }
+                    }
+                )
+            }.onFailure { Log.w(TAG, "no live exposure readout on this device", it) }
+        }.build().apply {
             setSurfaceProvider { request -> surfaceRequest = request }
         }
 
@@ -1124,6 +1172,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         ) {
             ControlRow(ControlBar.modes(barState), onControl = handleControl)
 
+            ExposureReadout(
+                iso = exposureReadout?.first,
+                exposureNs = exposureReadout?.second,
+                evLabel = caps?.takeIf { it.supportsExposureCompensation && settings.evActive }
+                    ?.let { c -> "%+.1f".format(settings.effectiveEvIndex(c) * c.evStep) },
+                manual = caps?.let { settings.manualExposureActive(it) } == true,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+
             if (status.isNotEmpty()) {
                 Text(
                     text = status,
@@ -1139,9 +1196,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
 
         Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding(),
+            modifier = Modifier.align(Alignment.BottomCenter),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // Lens strip. Labelled in millimetres, because that is what tells a
@@ -1166,166 +1221,230 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 }
             }
 
-            if (showControls) {
-                ControlsPanel(
-                    settings = settings,
-                    caps = caps,
-                    onChange = { settings = it },
-                    abMode = abMode,
-                    onAbMode = { if (!busy) abMode = it },
-                    highlightGuard = if (zslStream != null) highlightGuard else null,
-                    onHighlightGuard = { if (!busy) highlightGuard = it },
-                    onReset = {
-                        // Back to what the app ships with. The save effect above
-                        // is watching every one of these, so persisting it needs
-                        // no separate step.
-                        val fresh = AppSettings()
-                        settings = fresh.manual
-                        burstFrames = fresh.burstFrames
-                        mergeEnabled = fresh.mergeEnabled
-                        highlightGuard = fresh.highlightGuard
-                        zslWanted = fresh.zslEnabled
-                        captureMode = fresh.captureMode
-                        timerSeconds = fresh.timerSeconds
-                        guides = GuideMode.OFF
-                        abMode = false
-                        status = "settings reset"
-                    },
-                )
-            }
-
-            // The captures that are not the shutter. Squared off rather than
-            // pilled, and here rather than in the row at the top, because every
-            // one of them writes a photograph the moment it is touched and the
-            // things up there do not.
-            ActionStrip(
-                specs = ControlBar.actions(barState),
-                onControl = handleControl,
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
-
-            ShutterButton(
-                busy = busy,
-                counting = countdown > 0,
-                modifier = Modifier.padding(top = 12.dp, bottom = 28.dp),
-                onClick = {
-                    if (countdown > 0) {
-                        // Called off before anything was locked.
-                        captureJob?.cancel()
-                        captureJob = null
-                        countdown = 0
-                        busy = false
-                        status = "timer cancelled"
-                        return@ShutterButton
-                    }
-                    if (busy) return@ShutterButton
-
-                    // Zero shutter lag: the frames already exist, so this press
-                    // locks them rather than starting a capture.
-                    val stream = zslStream
-                    if (stream != null) {
-                        val plan = capturePlan
-                        val frames = plan?.frames ?: burstFrames
-                        busy = true
-                        status = "%s: %d frames…".format(
-                            plan?.resolved?.label ?: "ZSL", frames,
-                        )
-                        val rot = caps?.let {
-                            orientation.captureRotation(it.sensorOrientation)
-                        } ?: 0
-                        captureJob = scope.launch {
-                            // The timer runs before anything is locked, so the
-                            // frames captured are the ones from the moment the
-                            // countdown ends rather than when it began.
-                            for (remaining in timerSeconds downTo 1) {
-                                countdown = remaining
-                                status = "$remaining… tap the shutter to cancel"
-                                kotlinx.coroutines.delay(1000)
-                            }
-                            countdown = 0
-
-                            val r = withContext(Dispatchers.Default) {
-                                ZslCapture.captureAndMerge(
-                                    context, stream, frames, rot,
-                                )
-                            }
-                            Log.i(TAG, "ZSL result: $r")
-                            r.streamStats?.let { Log.i(TAG, "stream health: $it") }
-                            Log.i(
-                                TAG,
-                                ("handover %.2fms  span %dms  merge %dms  " +
-                                    "develop %dms  write %dms").format(
-                                    r.handoverMicros / 1000.0, r.burstSpanMillis,
-                                    r.mergeMillis, r.developMillis, r.writeMillis,
-                                ),
-                            )
-                            status = r.stats?.let {
-                                CaptureReadout.of(it.framesMerged, it.meanContribution)
-                            } ?: r.message
-                            busy = false
-                        }
-                        return@ShutterButton
-                    }
-
-                    busy = true
-                    status = if (abMode) "A/B capture, $burstFrames frames…"
-                    else "Capturing $burstFrames frames…"
-
-                    val rotation = caps?.let { orientation.captureRotation(it.sensorOrientation) } ?: 0
-
-                    scope.launch {
-                        val label = if (abMode) "ab" else if (mergeEnabled) "merged" else "single"
-                        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
-                            .format(System.currentTimeMillis())
-
-                        val result = withContext(Dispatchers.Default) {
-                            // One snapshot drives every output, so an A/B pair is
-                            // guaranteed to be the same scene at the same instant.
-                            val frames = buffer.snapshot(
-                                if (mergeEnabled || abMode) {
-                                    burstFrames.coerceAtMost(buffer.capacity)
-                                } else 1
-                            )
-                            if (frames.isEmpty()) return@withContext null
-
-                            fun save(mergeIt: Boolean, suffix: String): Pair<Any?, Any?> {
-                                val out = Merger.process(frames, mergeIt)
-                                val bmp = OrientationTracker.rotate(out.bitmap, rotation)
-                                val uri = ImageSaver.saveJpeg(
-                                    context, bmp, "MF_${stamp}_$suffix.jpg",
-                                )
-                                bmp.recycle()
-                                return out.stats to uri
-                            }
-
-                            if (abMode) {
-                                save(false, "ab_single")
-                                save(true, "ab_merged")
-                            } else {
-                                save(mergeEnabled, label)
-                            }
-                        }
-
-                        status = if (result == null) {
-                            "No frames buffered yet"
+            // Everything below the lens strip shares one ground. With the
+            // manual panel open that ground is opaque and runs to the bottom
+            // edge of the screen, so the panel reads as a surface the controls
+            // stand on rather than as a slab hanging in the middle of the
+            // photograph -- which is what it looked like when the panel drew
+            // its own background and the shutter was left outside it.
+            // The panel is only a surface when it has something on it.
+            //
+            // `ControlsPanel` draws nothing at all until the camera has
+            // reported its capabilities, which is right -- but the ground and
+            // the handle were drawn by this column regardless, so opening PRO
+            // before the camera was ready gave an empty slab with a grab
+            // handle and no controls. Seen on a device with no capabilities to
+            // report, that is the whole feature.
+            val panelOpen = showControls && caps != null
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (panelOpen) {
+                            Modifier.background(Ink.Panel, PanelShape)
                         } else {
-                            val stats = result.first as dev.multiframe.camera.pipeline.MergeStats
-                            // The engineering detail stays in the log, where it
-                            // has always been read from. What reaches the screen
-                            // is what the merge bought, which is the one thing
-                            // this camera does that the phone's own does not --
-                            // and which until now only logcat ever saw.
-                            Log.i(
-                                TAG,
-                                "Saved ${result.second}  $stats  rot=$rotation  " +
-                                    "align ${stats.alignMillis}ms merge ${stats.mergeMillis}ms",
-                            )
-                            CaptureReadout.of(stats.framesUsed, stats.meanContribution)
+                            Modifier
                         }
-                        busy = false
-                    }
-                },
-            )
+                    )
+                    .navigationBarsPadding(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (panelOpen) DragHandle()
+                if (showControls) {
+                    ControlsPanel(
+                        settings = settings,
+                        caps = caps,
+                        onChange = { settings = it },
+                        abMode = abMode,
+                        onAbMode = { if (!busy) abMode = it },
+                        highlightGuard = if (zslStream != null) highlightGuard else null,
+                        onHighlightGuard = { if (!busy) highlightGuard = it },
+                        onReset = {
+                            // Back to what the app ships with. The save effect above
+                            // is watching every one of these, so persisting it needs
+                            // no separate step.
+                            val fresh = AppSettings()
+                            settings = fresh.manual
+                            burstFrames = fresh.burstFrames
+                            mergeEnabled = fresh.mergeEnabled
+                            highlightGuard = fresh.highlightGuard
+                            zslWanted = fresh.zslEnabled
+                            captureMode = fresh.captureMode
+                            timerSeconds = fresh.timerSeconds
+                            guides = GuideMode.OFF
+                            abMode = false
+                            status = "settings reset"
+                        },
+                    )
+                }
+
+                // The captures that are not the shutter. Squared off rather than
+                // pilled, and here rather than in the row at the top, because every
+                // one of them writes a photograph the moment it is touched and the
+                // things up there do not.
+                ActionStrip(
+                    specs = ControlBar.actions(barState),
+                    onControl = handleControl,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+
+                // Thumbnail, shutter and the space opposite share one row, so
+                // they share one centre line. The thumbnail was positioned against
+                // the bottom of the screen on its own, independently of the column
+                // the shutter sits in, which left the two about 19dp out of
+                // alignment -- the kind of thing that reads as carelessness
+                // without ever being nameable.
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp, bottom = 28.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    LastShotThumb(
+                        image = thumbnail,
+                        enabled = !busy,
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .padding(start = 28.dp),
+                        onOpen = {
+                            lastShot?.let { shot ->
+                                // Handed to whatever the user views photographs
+                                // with, rather than this app growing a gallery.
+                                runCatching {
+                                    context.startActivity(
+                                        android.content.Intent(
+                                            android.content.Intent.ACTION_VIEW, shot.uri,
+                                        ).addFlags(
+                                            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                                        )
+                                    )
+                                }.onFailure { Log.w(TAG, "nothing can view that image", it) }
+                            }
+                        },
+                    )
+                    ShutterButton(
+                        busy = busy,
+                        counting = countdown > 0,
+                        onClick = {
+                            if (countdown > 0) {
+                                // Called off before anything was locked.
+                                captureJob?.cancel()
+                                captureJob = null
+                                countdown = 0
+                                busy = false
+                                status = "timer cancelled"
+                                return@ShutterButton
+                            }
+                            if (busy) return@ShutterButton
+
+                            // Zero shutter lag: the frames already exist, so this press
+                            // locks them rather than starting a capture.
+                            val stream = zslStream
+                            if (stream != null) {
+                                val plan = capturePlan
+                                val frames = plan?.frames ?: burstFrames
+                                busy = true
+                                status = "%s: %d frames…".format(
+                                    plan?.resolved?.label ?: "ZSL", frames,
+                                )
+                                val rot = caps?.let {
+                                    orientation.captureRotation(it.sensorOrientation)
+                                } ?: 0
+                                captureJob = scope.launch {
+                                    // The timer runs before anything is locked, so the
+                                    // frames captured are the ones from the moment the
+                                    // countdown ends rather than when it began.
+                                    for (remaining in timerSeconds downTo 1) {
+                                        countdown = remaining
+                                        status = "$remaining… tap the shutter to cancel"
+                                        kotlinx.coroutines.delay(1000)
+                                    }
+                                    countdown = 0
+
+                                    val r = withContext(Dispatchers.Default) {
+                                        ZslCapture.captureAndMerge(
+                                            context, stream, frames, rot,
+                                        )
+                                    }
+                                    Log.i(TAG, "ZSL result: $r")
+                                    r.streamStats?.let { Log.i(TAG, "stream health: $it") }
+                                    Log.i(
+                                        TAG,
+                                        ("handover %.2fms  span %dms  merge %dms  " +
+                                            "develop %dms  write %dms").format(
+                                            r.handoverMicros / 1000.0, r.burstSpanMillis,
+                                            r.mergeMillis, r.developMillis, r.writeMillis,
+                                        ),
+                                    )
+                                    status = r.stats?.let {
+                                        CaptureReadout.of(it.framesMerged, it.meanContribution)
+                                    } ?: r.message
+                                    busy = false
+                                }
+                                return@ShutterButton
+                            }
+
+                            busy = true
+                            status = if (abMode) "A/B capture, $burstFrames frames…"
+                            else "Capturing $burstFrames frames…"
+
+                            val rotation = caps?.let { orientation.captureRotation(it.sensorOrientation) } ?: 0
+
+                            scope.launch {
+                                val label = if (abMode) "ab" else if (mergeEnabled) "merged" else "single"
+                                val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+                                    .format(System.currentTimeMillis())
+
+                                val result = withContext(Dispatchers.Default) {
+                                    // One snapshot drives every output, so an A/B pair is
+                                    // guaranteed to be the same scene at the same instant.
+                                    val frames = buffer.snapshot(
+                                        if (mergeEnabled || abMode) {
+                                            burstFrames.coerceAtMost(buffer.capacity)
+                                        } else 1
+                                    )
+                                    if (frames.isEmpty()) return@withContext null
+
+                                    fun save(mergeIt: Boolean, suffix: String): Pair<Any?, Any?> {
+                                        val out = Merger.process(frames, mergeIt)
+                                        val bmp = OrientationTracker.rotate(out.bitmap, rotation)
+                                        val uri = ImageSaver.saveJpeg(
+                                            context, bmp, "MF_${stamp}_$suffix.jpg",
+                                        )
+                                        bmp.recycle()
+                                        return out.stats to uri
+                                    }
+
+                                    if (abMode) {
+                                        save(false, "ab_single")
+                                        save(true, "ab_merged")
+                                    } else {
+                                        save(mergeEnabled, label)
+                                    }
+                                }
+
+                                status = if (result == null) {
+                                    "No frames buffered yet"
+                                } else {
+                                    val stats = result.first as dev.multiframe.camera.pipeline.MergeStats
+                                    // The engineering detail stays in the log, where it
+                                    // has always been read from. What reaches the screen
+                                    // is what the merge bought, which is the one thing
+                                    // this camera does that the phone's own does not --
+                                    // and which until now only logcat ever saw.
+                                    Log.i(
+                                        TAG,
+                                        "Saved ${result.second}  $stats  rot=$rotation  " +
+                                            "align ${stats.alignMillis}ms merge ${stats.mergeMillis}ms",
+                                    )
+                                    CaptureReadout.of(stats.framesUsed, stats.meanContribution)
+                                }
+                                busy = false
+                            }
+                        },
+                    )
+                }
+            }
         }
 
         focusPoint?.let { point ->
@@ -1365,11 +1484,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
 
         sweepProgress?.let { progress ->
+            // The sweep is the one moment this app takes the screen over, so
+            // it gets a surface rather than a wash: at 0xAA of black over a
+            // sunlit street the numbers were competing with the photograph
+            // they were reporting on. Same ground, edge and radius as the
+            // manual panel, because it is the same kind of thing.
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .background(Ink.Dialogue, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                    .background(Ink.Panel, RoundedCornerShape(20.dp))
+                    .border(1.dp, Ink.Hairline, RoundedCornerShape(20.dp))
+                    .padding(horizontal = 22.dp, vertical = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 sweepGrid?.let { grid ->
@@ -1377,75 +1502,58 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         grid = grid,
                         aspect = sweepAspect,
                         modifier = Modifier
-                            .width(132.dp)
-                            .padding(bottom = 12.dp),
+                            .width(140.dp)
+                            .padding(bottom = 16.dp),
+                    )
+                }
+                // The number is the reading and takes the accent; the noun is
+                // not, and does not. Same rule as every other value here.
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        text = progress.placed.toString(),
+                        color = Ink.Amber,
+                        fontSize = 26.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Text(
+                        text = "tiles",
+                        color = Ink.Muted,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(start = 6.dp, bottom = 3.dp),
                     )
                 }
                 Text(
-                    text = "${progress.placed} tiles",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-                Text(
                     text = "%.0f%% covered".format(progress.coverage * 100),
-                    color = Ink.Amber,
+                    color = Ink.Bone,
                     fontSize = 13.sp,
                     fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(top = 2.dp),
                 )
                 Text(
-                    text = "pan slowly",
-                    color = Ink.Subtle,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(top = 6.dp),
+                    text = "PAN SLOWLY",
+                    color = Ink.Muted,
+                    fontSize = 10.sp,
+                    letterSpacing = 1.2.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(top = 14.dp),
                 )
             }
         }
 
         if (countdown > 0) {
-            Text(
-                text = countdown.toString(),
-                color = Color.White,
-                fontSize = 84.sp,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .semantics { contentDescription = "Timer $countdown" },
-            )
-        }
-
-        // The last shot, which is also the way into the gallery.
-        thumbnail?.let { image ->
             Box(
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = 24.dp, bottom = 44.dp)
-                    .size(54.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .border(1.5.dp, Ink.Edge, RoundedCornerShape(8.dp))
-                    .clickable(enabled = !busy) {
-                        lastShot?.let { shot ->
-                            // Handed to whatever the user views photographs
-                            // with, rather than this app growing a gallery.
-                            runCatching {
-                                context.startActivity(
-                                    android.content.Intent(
-                                        android.content.Intent.ACTION_VIEW, shot.uri,
-                                    ).addFlags(
-                                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                                    )
-                                )
-                            }.onFailure { Log.w(TAG, "nothing can view that image", it) }
-                        }
-                    }
-                    .semantics { contentDescription = "Last shot" },
+                    .align(Alignment.Center)
+                    .size(132.dp)
+                    .background(Ink.Readout, CircleShape)
+                    .semantics { contentDescription = "Timer $countdown" },
+                contentAlignment = Alignment.Center,
             ) {
-                androidx.compose.foundation.Image(
-                    bitmap = image.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
+                Text(
+                    text = countdown.toString(),
+                    color = Ink.Bone,
+                    fontSize = 76.sp,
+                    fontFamily = FontFamily.Monospace,
                 )
             }
         }
@@ -1453,6 +1561,163 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         if (showAbout) {
             AboutSheet(onDismiss = { showAbout = false })
         }
+    }
+}
+
+/** Every lens chip is this circle. See [LensChip]. */
+private val LensChipSize = 72.dp
+
+/** The manual panel's top corners, and the only place the radius is stated. */
+private val PanelShape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+
+/**
+ * What the sensor is actually doing, kept on screen.
+ *
+ * The one thing every serious camera shows and this one did not. Indigo keeps a
+ * histogram and `1/30s ISO 12500` in permanent chrome; this app had an empty
+ * third of a screen where that belongs, and the histogram it does have was
+ * switched on by the *guides* control, of all things.
+ *
+ * Reading only, never a control, so it is deliberately not a chip: no border,
+ * no fill, no touch target. Numbers in the accent and their units muted, which
+ * is the rule the sliders and the cycling chips already follow.
+ */
+@Composable
+private fun ExposureReadout(
+    iso: Int?,
+    exposureNs: Long?,
+    evLabel: String?,
+    manual: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    if (iso == null || exposureNs == null) return
+    val shutter = remember(exposureNs) {
+        val seconds = exposureNs / 1_000_000_000.0
+        if (seconds >= 0.4) "%.1fs".format(seconds) else "1/${(1.0 / seconds).toInt()}"
+    }
+    Row(
+        modifier = modifier
+            .background(Ink.Readout, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .semantics {
+                contentDescription = "ISO $iso, shutter $shutter"
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ReadoutValue("ISO", iso.toString())
+        ReadoutDot()
+        ReadoutValue(null, shutter)
+        if (evLabel != null) {
+            ReadoutDot()
+            ReadoutValue(null, evLabel, unit = "EV")
+        }
+        if (manual) {
+            ReadoutDot()
+            Text(
+                text = "MAN",
+                color = Ink.Bone,
+                fontSize = 11.sp,
+                letterSpacing = 0.5.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReadoutValue(label: String?, value: String, unit: String? = null) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (label != null) {
+            Text(
+                text = label,
+                color = Ink.Muted,
+                fontSize = 11.sp,
+                letterSpacing = 0.5.sp,
+                modifier = Modifier.padding(end = 5.dp),
+            )
+        }
+        Text(
+            text = value,
+            color = Ink.Amber,
+            fontSize = 13.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        if (unit != null) {
+            Text(
+                text = unit,
+                color = Ink.Muted,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(start = 3.dp),
+            )
+        }
+    }
+}
+
+/** The separator between readings. Indigo's dot, and for the same reason. */
+@Composable
+private fun ReadoutDot() {
+    Text(
+        text = "·",
+        color = Ink.Muted,
+        fontSize = 13.sp,
+        modifier = Modifier.padding(horizontal = 9.dp),
+    )
+}
+
+/**
+ * The handle on the manual panel.
+ *
+ * The panel had no affordance of any kind: no title, no handle, and no way to
+ * tell it was dismissible except remembering which chip opened it. This is the
+ * Material convention for "this surface can be put away", and it costs 4dp.
+ */
+@Composable
+private fun DragHandle() {
+    Box(
+        modifier = Modifier
+            .padding(top = 10.dp, bottom = 2.dp)
+            .size(width = 32.dp, height = 4.dp)
+            .clip(RoundedCornerShape(2.dp))
+            // Hairline is the colour of an edge, and at 0x26 on a panel this
+            // dark the handle was invisible in a screenshot -- an affordance
+            // nobody can see is not one.
+            .background(Ink.Muted),
+    )
+}
+
+/**
+ * The last shot, which is also the way into the gallery.
+ *
+ * Draws nothing at all before there is one. An earlier version held an empty
+ * bordered square as a placeholder, on the theory that the shutter would
+ * otherwise move once the first photograph was taken -- which was simply
+ * wrong: the shutter is centred in the row and the thumbnail is aligned to the
+ * start, so neither depends on the other. What the placeholder actually did
+ * was put an empty outlined box on a fresh install, which reads as a picture
+ * that failed to load.
+ */
+@Composable
+private fun LastShotThumb(
+    image: android.graphics.Bitmap?,
+    enabled: Boolean,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (image == null) return
+    Box(
+        modifier = modifier
+            .size(54.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .border(1.dp, Ink.Edge, RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled, onClick = onOpen)
+            .semantics { contentDescription = "Last shot" },
+    ) {
+        androidx.compose.foundation.Image(
+            bitmap = image.asImageBitmap(),
+            contentDescription = null,
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
     }
 }
 
@@ -1470,18 +1735,31 @@ private fun LensChip(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
+    // A lens is a setting, so it is a pill -- the same shape as everything
+    // else that changes what the next capture will be. It was an 18dp rounded
+    // square, which put a third shape language on a screen whose whole scheme
+    // is that there are two: pill for reversible, squared for a shutter.
+    // Every lens is the same circle.
+    //
+    // A 50%-rounded rectangle made the short labels ("12mm") into circles and
+    // the long ones ("220mm") into ellipses -- one shape or the other would
+    // have been a decision, and both together read as neither. A fixed circle
+    // also matches what the reference does with its zoom chips, and it means
+    // the strip has an even rhythm rather than one that stretches with the
+    // number of digits in a focal length.
     Column(
         modifier = Modifier
-            .padding(horizontal = 4.dp)
-            .background(if (selected) Ink.Bone else Ink.Pane, RoundedCornerShape(18.dp))
+            .padding(horizontal = 3.dp)
+            .size(LensChipSize)
+            .background(if (selected) Ink.Bone else Ink.Pane, CircleShape)
             .then(
                 if (selected) Modifier
-                else Modifier.border(1.dp, Ink.Hairline, RoundedCornerShape(18.dp))
+                else Modifier.border(1.dp, Ink.Hairline, CircleShape)
             )
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp)
             .semantics { contentDescription = "${lens.label} lens" },
         horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
         Text(
             text = lens.label,
@@ -1491,8 +1769,11 @@ private fun LensChip(
         )
         Text(
             text = lens.zoomLabel,
-            color = if (selected) Ink.OnBoneMuted else Ink.Subtle,
-            fontSize = 9.sp,
+            // Was 9sp at 60% white, which over a lit road was not so much
+            // low-contrast as absent. The zoom factor is the half of this
+            // chip most people actually read.
+            color = if (selected) Ink.OnBoneMuted else Ink.Muted,
+            fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
         )
     }
