@@ -6,10 +6,11 @@ holds the reasoning behind everything below.
 
 ## Start here
 
-The tree is green and the last agreed task is done and measured. One thing is
-half-finished, it is small, and it is named below: five changes to the interface
-are on main without ever having been seen on a phone. Past that, the next move
-is a choice rather than a continuation. In order:
+The tree is green, the last agreed task is done and measured, and the interface
+debt this file carried is discharged -- all five changes have now been seen on a
+phone, and what that found is in *Where things stand*. One small thing is left
+over from it, named below. Past that, the next move is a choice rather than a
+continuation. In order:
 
 ### 1. The phone, when it arrives
 
@@ -20,36 +21,23 @@ the first-day checklist and what does and does not carry over;
 [BASELINE.md](BASELINE.md) is what to compare against, and it is ratios you
 compare, not milliseconds.
 
-### 2. The interface, which needs a phone but not the new one
+### 2. The readout is blank in the mode the app is for
 
-The camera-facing UI has been through a build-and-screenshot pass and is on main
-in two commits, `08eec93` and `00b0d91`. Most of it was verified on komodo
-against a real scene: touch targets read off the accessibility tree in dp, the
-thumbnail and shutter measured to a 0px centre delta, the manual panel, and a
-live ISO/shutter/EV readout the app had never had.
+Small, known, and the only thing the interface pass left behind.
 
-**Five changes were written after the phone disconnected and have only been seen
-on the emulator, which has no camera and so shows no lens strip and a black
-viewfinder:** the uniform lens circles, the drag handle's contrast, the sweep
-overlay, the countdown ground, and the capability summary moved to a footnote.
+The live `ISO · shutter · EV` readout is fed from the CameraX preview's
+repeating capture request. Engaging the raw ring unbinds CameraX and runs a
+Camera2 session instead, so **the readout disappears in ZSL mode** -- which is
+the app's headline mode, and the one it now opens in. The histogram does keep
+working there, because it reads the ring directly.
 
-This does not wait for the Pixel 11. It is a question about pixels rather than
-milliseconds, so komodo answers it perfectly well, and answers it today:
+The numbers are already in the ring. `ZslRawStream` keeps a ring of
+`TotalCaptureResult` and has a `findResult` lookup for it; what is missing is an
+accessor and a wire-up, so the readout takes whichever source is live. That is
+camera plumbing rather than layout, which is why it was left rather than done in
+a session about how things look.
 
-```bash
-adb exec-out screencap -p > screenshot.png
-```
-
-Two things were deliberately left alone because they cannot be judged without a
-photograph behind them, and both are the kind of thing that only looks like
-carelessness once someone has seen it:
-
-- **The bottom scrim is 232dp under a cluster about 274dp tall**, so the lens
-  strip sits above the gradient that is meant to ground it. Raising it darkens
-  the composition, which is a trade to look at rather than to reason about.
-- **The histogram is pinned at `bottom = 130.dp`** and the bottom cluster was
-  restructured around it. It only draws with ZSL on, which the emulator cannot
-  do, so it may now collide with the thumbnail.
+Needs no new phone.
 
 ### 3. Two things that need you rather than a session
 
@@ -124,7 +112,41 @@ The app is usable. A shutter press takes a zero-shutter-lag merged raw capture
 in about a second and writes a DNG and a JPEG to the gallery, and the status
 line says what the merge bought: `8 frames · 91% kept`.
 
+It now also *opens* in that state, which it did not before: the ring is the
+shipped default and a cold start into it used to deadlock. See the first entry
+below. Worth knowing when reading anything in this file written earlier, because
+until 2026-09-03 every reading of "the app opens with ZSL" was true of the
+setting and false of the app.
+
 Recent work, newest first:
+
+- **a cold start with the raw ring enabled was a deadlock, and would have
+  shipped that way.** Discovery -- capabilities, lens catalogue, camera id, the
+  ZSL decision -- is read after CameraX binds, and that bind is skipped when the
+  ring is wanted; the ring cannot open without what the bind discovers. Neither
+  side could go first. What it looked like was a black viewfinder with no lens
+  strip and no way out, since the control that would switch ZSL off is gated on
+  a decision never made, and `PRO` opens nothing without `caps`. `pm clear` does
+  not help: the app rewrites the same default. It never bit komodo because a
+  persisted `false` overrides the default and this phone has had one since
+  before `b2a8a3b` made the default true -- but **every fresh install would have
+  hit it on first launch.** The first pass now binds, discovers, and hands the
+  camera over at the end. `getCameraInfo` would let discovery skip the bind
+  entirely and is the better shape; it was not taken, because changing which
+  `CameraInfo` the capability set comes from is not a change to make in the same
+  breath as fixing a deadlock.
+
+- **the five unverified interface changes were checked on komodo, and three
+  more things turned up.** Four of the five were right; the capability footnote
+  still wrapped mid-phrase and is now set in the proportional face so it fits.
+  Then two the emulator could not have shown: the **status bar was drawing on
+  top of the control row**, because a deliberately hidden bar reports a zero
+  inset and `statusBarsPadding()` therefore reserved nothing -- swipe down and
+  the clock lands on `MERGE ON`; and the **histogram ran underneath the action
+  strip**, a fixed `bottom = 130.dp` into a cluster whose height depends on the
+  hardware. The scrim was looked at and deliberately left: it does stop short of
+  the lens strip, but the chips carry themselves over a lit wall and a daylight
+  street, so raising it would darken the photograph for nothing.
 
 - **the camera-facing interface was measured rather than looked at, and rebuilt
   where it failed.** Every chip in the row over the viewfinder and beside the
@@ -662,7 +684,7 @@ surprising.
 **First day, in this order:**
 
 1. `adb shell am instrument -w dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner`
-   — 124 tests. Correctness first, before anything is measured.
+   — 128 tests. Correctness first, before anything is measured.
 2. Take a shot and read the `ZSL` decision out of logcat. **This is the one real
    functional risk:** if the new sensor or ISP has no zero-stall `RAW_SENSOR`
    configuration, `ZslDecision.Fallback` says so in words and the app drops to
