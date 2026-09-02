@@ -1,6 +1,8 @@
 # Multiframe — build log
 
-A record of the session that built this app, written 2026-08-24.
+A record of the sessions that built this app. Begun 2026-08-24; the figures
+below are current at 2026-09-02 and are the ones to update rather than to
+read as history.
 
 **Multiframe** is an Android computational photography camera. Every shutter
 press captures a burst of frames, aligns them to cancel handshake, and merges
@@ -9,8 +11,10 @@ Indigo demonstrates on iPhone; original code, name, icon and UI throughout.
 
 - Package: `dev.multiframe.camera` (final — cannot change after publication)
 - Target device for development: Pixel 9 Pro XL (`komodo`), Android 17 / API 37
-- ~21,000 lines across 95 Kotlin files and 6 native files
-- 332 JVM unit tests and 99 on-device tests
+- ~31,000 lines across 118 Kotlin files and 10 native files. Counting the
+  vendored libjpeg-turbo instead gives about 40,000 across 252 native files,
+  which is why this number moves depending on who counts it
+- 359 JVM unit tests and 128 on-device tests
 
 ---
 
