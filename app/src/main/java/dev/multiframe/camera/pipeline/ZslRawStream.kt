@@ -704,6 +704,25 @@ class ZslRawStream private constructor(
         }
 
         /**
+         * What an attempt to open the camera came to.
+         *
+         * A nullable `CameraDevice` could not say this. Both "the camera is
+         * busy, try again in a moment" and "the permission has been taken
+         * away" arrived as `null`, so the retry loop treated them the same and
+         * spent three more attempts and 750ms waiting for a permission to come
+         * back, which is not a thing that happens.
+         */
+        private sealed interface CameraOpen {
+            data class Opened(val device: CameraDevice) : CameraOpen
+
+            /** Not free yet, or lost to a higher-priority client. Worth waiting. */
+            data object Busy : CameraOpen
+
+            /** Permission is gone. Waiting cannot help. */
+            data object Denied : CameraOpen
+        }
+
+        /**
          * Opens the camera, retrying briefly.
          *
          * CameraX releases the device asynchronously, so an open issued
@@ -711,6 +730,10 @@ class ZslRawStream private constructor(
          * still in use. That is a race to wait out, not a reason to decide the
          * hardware cannot stream raw -- which is what a single failed attempt
          * would look like to the caller.
+         *
+         * Only that race is worth waiting out. A revoked permission is not a
+         * race, and [CameraOpen.Denied] returns immediately rather than
+         * sleeping through the remaining attempts.
          */
         private suspend fun openDeviceWithRetry(
             manager: CameraManager,
@@ -718,13 +741,22 @@ class ZslRawStream private constructor(
             handler: Handler,
         ): CameraDevice? {
             repeat(OPEN_ATTEMPTS) { attempt ->
-                val device = runCatching { openDevice(manager, cameraId, handler) }
+                // A throw from `openCamera` -- CameraAccessException, or a bad
+                // id -- is still caught here and treated as an attempt that
+                // failed, exactly as before.
+                val result = runCatching { openDevice(manager, cameraId, handler) }
                     .onFailure { Log.w(TAG, "camera open attempt ${attempt + 1} threw", it) }
                     .getOrNull()
-                if (device != null) return device
-                if (attempt < OPEN_ATTEMPTS - 1) {
-                    Log.i(TAG, "camera still busy, retrying in ${OPEN_RETRY_MS}ms")
-                    delay(OPEN_RETRY_MS)
+
+                when (result) {
+                    is CameraOpen.Opened -> return result.device
+                    CameraOpen.Denied -> return null
+                    CameraOpen.Busy, null -> {
+                        if (attempt < OPEN_ATTEMPTS - 1) {
+                            Log.i(TAG, "camera still busy, retrying in ${OPEN_RETRY_MS}ms")
+                            delay(OPEN_RETRY_MS)
+                        }
+                    }
                 }
             }
             return null
@@ -734,27 +766,47 @@ class ZslRawStream private constructor(
             manager: CameraManager,
             cameraId: String,
             handler: Handler,
-        ): CameraDevice? = suspendCancellableCoroutine { cont ->
-            manager.openCamera(
-                cameraId,
-                object : CameraDevice.StateCallback() {
-                    override fun onOpened(camera: CameraDevice) {
-                        if (cont.isActive) cont.resume(camera) else camera.close()
-                    }
+        ): CameraOpen = suspendCancellableCoroutine { cont ->
+            // Camera permission is checked before the viewfinder is shown, but
+            // it can be revoked while this process is still alive -- and
+            // `openCamera` reports that by throwing rather than through the
+            // state callback, so none of the paths below would run.
+            //
+            // The caller's `runCatching` would catch it, and the app does not
+            // crash today. But a guarantee held two frames up is not one a
+            // reader can see, and not one AndroidX lint can see either -- this
+            // was the project's single MissingPermission error. Catching it
+            // here makes the contract local, and lets the outcome be named
+            // rather than flattened into a null the retry loop then waits on.
+            try {
+                manager.openCamera(
+                    cameraId,
+                    object : CameraDevice.StateCallback() {
+                        override fun onOpened(camera: CameraDevice) {
+                            if (cont.isActive) {
+                                cont.resume(CameraOpen.Opened(camera))
+                            } else {
+                                camera.close()
+                            }
+                        }
 
-                    override fun onDisconnected(camera: CameraDevice) {
-                        camera.close()
-                        if (cont.isActive) cont.resume(null)
-                    }
+                        override fun onDisconnected(camera: CameraDevice) {
+                            camera.close()
+                            if (cont.isActive) cont.resume(CameraOpen.Busy)
+                        }
 
-                    override fun onError(camera: CameraDevice, error: Int) {
-                        Log.e(TAG, "camera open error $error")
-                        camera.close()
-                        if (cont.isActive) cont.resume(null)
-                    }
-                },
-                handler,
-            )
+                        override fun onError(camera: CameraDevice, error: Int) {
+                            Log.e(TAG, "camera open error $error")
+                            camera.close()
+                            if (cont.isActive) cont.resume(CameraOpen.Busy)
+                        }
+                    },
+                    handler,
+                )
+            } catch (e: SecurityException) {
+                Log.e(TAG, "camera permission was revoked while opening", e)
+                if (cont.isActive) cont.resume(CameraOpen.Denied)
+            }
         }
 
         private suspend fun createSession(

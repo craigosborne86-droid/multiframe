@@ -112,7 +112,10 @@ data class CameraCapabilities(
     }
 
     companion object {
+        // See the note in ManualSettings: the compiler reads one of these and
+        // AndroidX lint reads the other.
         @OptIn(ExperimentalCamera2Interop::class)
+        @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
         fun from(cameraInfo: CameraInfo): CameraCapabilities {
             val c2 = Camera2CameraInfo.from(cameraInfo)
 

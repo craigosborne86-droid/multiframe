@@ -25,7 +25,11 @@ data class ManualSettings(
     /** Exposure compensation only applies while auto-exposure is running. */
     val evActive: Boolean get() = !manualExposure
 
+    // Kotlin's opt-in satisfies the compiler; AndroidX's is what its own lint
+    // check reads. With only the first, every interop call in this function was
+    // reported as an UnsafeOptInUsageError.
     @OptIn(ExperimentalCamera2Interop::class)
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     fun toCaptureRequestOptions(caps: CameraCapabilities): CaptureRequestOptions {
         val b = CaptureRequestOptions.Builder()
 
