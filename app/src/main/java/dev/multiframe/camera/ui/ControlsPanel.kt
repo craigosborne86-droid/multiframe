@@ -216,8 +216,14 @@ fun ControlsPanel(
         Text(
             text = caps.summary(),
             color = Ink.Muted,
-            fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
+            // Not monospace, which is the one place in this app that rule is
+            // worth breaking. Monospace at a size anyone can read is wider
+            // than the panel, so the line wrapped mid-phrase -- "focus to 11
+            // / cm" -- and the fix that kept the font was 9sp, which trades a
+            // wrap for something nobody can read. This is a sentence about
+            // what the camera can do, not a live reading, so it is set like
+            // one and fits on a line.
+            fontSize = 11.sp,
             lineHeight = 15.sp,
             modifier = Modifier.padding(top = 10.dp),
         )

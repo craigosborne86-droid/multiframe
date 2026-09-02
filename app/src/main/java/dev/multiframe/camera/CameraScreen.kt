@@ -42,7 +42,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -158,7 +161,7 @@ private const val PEAK_H = 240
 // the compiler, and AndroidX's own is what its lint check looks for. With only
 // the first, `lintDebug` reported every interop call in this function as an
 // UnsafeOptInUsageError.
-@OptIn(ExperimentalCamera2Interop::class)
+@OptIn(ExperimentalCamera2Interop::class, ExperimentalLayoutApi::class)
 @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
 @Composable
 fun CameraScreen(modifier: Modifier = Modifier) {
@@ -994,18 +997,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             )
         }
 
-        histogram?.let { bins ->
-            Histogram(
-                bins = bins,
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = 14.dp, bottom = 130.dp)
-                    .size(width = 132.dp, height = 44.dp)
-                    .background(Ink.Faint, RoundedCornerShape(4.dp))
-                    .padding(3.dp),
-            )
-        }
-
         // Ground for the controls, and only for the controls. Chips floating
         // directly on the photograph are unreadable over a bright sky and read
         // as a debug overlay over anything else; a gradient gives the row
@@ -1166,7 +1157,22 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .statusBarsPadding()
+                // Ignoring visibility, not `statusBarsPadding()`.
+                //
+                // MainActivity hides the status bar deliberately -- a clock and
+                // a battery meter inside a viewfinder are telling you about the
+                // phone while you are trying to look at the picture -- and
+                // brings it back transiently on a swipe. But a hidden bar
+                // reports a zero inset, so `statusBarsPadding()` reserved
+                // nothing and the control row sat in the space the bar returns
+                // to. Swipe it down, or leave another app in picture-in-picture,
+                // and the clock lands on top of `MERGE ON` with the battery
+                // icon inside the `INFO` chip.
+                //
+                // This reserves the height whether the bar is showing or not,
+                // which costs a few dp of viewfinder and is the only version
+                // that is never wrong.
+                .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
                 .padding(top = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -1180,6 +1186,30 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 manual = caps?.let { settings.manualExposureActive(it) } == true,
                 modifier = Modifier.padding(top = 10.dp),
             )
+
+            // With the exposure readout, not pinned to the opposite corner.
+            //
+            // It used to sit bottom-left at a fixed `bottom = 130.dp`, which
+            // put it straight under the action strip: its ground ran beneath
+            // `SUPER RES` and the right half of the plot was covered. A fixed
+            // offset into a cluster whose height depends on how many lenses
+            // and actions the hardware offers was never going to hold.
+            //
+            // In the flow instead, and next to the numbers it belongs with --
+            // a histogram and a shutter speed answer the same question, and
+            // the reference keeps them together in the top chrome for that
+            // reason. Same ground and radius as the readout, so the two read
+            // as one instrument rather than two overlays.
+            histogram?.let { bins ->
+                Histogram(
+                    bins = bins,
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .size(width = 132.dp, height = 40.dp)
+                        .background(Ink.Readout, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 7.dp, vertical = 5.dp),
+                )
+            }
 
             if (status.isNotEmpty()) {
                 Text(
