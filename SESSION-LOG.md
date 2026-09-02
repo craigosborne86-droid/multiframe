@@ -3567,6 +3567,153 @@ The verification that is owed is small, does not wait for the Pixel 11, and is
 about pixels rather than milliseconds: point komodo at a scene with real tonal
 range and look at the five.
 
+## What the phone said about the five, and the deadlock underneath
+
+The verification the previous section says is owed. It was owed because the
+phone left partway through that work; it came back on 2026-09-03.
+
+### Four of five, and one that was half right
+
+The lens chips are uniform circles at exactly 72x72dp whatever the label
+length, read off the accessibility tree rather than judged. The drag handle is
+visible. The sweep overlay reads as an instrument -- the tile count takes the
+accent and the noun does not. The countdown has a ground it can be read
+against. The shutter and the thumbnail share a centre line to the pixel.
+
+The capability footnote was the half. Moving it to the foot of the panel fixed
+its billing and not its wrap: it still broke as *"focus to 11 / cm"*. Monospace
+at a size anyone can read is wider than the panel, and the version that kept the
+font was 9sp, which trades a wrap for something nobody can read. It is a
+sentence about what the camera can do rather than a live reading, so it is now
+set like one, and fits on a line.
+
+### Two the emulator could not have shown
+
+**The system status bar was drawing on top of the control row** -- the clock over
+`MERGE ON`, the battery icon inside the `INFO` chip. `MainActivity` hides the
+status bar deliberately and brings it back transiently on a swipe, and *a hidden
+bar reports a zero inset*, so `statusBarsPadding()` reserved nothing and the row
+sat exactly in the space the bar returns to. `statusBarsIgnoringVisibility`
+reserves the height either way. It costs a few dp of viewfinder and is the only
+version that is never wrong.
+
+This is worth keeping as a general shape: an inset that is conditional on
+visibility is not a layout constraint, it is a description of the current
+moment. The bug had been latent since the status bar was first hidden and needed
+nothing more exotic than another app in picture-in-picture to surface it.
+
+**The histogram ran underneath the action strip.** Its ground beneath `SUPER
+RES`, the right half of the plot covered. It had been pinned at a fixed
+`bottom = 130.dp`, which is an offset into a cluster whose height depends on how
+many lenses and how many actions the hardware happens to offer -- it was never
+going to hold. It is in the flow now, beside the exposure readout, sharing its
+ground and radius: a histogram and a shutter speed answer the same question, and
+the reference keeps them together for that reason.
+
+### The scrim, looked at and left
+
+The bottom scrim is 232dp under a cluster about 274dp tall, so the lens strip
+does sit above the gradient meant to ground it. That was flagged twice as
+unjudgeable without a photograph behind it. With one behind it, the answer is to
+leave it: `Ink.Pane` at `0xD9` carries the chips over a lit wall and over a
+daylight street, and raising the scrim would darken the picture for nothing.
+
+A deferral that comes back "no change" is still worth the trip. The alternative
+was to raise it on reasoning, which would have cost real viewfinder to fix
+something that was not happening.
+
+## The default that had never once worked
+
+Turning the raw ring on, restarting, and finding a black screen is how this was
+found, and it is the most serious thing in this file.
+
+**Every path into the camera goes through a bind that the ring skips.** The
+capability set, the lens catalogue, the camera id, the characteristics and the
+`ZslDecision` are all read after CameraX binds its use cases. That bind is
+skipped when the ring is wanted, because the camera admits one client. And the
+ring cannot open without `caps`, `lens` and `cameraId`. So neither side could go
+first: no CameraX because ZSL was wanted, no ZSL because only CameraX ever
+discovered the camera. Nothing cleared the flag and nothing timed out.
+
+What it looks like is a black viewfinder, no lens strip, no readout, no action
+strip -- and **no way back**. The control that would switch ZSL off is gated on
+a `zslDecision` that was never made, so it does not render. `PRO` opens nothing,
+because `ControlsPanel` returns early without `caps`. `pm clear` does not help
+either: the app rewrites the same default and comes up broken again. The only
+exits are `run-as` on a debuggable build, or uninstalling.
+
+### Why nobody had seen it
+
+`AppSettings.zslEnabled` has defaulted to `true` since `b2a8a3b`, *"Open in a
+state worth showing"*. A persisted value overrides a default, and komodo has had
+`zsl=false` in its preferences since before that commit -- so on the one device
+this has ever run on, the new default never applied. **Every fresh install would
+have hit it on first launch**, which is every user the Play Store would have
+sent.
+
+That is the part worth generalising. A default that is only read when no
+preference exists is invisible on any device that has been used before it
+changed, and the development phone is by definition the device most likely to
+have been. The test suite could not see it either: 128 device tests, and none of
+them starts the app cold with a persisted setting.
+
+### The fix, and the better one that was not taken
+
+The first pass now binds, discovers, and hands the camera over at the end.
+Verified both directions -- with `zsl=true` the log reads
+
+    Capabilities: Manual · ISO 22–11277 · 1/37958–16.0s · focus to 11 cm · DNG
+    lenses: 12mm/0.5x, 24mm/1x, 49mm/2x, 110mm/4.6x, 220mm/9.2x
+    ZSL decision: ZSL raw stream: 4080x3072 30.0fps stall=0.0ms
+    discovery complete, handing the camera to the raw ring
+
+and the app comes up live on the ring; with `zsl=false` nothing changed and that
+last line never appears.
+
+`ProcessCameraProvider.getCameraInfo(selector)` exists in CameraX 1.6.1 and
+returns a `CameraInfo` without binding anything, and `CameraCapabilities.from`
+takes exactly a `CameraInfo`. Discovery could skip the bind entirely. That is
+the better shape and it is deliberately not what was done: it would route the
+capability set through a different `CameraInfo` than the bound path has always
+used, and swapping the source of every capability in the same change that fixes
+a deadlock is two changes wearing one coat. One bind and unbind on a launch that
+wanted the ring is a few hundred milliseconds of a path that was previously
+infinite.
+
+### Still owed
+
+The exposure readout is fed from the CameraX preview's repeating request, so it
+is blank in ZSL mode -- the mode the app now opens in. The histogram works there
+because it reads the ring directly. `ZslRawStream` already keeps a ring of
+`TotalCaptureResult` with a `findResult` lookup, so the numbers are sitting
+behind an accessor that does not exist yet.
+
+## Three notes on the instruments, from a session that fought them
+
+This file already has several of these and they have earned their place. Three
+more, all of which cost time before they were understood:
+
+**A picture-in-picture window owns the accessibility tree.** With YouTube in PiP,
+`uiautomator dump` returned the PiP's nodes and nothing of the app underneath, so
+every control lookup failed while the screen plainly showed the app. Taps aimed
+by screenshot coordinates then landed on the PiP and expanded it. Neither
+failure named its cause.
+
+**A dump can outlive the thing it describes.** After the app was backgrounded,
+`uiautomator dump` kept returning its window with plausible bounds and
+`enabled=true`, and taps did nothing. The screenshot showed a lock-screen
+weather panel. Trust the screenshot over the tree when the two disagree; the
+tree is a description and the screenshot is the thing.
+
+**`connectedAndroidTest` uninstalls the app, and takes its data.** Which is fine
+for tests and not fine for the phone's settings, and is worth backing up
+`shared_prefs` before a full run on a device somebody uses. It is also the
+reason the camera permission needed re-granting afterwards.
+
+And one result rather than a caveat: on hardware the full suite is **128 of 128
+with nothing skipped**, where the emulator is always one short for want of a
+camera. 359 unit tests, 0 lint errors.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
@@ -3583,4 +3730,10 @@ range and look at the five.
       the USPTO database directly, the registers for any market that matters,
       and an attorney. What has been done is web searching, and it is labelled
       as such
+- [ ] **Install onto a device that has never run this app and open it once.**
+      Nothing in 128 device tests starts cold against the shipped defaults, and
+      the ZSL deadlock above was invisible on the development phone for exactly
+      that reason: a persisted preference overrode the default that was broken.
+      A default is only read on a device that has never been used, which is
+      every user and no developer
 - [ ] Store screenshots, content rating, developer verification
