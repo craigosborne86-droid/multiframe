@@ -428,7 +428,25 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     LaunchedEffect(lifecycleOwner, zslWanted) {
         // The camera admits one client. Engaging the raw ring means handing
         // the device over to the Camera2 session, so CameraX is unbound first.
-        if (zslWanted) {
+        //
+        // **Unless nothing has discovered the camera yet.** Everything this
+        // screen knows -- the capability set, the lens catalogue, whether a
+        // zero-stall raw stream exists at all -- is read below, after CameraX
+        // has bound. Handing the device away before that has happened is a
+        // deadlock: the raw ring cannot open without `caps`, `lens` and
+        // `cameraId`, and only this path ever sets them.
+        //
+        // It is reachable from a cold start, because the setting persists and
+        // `AppSettings.zslEnabled` defaults to true -- so a fresh install hit
+        // it on first launch. The app came up with a black viewfinder, no lens
+        // strip and no way out, since the control that would have switched ZSL
+        // off is itself gated on capabilities that were never read.
+        //
+        // So the first pass always binds, discovers, and hands the camera over
+        // at the end. It costs one bind and unbind on a launch that wanted the
+        // ring, which is a few hundred milliseconds of a path that was
+        // previously infinite.
+        if (zslWanted && caps != null) {
             runCatching { provider?.unbindAll() }
             surfaceRequest = null
             camera = null
@@ -603,6 +621,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 val index = (-1.0f / capabilities.evStep).roundToInt()
                     .coerceIn(capabilities.evMin, capabilities.evMax)
                 settings = settings.copy(evIndex = index)
+            }
+
+            // Discovery is done, so the camera can go where it was always
+            // meant to go. This is the tail of the first pass described at the
+            // top of this effect: the bind existed only to find out what the
+            // hardware is, and the ring is what was actually asked for.
+            if (zslWanted) {
+                Log.i(TAG, "discovery complete, handing the camera to the raw ring")
+                runCatching { cameraProvider.unbindAll() }
+                surfaceRequest = null
+                camera = null
             }
         } catch (e: Exception) {
             Log.e(TAG, "Camera bind failed", e)
