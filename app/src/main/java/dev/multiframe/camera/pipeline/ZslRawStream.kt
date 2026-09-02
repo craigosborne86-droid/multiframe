@@ -359,6 +359,11 @@ class ZslRawStream private constructor(
         }
         // Metadata for that exact frame has aged out of the ring; the newest
         // result is a better answer than none, and is at most a few frames off.
+        return newestLocked()
+    }
+
+    /** The most recent result in the ring. Caller must hold [resultLock]. */
+    private fun newestLocked(): TotalCaptureResult? {
         var newest: TotalCaptureResult? = null
         var newestStamp = Long.MIN_VALUE
         for (i in resultSlots.indices) {
@@ -368,6 +373,27 @@ class ZslRawStream private constructor(
             }
         }
         return newest
+    }
+
+    /**
+     * What the sensor last reported, as (ISO, exposure time in nanoseconds).
+     *
+     * For the viewfinder's readout, which otherwise has no source while this
+     * stream is running. The readout is fed from the CameraX preview's
+     * repeating request, and engaging this ring unbinds CameraX -- so the
+     * numbers went blank in the one mode the app is actually for, while the
+     * histogram beside them kept working because it reads this ring directly.
+     *
+     * The results are already here, kept for the DNG writer, which needs the
+     * metadata of the frame it is writing. This is the same ring read for a
+     * cheaper purpose. Null before the session has completed a frame, and on
+     * a device that reports neither key.
+     */
+    fun latestExposure(): Pair<Int, Long>? {
+        val result = synchronized(resultLock) { newestLocked() } ?: return null
+        val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return null
+        val exposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return null
+        return iso to exposureNs
     }
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {

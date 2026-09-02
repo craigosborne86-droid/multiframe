@@ -268,10 +268,19 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     val liveExposure = remember { AtomicReference(0 to 0L) }
     var exposureReadout by remember { mutableStateOf<Pair<Int, Long>?>(null) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(zslStream) {
+        val stream = zslStream
         while (true) {
-            val (iso, ns) = liveExposure.get()
-            exposureReadout = if (iso > 0 && ns > 0L) iso to ns else null
+            // Whichever path is actually driving the sensor.
+            //
+            // CameraX reports through the preview's repeating request, and the
+            // raw ring keeps results of its own -- and because the ring can
+            // only run with CameraX unbound, the preview callback goes quiet
+            // at exactly the moment the ring takes over. Reading the stream
+            // first rather than falling back to a value that stopped being
+            // true when the handover happened.
+            val reading = stream?.latestExposure() ?: liveExposure.get()
+            exposureReadout = reading.takeIf { it.first > 0 && it.second > 0L }
             kotlinx.coroutines.delay(200)
         }
     }
