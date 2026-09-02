@@ -3357,6 +3357,212 @@ every ratio agrees: the fold 1.52x against 1.42x, importing 3.77x against 4.01x,
 40 of 40 rounds both times. **Warm and charging is a different instrument from
 rested, and only one half of what it reports survives the difference.**
 
+## The interface, measured rather than looked at
+
+The brief was to take the camera-facing UI to a standard worth putting in a
+store listing. The interface had already had two passes and was not unstyled:
+it has a documented palette, a rule that nothing coloured sits on the
+photograph, and a rule that a control's *kind* is carried by shape. What it had
+not had was a measurement.
+
+### What the current guidance actually offers, which is not what it says
+
+The instruction was to check Material 3 rather than rely on what is already
+known about it, and that turned out to matter twice over.
+
+Current M3 Expressive guidance, and every write-up of it, points at
+`ButtonGroup` and `ToggleButton` — which are exactly the components a control
+row like this one wants. **Neither exists in material3 1.4.0**, which is what
+this project resolves. Nor does `LoadingIndicator`. They were promoted to stable
+during the 1.5.0 alphas. This was settled by unzipping the resolved AAR out of
+the Gradle cache and listing the classes, not by reading release notes:
+
+```bash
+unzip -qo material3.aar classes.jar && unzip -qo classes.jar -d cls
+ls cls/androidx/compose/material3/ | grep -i ButtonGroup   # nothing
+```
+
+The slot-based `Slider` — the one that takes `track` and `thumb` lambdas — does
+exist in 1.4.0 but is `@ExperimentalMaterial3Api`, and `SliderDefaults`'
+`CenteredTrack` is `internal`. Both facts changed what got built. Writing the
+plausible thing would not have compiled.
+
+### Seven controls failing a number that is not a matter of taste
+
+Chip sizes were read off the accessibility tree and converted, rather than
+judged by eye:
+
+```bash
+adb shell uiautomator dump /sdcard/ui.xml
+```
+
+| | before | after |
+|---|---|---|
+| every chip in the control row | 44dp tall | 48dp |
+| `RAW`, `DNG` beside the shutter | 44dp tall | 48dp |
+| panel toggles | ~28dp tall | 48dp |
+| shutter/thumbnail centre delta | ~19dp | **0px, measured** |
+
+Material's minimum touch target is 48x48dp. Seven controls failed it, on a
+camera meant to be worked one-handed while holding a phone still. The
+misalignment had a cause worth naming: the thumbnail was positioned against the
+bottom of the *screen* and the shutter against the bottom of the *column* it
+lives in, so the two were never going to agree. They share a row now.
+
+### Three things that read as broken rather than unfinished
+
+- **The manual panel stopped in mid-air.** It drew its own ground with rounded
+  top corners while the action strip and shutter stayed outside it, so the
+  photograph reappeared beneath the panel and above the shutter. One ground now
+  runs from the panel to the bottom edge. It is also only drawn when there is
+  something to put on it — opening `PRO` before the camera had reported its
+  capabilities gave an empty slab with a grab handle and no controls, which was
+  only visible on a device with no capabilities to report.
+- **The About sheet was 95% opaque, which is not opaque.** The control row and
+  the lens strip ghosted through four paragraphs of privacy policy. It was also
+  a single click target over the whole scrolling document: every tap that was
+  not quite a drag threw it away, and a screen reader announced the policy as a
+  button.
+- **Scrolling rows faded at one edge.** Scrolled to the far end, the first chip
+  was sliced down its middle with nothing to say why — `ZSL OFF` rendering as
+  `SL OFF`, which reads as a typo rather than as a row that continues.
+
+### The absence, which was the larger problem
+
+Indigo keeps a live histogram and `1/30s ISO 12500` in permanent chrome. This
+app had an empty third of a screen where that belongs, and showed the
+photographer nothing about exposure at all — in an app whose entire argument is
+that it measures things properly.
+
+Worse, the histogram it *did* have was switched on by the **guides** control.
+Two unrelated things behind one switch: the only instrument that says whether
+the highlights are gone was off unless you had also asked for a grid.
+
+There is now a permanent `ISO · shutter · EV` readout, taken off the preview's
+repeating capture request via a `Camera2Interop` session callback rather than
+inferred from `ManualSettings`. That distinction is the whole point: under
+auto-exposure the settings say what was asked for and the result says what the
+sensor did, and only the second is honest. It is written from the camera
+callback at frame rate into an `AtomicReference` and sampled at 5 Hz, because
+driving Compose state directly from that callback recomposes the screen sixty
+times a second to change two digits.
+
+### The slider, and one rule the palette already had
+
+Material 3's expressive slider draws a 16dp-tall filled track. Given this app's
+accent it put a **solid saturated amber bar across a third of the panel** — the
+largest and most saturated shape anywhere in the interface, for a control that
+is not the most important thing on screen. The palette has exactly one rule
+about colour, which is that the accent is spent on readings, and a bar is not a
+reading.
+
+So the track is drawn here: a 3dp neutral rail, the filled portion carried by
+weight the way selection is carried everywhere else, and the accent spent on an
+18dp handle and the number. Drawing it also made a second fix free. Exposure
+compensation is **bipolar** and its interesting value is zero; filled from the
+left it read as a level control — "1.0 of a possible 3.0" rather than "one stop
+under". It fills from the centre now, which is what Material's own
+`CenteredTrack` would have done had it not been `internal`.
+
+### A shape mistake made and caught in the same session
+
+The lens chips were 18dp rounded rectangles, which put a *third* shape language
+on a screen whose whole scheme is that there are two: a pill for something
+reversible, a squared corner for something that writes a file. A lens is a
+setting, so it should be a pill.
+
+The first fix was `RoundedCornerShape(percent = 50)`, which was wrong in a way
+only a screenshot shows: it made the short labels (`12mm`) into circles and the
+long ones (`220mm`) into **ellipses**. One or the other would have been a
+decision; both together read as neither. Every lens chip is now the same fixed
+circle, which is also what the reference does with its zoom chips.
+
+This is the argument for the screenshot loop in one example. The change compiled,
+matched the design rule it was written for, and was still visibly wrong.
+
+### The lint the project had been carrying
+
+`lintDebug` failed at HEAD with **32 errors**, so half of this project's stated
+bar had quietly not been met for some time. The baseline was established by
+stashing the working tree and running lint against HEAD, rather than assumed.
+
+Thirty-one were one mistake. **Kotlin's `@OptIn` satisfies the compiler;
+AndroidX's lint check reads `androidx.annotation.OptIn` and nothing else.** The
+annotation was present throughout and lint had been reporting every interop call
+in `ManualSettings`, `CameraCapabilities` and `CameraScreen` as unsafe anyway.
+
+The thirty-second was real, and not cosmetic. `openCamera` reports a revoked
+camera permission by **throwing**, not through its state callback — so
+`onOpened`, `onDisconnected` and `onError` would none of them run. Permission is
+checked before the viewfinder is shown, but it can be taken away while the
+process is alive. The app did not crash, because `openDeviceWithRetry` wraps the
+call in `runCatching`; but a guarantee held two frames up is not one a reader
+can see, and not one lint can see either.
+
+Catching it locally then exposed a second thing. A nullable `CameraDevice` could
+not carry enough: *"busy, try again in a moment"* and *"the permission is gone"*
+both arrived as `null`, so the retry loop treated them identically and spent
+three further attempts and 750 ms waiting for a permission to come back — which
+is not a thing that happens. `openDevice` returns a `CameraOpen` now — `Opened`,
+`Busy`, `Denied` — and the loop returns immediately on `Denied` while still
+waiting out `Busy`, which is the CameraX-release race it was written for.
+
+Left alone deliberately: `onError` maps every reason to `Busy`, which lumps
+`ERROR_CAMERA_IN_USE`, where waiting is exactly right, together with
+`ERROR_CAMERA_DISABLED`, which is device policy and no more retryable than a
+revoked permission. Splitting those needs hardware that reports them.
+
+### What the emulator can and cannot answer
+
+The phone disconnected partway through, which split this work in two and is
+worth recording as an instrument note rather than an accident.
+
+`emulator -list-avds` returned nothing, because the AVD lives in an APFS sparse
+image that has to be attached first — [BUILD.md](BUILD.md) documents this and it
+is easy to conclude from the empty list that there is no fallback. There is.
+
+What it answered: the Compose suite, which needs an unlocked screen and which a
+locked development phone skips by design — the phone had locked when it was left,
+and six tests reported as skipped, which is the mechanism working. It also caught
+two real defects on its own: the empty manual panel, and an empty-thumbnail
+placeholder that rendered as an outlined box reading like a picture that failed
+to load. That placeholder had been added on the theory that the shutter would
+otherwise shift when the first photograph was taken, which was simply wrong — the
+shutter is centred in the row and the thumbnail aligned to the start, so neither
+depends on the other.
+
+What it cannot answer: it has no camera. No lens strip, no live readout, no
+histogram, a black viewfinder. **Five changes made after the phone left have
+never been seen against a photograph** — the uniform lens circles, the drag
+handle's contrast, the sweep overlay, the countdown ground, and the capability
+summary moved to a footnote.
+
+And two things were deliberately not changed, because a scrim and a histogram
+position cannot be judged with nothing behind them: the bottom scrim is 232dp
+under a cluster about 274dp tall, so the lens strip sits above the gradient meant
+to ground it; and the histogram is pinned at `bottom = 130.dp` with the cluster
+restructured around it, so it may now collide with the thumbnail. It only draws
+with ZSL on, which the emulator cannot do.
+
+### What is kept
+
+359 unit tests, **128 of 128 device tests** with the one skip
+(`ColorCalibrationDeviceTest`) that BUILD.md predicts on an emulator, and
+**`lintDebug` at 0 errors** where it had been failing at 32. 25 warnings remain,
+all pre-existing; the `ExifInterface` pair is the one worth a look in an app that
+writes EXIF.
+
+Three user-visible strings are now decisions rather than defaults.
+`about_dismiss` read *"Tap anywhere to close"*, which was true until the
+whole-document tap target was removed, and now reads *"Close"*. And this app
+answers to three names — `app_name` says *Multiframe*, CLAUDE.md says *Aperture
+Zero*, [NAMES.md](NAMES.md) recommends *Coadd* — which the store listing will
+have to settle.
+
+The verification that is owed is small, does not wait for the Pixel 11, and is
+about pixels rather than milliseconds: point komodo at a scene with real tonal
+range and look at the five.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a
