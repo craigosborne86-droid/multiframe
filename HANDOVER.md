@@ -138,9 +138,20 @@ established, all of it on 4 September 2026:
 - **Zero shutter lag survives the move.** `24mm ZSL 4080x3064 30.0fps
   stall=0.0ms, ring 32`. That was the one real functional risk of changing phone
   and it is answered.
-- **It has three rear lenses, not komodo's five** -- 12mm/0.5x, 24mm/1x,
-  105mm/4.4x. The strip builds itself from the catalogue so it adapts, but
-  anything written against komodo's five wants re-reading.
+- **The lens strip shows three entries here against komodo's five, and that is
+  not a hardware difference.** Both phones have the same three optical modules.
+  `LensCatalog.enumerate` lists what the platform advertises as physical camera
+  ids, and komodo advertised two extra -- `49mm/2x` and `220mm/9.2x` -- which are
+  sensor crops of the main and telephoto rather than separate glass. Grizzly
+  advertises only the three real ones: 12mm/0.5x, 24mm/1x, 105mm/4.4x.
+
+  The consequence is a product one rather than a bug. Those crop stops are
+  useful and the app now offers fewer of them on this phone, purely because the
+  platform stopped naming them. If they are wanted they have to come from
+  digital zoom, which already exists on the pinch gesture, rather than from the
+  catalogue -- and a strip built from advertised ids will keep varying by device
+  in a way the owner has not chosen. Worth deciding before the strip is judged
+  against the stock camera app, which offers 2x on both phones.
 - **The GPU is a different family**: Imagination PowerVR C-Series at Vulkan 1.1,
   where komodo had Mali. Every crossing route got *dearer*, not cheaper, which
   is the opposite of why the measurement was deferred to this phone. See
