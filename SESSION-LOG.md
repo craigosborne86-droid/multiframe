@@ -3714,6 +3714,161 @@ And one result rather than a caveat: on hardware the full suite is **128 of 128
 with nothing skipped**, where the emulator is always one short for want of a
 camera. 359 unit tests, 0 lint errors.
 
+## The merge came out in squares, and the aligner's own comment said it would not
+
+The owner photographed with it on the Pixel 9 Pro and reported mosaic or
+patchwork artefacts in merged images: visible tiles rather than one continuous
+picture. That read was right, and the cause was a sentence rather than a subtle
+bug.
+
+**`Aligner`'s doc comment claims the merge interpolates.** "Integer-pixel
+offsets only. The merge stage interpolates them into a smooth per-pixel field,
+which recovers most of the benefit of subpixel alignment." That is true of
+`Merger`, the YUV path, which bilinearly interpolates the four surrounding tile
+displacements and then samples the luma at the fractional result. It has never
+been true of `BayerAccumulator` and `nAddFrame`, the raw path that every shutter
+press actually runs. There a sample took `dx[ty * tilesX + tx]` — one tile's
+displacement, whole, with none of its neighbour's — and the next sample across
+the boundary took a different one.
+
+**And the raw path cannot do what the YUV path does.** Alignment offsets in the
+CFA domain must be even or a red sample lands on a green one, which is the first
+thing the merge's own comment says. Interpolating two integer displacements
+gives a fractional one, and doubling a fraction is odd half the time. So the
+trick that fixed this for luma is unavailable here, and nothing replaced it.
+
+Two failures follow from that, and the second is the one that shows on a tripod
+where there is nothing to align away:
+
+- neighbouring tiles disagreeing by one proxy pixel put a **two-sensor-pixel
+  step across the seam**, every 64 pixels, over the whole frame;
+- and even where every tile is right, a tile that kept less of the alternate
+  frame denoised less, so the seam is visible as **a change of grain with no
+  change of content at all**. Nothing about the picture has to be wrong for the
+  grid to appear.
+
+### What the reference actually says
+
+Checked before touching anything, because the fix is a change to the arithmetic
+at the centre of the app. Hasinoff et al. 2016, and the independent
+reimplementation by Monod, Delon and Veit (IPOL 11, 2021, section 4.4), which
+states the problem in the same terms this session found it: adjacent stacks are
+merged independently, from different content, with different noise variance
+estimates and different alignment errors, so continuity between them is not
+guaranteed. Their answer is two things:
+
+- **tiles overlap by half in each spatial dimension**, for the alignment as well
+  as the merge, at four times the tile count and so four times the work;
+- **blending uses a modified raised cosine**,
+  `w(x) = 1/2 - 1/2 cos(2 pi (x + 1/2) / n)` over `0 <= x <= n - 1`, separable in
+  two dimensions. Windows half a period apart sum to exactly one, which is the
+  property that matters: a blend whose weights did not would change the
+  brightness it blended. The half-sample offset is the "modified" part and keeps
+  the window off zero at both ends, so a tile still says something about the
+  samples at the far edge of its reach.
+
+The paper merges in the DFT domain and the window also cleans up its edge
+artefacts. That half does not apply here — this merge is spatial, with a
+per-sample robustness weight — but it makes the window cheaper rather than
+dearer, since there is no transform to pay for.
+
+### What was built, and the one place it departs from the paper
+
+Four taps a sample instead of one: the two tile centres it lies between in each
+dimension, weighted by the separable window. **The four samples are blended, not
+the four displacements** — which is what preserves CFA parity, since every
+displacement stays the integer the search returned and only the weights are
+fractional. The window is tabulated per tile as its *far* half only; the near
+half is `1 - that`, so the pair sums to one exactly in single precision rather
+than to within a rounding step, at every sample, including at the frame edge
+where both taps clamp to the same tile.
+
+**The search still runs on the non-overlapping grid.** Overlapping it too is
+what the paper does and it is not affordable here: alignment is 83% of the merge
+as it stands, and four times that is not a camera. The cost of the shortcut is
+that halfway between two tile centres a displacement is being applied half a
+tile from where it was matched. The robustness weight absorbs it — a sample
+disagreeing with the reference past the noise floor loses its weight and the
+pixel falls back on the reference — so the failure mode is *less denoising in
+that band*, never a ghost and never a seam. Worth revisiting if the adaptive
+frame count lands, since that work needs per-tile match confidence anyway.
+
+### A second fault, found while reading, unrelated to the seam
+
+The merge and the search did not agree on where the tiles were. `Aligner.align`
+takes `tileW = ref.width / tilesX`, a truncating integer division, and matches
+tile `tx` over `[tx * tileW, (tx + 1) * tileW)`. Both accumulators divided in
+floating point instead. At 4080x3064 that is 32.38 proxy columns against the
+search's 32, and the drift accumulates: by the right-hand edge a displacement
+was being applied **24 proxy columns — 48 sensor columns — from the content it
+had been measured on**. Both now derive the grid the way the search does, so
+they agree by construction rather than by arithmetic that happens to match.
+
+The noise estimator sampled on the same float grid and now uses the integer one
+too. It still takes the nearest tile rather than blending: it is a median over
+thousands of samples a bin and a seam in the sampling cannot bias it.
+
+### The fixture, run against the pass it exists to catch
+
+`neighbouring tiles blend rather than step` merges a linear ramp with itself
+under a hand-made field where alternate tile columns — then rows — are displaced
+by three proxy pixels and the rest by none. On a ramp a displacement shows up as
+a constant bias and nothing else: twelve codes where a tile is displaced by six
+sensor pixels, none where it is not. The only question the test asks is *where
+those twelve codes are picked up*.
+
+    before the tiles overlapped    worst step 12 codes, both axes
+    after                          worst step  1 code,  both axes
+
+Run against the old accumulation it fails at 12, which is the point of running
+it there. It also asserts the bias spans at least 8 codes, so a merge that
+ignored the field entirely could not pass by doing nothing.
+
+Parity holds pixel for pixel on the device: worst 1 code on the fixed-shift
+fixture and on all three widths of the varying-field one, with the mean
+contribution agreeing to four decimals.
+
+### What it costs, measured on the capture path
+
+The across-install accumulate benchmark could not resolve this — per-burst
+figures of 105 to 1152 ms, ranges overlapping almost entirely, which is the
+hazard `MergeSpeedDeviceTest` was already known to have. So the reading comes
+from the authority instrument instead: real captures, three alternated installs
+of each build, four captures apiece, `merge breakdown` out of logcat.
+
+    accumulate, three alternate frames, grizzly
+      before   26 28 32 33 34 35 37 38 38 40 46 51    median 36ms
+      after    38 39 41 41 47 48 49 50 51 52 52 74    median 48ms
+
+Position-matched within each round, the new merge is the slower of the pair in
+**11 of 12**, which a fair coin manages 0.3% of the time. The ranges do overlap,
+so what transfers is the ratio and not a separation: about **1.35x, or 12 to 16
+ms a frame against 9 to 12**. Against a merge of `proxy 20ms, align 48ms,
+accumulate 42ms` and a develop of 63 ms native plus 48 encode and 30 publish, a
+photograph got roughly twelve milliseconds dearer.
+
+**Four taps cost 1.35x rather than 4x, and the reason is the traffic again.**
+The four are summed into registers and written back once, so the two 50 MB
+accumulation planes are still read and written exactly once per frame; the four
+alternate-frame reads land within a few pixels of each other and are nearly all
+cache hits. What quadrupled is the arithmetic, which was never the cost. That is
+the same lesson as the prepass fold, arriving from the other direction: there
+the traffic model overpredicted a saving, here it explains why an apparent
+quadrupling did not happen.
+
+### Still owed
+
+**Nobody has looked at a real photograph of foliage or brick since the change.**
+The fixture proves the mechanism on a synthetic ramp and the parity tests prove
+the two implementations agree; neither is evidence about a wall. That check is
+the owner's, and it is the same check the log has been asking for since the
+super-resolution work.
+
+And the YUV merger has the same float-versus-integer tile grid drift. It
+interpolates, so the drift is a smooth half-tile misregistration rather than a
+seam, and it is not the shipping capture path — but it is the same mistake and
+should be corrected when that file is next opened.
+
 ## Outstanding for release
 
 - [ ] Privacy policy: fill in effective date, developer name, contact; host at a

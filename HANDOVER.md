@@ -8,8 +8,8 @@ holds the reasoning behind everything below.
 
 The tree is green. **The Pixel 11 Pro has arrived and been measured**, the
 interface debt is discharged, and the readout that was blank in ZSL mode is
-fixed. What replaces all of that is a brief of three real-device faults, one of
-which is done. In order:
+fixed. What replaces all of that is a brief of three real-device faults, two of
+which are done. In order:
 
 ### 1. Three faults from real-device testing, and the bar for them
 
@@ -25,19 +25,20 @@ separate sessions; they are three different parts of the codebase.
   box of the stream's own shape. Tap to focus was remapped with it, since it had
   normalised against the window and the window is no longer the image.
 
-- **Merged images show mosaic or patchwork artefacts. NEXT.** Visible tiles
-  rather than one continuous image. The owner's read, which is worth confirming
-  before changing any maths: the merge has hard tile boundaries -- either no
-  overlap, or no blend across it, or neighbouring tiles taking different
-  alignment decisions with nothing smoothing between them. **Read the fusion
-  engine's merge step first and establish what it actually does.** HDR+ overlaps
-  tiles by half their size in each dimension and blends with a raised cosine
-  window precisely to avoid this. Confirm against Hasinoff et al. 2016 and at
-  least one independent reproduction -- <https://www.timothybrooks.com/tech/hdr-plus/>
-  -- before touching the merge. Verify with a burst of foliage, brick or water,
-  where seams show worst.
+- **Merged images show mosaic or patchwork artefacts. DONE in the code**,
+  commit below, **and not yet confirmed on a photograph.** The owner's read was
+  exactly right: the merge had hard tile boundaries, no overlap and no blend.
+  Tiles now overlap by half and blend with the modified raised cosine of
+  Hasinoff et al. 2016 -- four taps a sample, the samples blended and never the
+  displacements, since an interpolated displacement would be odd half the time
+  and odd is what destroys colour here. A second fault turned up while reading:
+  the merge and the search disagreed about where the tiles were, by up to 48
+  sensor columns at the right-hand edge. Cost about 1.35x on the accumulate,
+  which is 12 ms of a photograph. **What is still owed is a burst of foliage,
+  brick or water** -- the synthetic fixture proves the mechanism and says
+  nothing about a wall.
 
-- **Adapt the frame count to motion, with a manual override. AFTER 2.** Fewer
+- **Adapt the frame count to motion, with a manual override. NEXT.** Fewer
   frames when there is motion, more on a tripod. **Two signals, not one**, and
   the reason is the whole design: accelerometer and gyroscope say the *device* is
   still and cannot see a person moving in front of a tripod. So device stability
@@ -64,7 +65,11 @@ Both have been waiting longest and both still outrank the code:
 - **Nobody has looked hard at a batch of real photographs.** The parity tests
   prove the native path matches the Kotlin one; neither proves the picture is
   good. Twenty frames in mixed light, looked at properly, would tell more than
-  any test here. Worth doing on the new sensor rather than this one.
+  any test here. Worth doing on the new sensor rather than this one. **This now
+  has a specific question attached to it**: the tile seams were fixed on the
+  strength of a synthetic ramp, where the step across a boundary went from 12
+  display codes to 1. Whether the squares have gone from a photograph of foliage
+  or brick is a different claim and nobody has made it.
 
 ### 3. Then one decision, and it is between two things, not a queue
 
@@ -75,11 +80,15 @@ either without deciding would waste one of them.
 
 - **Fuse the prepass into the demosaic** — a five-row sliding window, taking
   100 MB of DRAM traffic out. Unpriced. See *The next fold, which is not priced*.
-- **Move the develop to the GPU** — the crossing is now priced at 5-6% of a
-  develop, so the door that Phase 7 closed is open again. See *The GPU, which is
-  priced on the old phone*.
+- **Move the develop to the GPU** — but the number that made this attractive
+  has gone. The crossing was 5-6% of komodo's develop; grizzly's develop is
+  41-45 ms and its cheapest crossing 10-11 ms, so it is **a quarter of a develop
+  here** before a kernel runs. See [BASELINE.md](BASELINE.md). That does not
+  close it — a GPU kernel could still beat 43 ms of CPU by more than the
+  crossing costs — but it is no longer the cheap door it looked like.
 
-**And there is a cheap measurement that would decide between them**, which is
+**That change of denominator is itself an argument for measuring rather than
+arguing**, which is
 what this project does instead of guessing. `GpuCrossingDeviceTest` already
 carries a compute shader, a paired harness and a correctness check; its shader is
 deliberately trivial. Replace it with a real demosaic and tone curve — the wrong
@@ -103,9 +112,15 @@ Confirm a green baseline on a **rested, charged** phone:
 adb shell am instrument -w dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-128 tests should pass. If `repeatedCapturesTakeAConsistentTime` fails, check
-`/proc/meminfo` and the battery before suspecting the code — that has now
-happened twice and been device state twice.
+127 of 128 pass on grizzly. The one failure is `hoistingTheGridOutOfTheLoop`,
+which is a test that has outrun its timer rather than a regression — see below.
+If `repeatedCapturesTakeAConsistentTime` fails, check `/proc/meminfo` and the
+battery before suspecting the code — that has now happened twice and been device
+state twice.
+
+Run `adb shell svc power stayon true` first. Wireless adb drops after the screen
+idles, and the suite takes eight and a half minutes; that is what truncated the
+first attempt at 87 of 128, and with the screen held awake it now completes.
 
 ## Where things stand
 
@@ -161,13 +176,26 @@ established, all of it on 4 September 2026:
   thermal. The pass is not slower -- 1.77x per round, better than komodo ever
   read -- it now takes 5-8ms and is too fast to time. Give it more work per
   round, or swap the round count for a paired median, and say why.
-- **No complete suite on this phone yet.** Wireless adb dropped at 87 of 128.
-  The link has dropped repeatedly after idle; use a cable, or keep the screen
-  awake, for anything that runs long. Komodo is no longer reachable.
-- Grizzly's own develop cost is still unmeasured, so the crossing's share of a
-  develop in BASELINE.md is carried from komodo's.
+- **The suite completes now: 127 of 128**, with `adb shell svc power stayon
+  true` before the run. The link drops after the screen idles, which is what
+  truncated the first attempt at 87; it is not the transport. Komodo is no
+  longer reachable.
+- **A photograph costs 41-45 ms to develop here**, against komodo's 112-199
+  rested. Which is a different phone on a different day and not a speedup — but
+  it is the denominator the GPU decision rests on, and it moved by more than
+  the change of phone was supposed to move anything. See
+  [BASELINE.md](BASELINE.md).
 
 Recent work, newest first:
+
+- **the merge came out in squares, and the aligner's own comment said it would
+  not.** `Aligner` documents that "the merge stage interpolates them into a
+  smooth per-pixel field" -- true of the YUV path, never true of the raw one
+  every shutter press runs, and unavailable to it, since an interpolated
+  displacement is odd half the time and odd lands red samples on green. Tiles
+  now overlap by half and blend with a modified raised cosine whose pairs sum to
+  exactly one. The fixture reads 12 codes of step across a seam before and 1
+  after. 1.35x on the accumulate, 11 of 12 alternated captures.
 
 - **the viewfinder showed neither the right shape nor the whole frame.**
   `AndroidExternalSurface`'s `surfaceSize` sets the buffer and not the view, so

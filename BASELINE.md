@@ -367,18 +367,54 @@ percent, so reaching the GPU is not what would make a GPU develop lose here
 either. What has changed is the margin: the floor a real kernel gets added to is
 half again what it was, on a GPU nobody has written a line for.
 
-Grizzly's own develop cost is still unmeasured, so the percentage above is
-carried from komodo's and is the next thing to replace.
+The develop cost this percentage rests on is measured now; see below, and
+note that it changes the answer.
+
+## What a photograph costs here
+
+Read out of real captures on 4 September 2026, at 92% and 990 MB free, on the
+build that carries the overlapped-tile merge. This is the figure the GPU
+section above says it is carrying from komodo, and it replaces it.
+
+    develop:  prepass 17-18ms, demosaic+tone 24-26ms, total 41-45ms
+    sharpen:  luma 2-4ms, sharpen 10-12ms, total 15ms
+    stages:   autoexposure 1-2ms, bitmap 0-1ms, render 42-45ms,
+              defringe 0ms, sharpen 16ms
+    breakdown: setup 1ms, native 63ms, rotate 0ms, encode 48ms, publish 30ms
+
+    merge over 3 alternate frames:
+              proxy 17-22ms, pyramid 0ms, align 41-74ms, accumulate 38-52ms
+
+**Komodo's develop was 112-199 ms rested and 152-279 warm; this one is 41-45.**
+Do not read that as a speedup of three, and do not read it as anything at all
+without the caveat this file exists to make: those are different phones in
+different states measured on different days, which is the comparison the rules
+forbid. What it does settle is the GPU question's denominator. The cheapest
+crossing here is 10-11 ms against a develop of 41-45 ms -- **a quarter of a
+develop, not the 5-6% carried from komodo.** The prior question that the
+crossing test was built to answer therefore comes back with a different answer
+on this phone: reaching the GPU is no longer obviously cheap enough to ignore,
+and a GPU develop starts a quarter of the way behind before its kernel runs.
+
+The accumulate figure is the overlapped-tile merge and is about 1.35x what the
+old one cost -- see the session log for the alternated measurement. The old one
+read 26-51 ms over the same three frames.
 
 ## What is not here
 
-The full suite did not complete. Wireless adb dropped partway and it stopped at
-87 of 128 -- no correctness statement for this phone yet, and the two failures
-it did record (the hoist again, and `whatTheRollOffCostsDependsOnHowBrightTheSceneIs`,
-which passed standalone) are from a truncated run. The link dropped three times
-today across two phones, always after idle; keep the screen awake or use a cable
-for a run this long.
+**The full suite now completes: 127 of 128.** The single failure is
+`hoistingTheGridOutOfTheLoopIsFasterAndDoesNotChangeThePicture` at 35 of 40
+rounds, which is inside the 33-37 band this phone has given warm and cold alike
+and is a test that has outrun its own timer rather than a regression. Every
+parity test passes, including both merge parity tests and all three widths of
+the varying-field one.
 
-Also missing: the ZSL decision on this sensor, the develop cost, and
-`GpuCrossingDeviceTest` -- which is the measurement the handover says decides
-between the row cache and a GPU develop, and the reason this phone matters.
+An earlier attempt stopped at 87 of 128 when wireless adb dropped. What fixed it
+was `adb shell svc power stayon true` before the run; the link drops after idle,
+and a suite that takes eight and a half minutes idles the screen well before the
+end.
+
+Still missing: nothing about correctness, and nothing about the develop. What is
+left is a judgement rather than a measurement -- **nobody has looked hard at a
+batch of real photographs from this sensor**, which is the item the handover has
+carried longest and the only one that can say whether any of this is a picture.

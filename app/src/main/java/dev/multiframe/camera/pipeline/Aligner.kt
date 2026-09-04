@@ -22,9 +22,18 @@ class AlignmentField(
  * Gaussian-ish pyramid, and at each level search a small window around the offset
  * inherited from the coarser level, minimising the sum of absolute differences.
  *
- * Integer-pixel offsets only. The merge stage interpolates them into a smooth
- * per-pixel field, which recovers most of the benefit of subpixel alignment
- * without the extra search cost.
+ * Integer-pixel offsets only, and the two merges spend them differently.
+ *
+ * [Merger], the YUV path, interpolates the four surrounding tile displacements
+ * bilinearly and samples the luma at the fractional result, which recovers most
+ * of the benefit of subpixel alignment without the extra search cost.
+ *
+ * [BayerAccumulator] cannot: an offset in the CFA domain must be even or a red
+ * sample lands on a green one, and doubling an interpolated displacement is odd
+ * half the time. It blends the four *samples* instead, weighted by a raised
+ * cosine over tiles that overlap by half. **This comment used to claim the
+ * interpolation for both**, and the raw merge -- the one every shutter press
+ * runs -- came out in visible squares for as long as it did.
  */
 object Aligner {
 

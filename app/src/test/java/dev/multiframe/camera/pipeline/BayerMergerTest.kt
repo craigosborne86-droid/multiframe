@@ -123,6 +123,98 @@ class BayerMergerTest {
         assertThat(worst).isLessThan(120)
     }
 
+    /**
+     * The patchwork test.
+     *
+     * Two neighbouring tiles matching at different offsets is ordinary -- it is
+     * what a tiled aligner is *for* -- and until the tiles overlapped, the
+     * merge changed from one displacement to the other between one sensor
+     * column and the next. On a real photograph that draws a grid, every 64
+     * pixels, over the whole frame.
+     *
+     * The scene is a linear ramp, so a displacement applied to it shows up as a
+     * constant bias and nothing else: twelve codes where a tile is displaced by
+     * six sensor pixels, none where it is not. The question the test asks is
+     * only where those twelve codes are picked up. Across a hard tile boundary
+     * they arrive all at once; across a blend they arrive over a tile's width,
+     * which cannot exceed one code a sample.
+     *
+     * Run against the merge as it was before the tiles overlapped, both halves
+     * report a worst step of 12.
+     */
+    @Test
+    fun `neighbouring tiles blend rather than step`() {
+        assertNoSeam(across = true)
+        assertNoSeam(across = false)
+    }
+
+    private fun assertNoSeam(across: Boolean) {
+        val base = 100
+        val slope = 4
+        fun truth(x: Int, y: Int) = base + slope * (if (across) x else y)
+
+        val ramp = ShortArray(w * h) { i -> truth(i % w, i / w).toShort() }
+        val frame = BayerFrame(w, h, ramp)
+
+        // A noise floor far above anything this ramp can produce, so every
+        // sample keeps full weight and the merged value is the plain mean of
+        // the two. What is under test is where a displacement is applied, not
+        // how much of it survives rejection.
+        val acc = BayerAccumulator(
+            w, h, TestBayer.PROFILE,
+            BayerMergeParams(noiseTolerance = 3f, minNoiseSigma = 40f),
+        )
+        acc.setReference(frame)
+
+        val tilesX = (w / 2) / 32
+        val tilesY = (h / 2) / 32
+        val dx = IntArray(tilesX * tilesY)
+        val dy = IntArray(tilesX * tilesY)
+        for (ty in 0 until tilesY) {
+            for (tx in 0 until tilesX) {
+                val i = ty * tilesX + tx
+                val odd = if (across) tx % 2 == 1 else ty % 2 == 1
+                // Three proxy pixels, so six sensor pixels, so twelve codes of
+                // bias on this ramp once the two frames are averaged.
+                if (across) dx[i] = if (odd) 3 else 0 else dy[i] = if (odd) 3 else 0
+            }
+        }
+        // The alternate frame is the reference. Any difference between them is
+        // then the displacement and nothing else.
+        acc.add(frame, AlignmentField(tilesX, tilesY, dx, dy))
+        val (merged, _) = acc.finish()
+
+        // Six sensor pixels of inset, because that is how far a displaced tile
+        // reaches past the edge, and a sample with no source is a different
+        // effect from the one being measured.
+        val inset = 8
+        var worstStep = 0
+        var lowest = Int.MAX_VALUE
+        var highest = Int.MIN_VALUE
+        for (y in inset until h - inset) {
+            for (x in inset until w - inset) {
+                val here = merged.at(x, y) - truth(x, y)
+                // The next sample of the same colour along the axis the
+                // displacement varies on.
+                val next = if (across) merged.at(x + 2, y) - truth(x + 2, y)
+                else merged.at(x, y + 2) - truth(x, y + 2)
+                lowest = minOf(lowest, here)
+                highest = maxOf(highest, here)
+                worstStep = maxOf(worstStep, abs(next - here))
+            }
+        }
+
+        println(
+            "seams ${if (across) "across" else "down"}: bias $lowest..$highest codes, " +
+                "worst step $worstStep",
+        )
+        // The field has to have changed something, or a merge that ignored it
+        // would pass this by doing nothing at all.
+        assertThat(highest - lowest).isAtLeast(8)
+        // Twelve codes, taken up over a tile instead of dropped at its edge.
+        assertThat(worstStep).isAtMost(2)
+    }
+
     @Test
     fun `merged output stays within the sensor range`() {
         val clean = TestBayer.scene(w, h)

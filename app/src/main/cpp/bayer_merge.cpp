@@ -232,13 +232,16 @@ static void estimateNoise(Accumulator* acc, const uint8_t* base, int rowStride,
                           const int* dx, const int* dy, int tilesX, int tilesY) {
     std::vector<std::vector<float>> samples(kNoiseBins);
     const int w = acc->width, h = acc->height;
-    const float tileW = static_cast<float>(w / 2) / tilesX;
-    const float tileH = static_cast<float>(h / 2) / tilesY;
+    const int tileW = std::max(1, (w / 2) / tilesX);
+    const int tileH = std::max(1, (h / 2) / tilesY);
 
+    // Nearest tile centre, which on this grid is the tile the sample falls in.
+    // No blending here: this is a median over thousands of samples a bin and a
+    // seam in the sampling cannot bias it.
     for (int y = 2; y < h - 2; y += kSampleStride) {
-        int ty = std::clamp(static_cast<int>((y / 2) / tileH), 0, tilesY - 1);
+        int ty = std::clamp((y / 2) / tileH, 0, tilesY - 1);
         for (int x = 2; x < w - 2; x += kSampleStride) {
-            int tx = std::clamp(static_cast<int>((x / 2) / tileW), 0, tilesX - 1);
+            int tx = std::clamp((x / 2) / tileW, 0, tilesX - 1);
             int idx = ty * tilesX + tx;
             int sx = x + dx[idx] * 2;
             int sy = y + dy[idx] * 2;
@@ -288,50 +291,69 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
     if (!acc->noiseReady) estimateNoise(acc, base, rowStride, dx.data(), dy.data(), tilesX, tilesY);
 
     const int w = acc->width, h = acc->height;
-    const float tileW = static_cast<float>(w / 2) / tilesX;
-    const float tileH = static_cast<float>(h / 2) / tilesY;
 
-    // Accumulated under a lock at the end of each band rather than into a
-    // per-thread slot. The slot scheme indexed a fixed array of 64 by an
-    // incrementing counter, which was safe only while each thread ran exactly
-    // one band; now that bands are claimed dynamically a thread runs several,
-    // and a sweep of more than 64 bands would have two of them sharing a slot
-    // and racing. A few dozen lock acquisitions per frame cost nothing beside
-    // the twelve million pixels they follow.
-    double totalContrib = 0.0;
-    long long totalCount = 0;
-    std::mutex totals;
+    // The tile grid the *search* used: `Aligner.align` divides the proxy by the
+    // tile count with a truncating integer division and matches tile tx over
+    // [tx * tileW, (tx + 1) * tileW). This loop used to divide in floating
+    // point, which at 4080x3064 made its tiles 32.38 proxy columns against the
+    // search's 32 -- so by the right-hand edge a displacement was landing 24
+    // proxy columns from the content it had been measured on.
+    const int tileW = std::max(1, (w / 2) / tilesX);
+    const int tileH = std::max(1, (h / 2) / tilesY);
 
-    // The alignment is per tile, not per pixel, so a row crosses only sixty-odd
-    // displacements on the way across an image four thousand pixels wide. The
-    // loop below walks those runs rather than the pixels, because everything
-    // the displacement decides is decided once for the whole run:
+    // Tiles overlap by half and are blended with a modified raised cosine, as
+    // in Hasinoff et al. 2016 -- see the Kotlin reference for why, and for what
+    // this deliberately does not copy from the paper. A sample lies between two
+    // tile centres in each dimension and takes a share of both, so four taps
+    // rather than one, weighted by a separable window that sums to one.
     //
-    //  - the source row. `sy` depends on the tile's vertical shift alone, so
-    //    the row address -- which was costing a 64-bit multiply by the stride
-    //    at every pixel -- is computed once, and a run that lands above or
-    //    below the frame is skipped whole rather than pixel by pixel.
-    //  - the horizontal bounds. `sx = x + shift` is in the frame exactly while
-    //    x is in `[-shift, w - shift)`, so intersecting that with the run turns
-    //    four compares and a branch per pixel into two clamps per run.
-    //  - the count of contributing pixels, which is then the length of what is
-    //    left rather than an increment per pixel.
-    //
-    // The tile column is a run boundary rather than a table now. It was being
-    // memoised into `txForX` and looked up per pixel; grouping the equal values
-    // it held gives the same answers and stops looking them up at all.
+    // Only the *far* half of each window is tabulated. The near half is
+    // 1 - that, which is what makes the pair sum to one exactly rather than to
+    // within a rounding step, in single precision, at every sample.
+    auto raisedCosine = [](int tile) {
+        std::vector<float> out(static_cast<size_t>(tile));
+        for (int k = 0; k < tile; ++k) {
+            out[static_cast<size_t>(k)] = static_cast<float>(
+                0.5 - 0.5 * std::cos(M_PI * (k + 0.5) / tile));
+        }
+        return out;
+    };
+    const std::vector<float> winFarY = raisedCosine(tileH);
+    const std::vector<float> winFarX = raisedCosine(tileW);
+
+    // Per sensor column: the weight owed to the right-hand of the two tile
+    // centres it lies between. Tabulated at full resolution so the vector loop
+    // can load four of them contiguously; it is 16 KB at capture width, built
+    // once a frame against twelve million uses of it.
+    std::vector<float> farX(static_cast<size_t>(w));
+    for (int x = 0; x < w; ++x) {
+        const int px = x / 2 + tileW / 2;
+        farX[static_cast<size_t>(x)] = winFarX[static_cast<size_t>(px % tileW)];
+    }
+
+    // The tile column pair is constant over a run and only the window weight
+    // varies inside it, so the loop still walks runs rather than pixels: the
+    // source rows, the four tile indices and the horizontal bounds are all
+    // decided once for the whole run. The runs are the same width they were --
+    // one per tile column -- just offset by half a tile, since they now group
+    // samples by which two centres they fall between rather than by which tile
+    // they fall in.
     struct Run {
         int x0;
         int x1;
-        int tx;
+        int q;
+        int txA;
+        int txB;
     };
     std::vector<Run> runs;
     for (int x = 0; x < w; ++x) {
-        const int tx = std::clamp(static_cast<int>((x / 2) / tileW), 0, tilesX - 1);
-        if (!runs.empty() && runs.back().tx == tx) {
+        const int q = (x / 2 + tileW / 2) / tileW;
+        if (!runs.empty() && runs.back().q == q) {
             runs.back().x1 = x + 1;
         } else {
-            runs.push_back({x, x + 1, tx});
+            runs.push_back({x, x + 1, q,
+                            std::clamp(q - 1, 0, tilesX - 1),
+                            std::clamp(q, 0, tilesX - 1)});
         }
     }
 
@@ -348,13 +370,31 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
     }
 
     const float* noise = noiseForValue.data();
+    const float* farXTable = farX.data();
     const uint16_t* refPlane = acc->reference.data();
     float* sumPlane = acc->sum.data();
     float* weightPlane = acc->weight.data();
 
+    // Accumulated under a lock at the end of each band rather than into a
+    // per-thread slot. The slot scheme indexed a fixed array of 64 by an
+    // incrementing counter, which was safe only while each thread ran exactly
+    // one band; now that bands are claimed dynamically a thread runs several,
+    // and a sweep of more than 64 bands would have two of them sharing a slot
+    // and racing. A few dozen lock acquisitions per frame cost nothing beside
+    // the twelve million pixels they follow.
+    double totalContrib = 0.0;
+    std::mutex totals;
+
+    // One tap: one tile's displacement, and the share of the sample it owns.
+    struct Tap {
+        const uint8_t* row;   // the alternate frame's row this tap reads
+        int shiftX;
+        float wy;
+        bool farColumn;
+    };
+
     parallelBands(h, [&](int y0, int y1) {
         double localContrib = 0.0;
-        long long localCount = 0;
 #if defined(__ARM_NEON)
         // The vector path keeps four running totals of the contributed weight
         // and folds them in once the band is done. That is a different
@@ -367,114 +407,187 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
 #endif
 
         for (int y = y0; y < y1; ++y) {
-            const int ty = std::clamp(static_cast<int>((y / 2) / tileH), 0, tilesY - 1);
+            const int py = y / 2 + tileH / 2;
+            const int qy = py / tileH;
+            const int tyB = std::clamp(qy, 0, tilesY - 1);
+            const int tyA = std::clamp(qy - 1, 0, tilesY - 1);
+            const float wyB = winFarY[static_cast<size_t>(py % tileH)];
+            const float wyA = 1.0f - wyB;
+
             const size_t rowBase = static_cast<size_t>(y) * w;
-            const int tyBase = ty * tilesX;
             const uint16_t* refRow = refPlane + rowBase;
             float* sumRow = sumPlane + rowBase;
             float* weightRow = weightPlane + rowBase;
 
             for (const Run& run : runs) {
-                const int idx = tyBase + run.tx;
-                // Doubling a proxy offset always yields an even shift, keeping
-                // every sample on its own colour plane.
-                const int shiftX = dx[idx] * 2;
-                const int sy = y + dy[idx] * 2;
-                if (sy < 0 || sy >= h) continue;
+                // Built in the reference implementation's order -- (tyA, txA),
+                // (tyA, txB), (tyB, txA), (tyB, txB) -- and a tap whose source
+                // row falls outside the frame is dropped here rather than
+                // tested for twelve million times. Parity is pixel for pixel,
+                // so the order the four are summed in is part of the contract.
+                Tap taps[4];
+                int n = 0;
+                for (int j = 0; j < 2; ++j) {
+                    const int ty = (j == 0) ? tyA : tyB;
+                    const float wy = (j == 0) ? wyA : wyB;
+                    for (int i = 0; i < 2; ++i) {
+                        const int idx = ty * tilesX + ((i == 0) ? run.txA : run.txB);
+                        const int sy = y + dy[idx] * 2;
+                        if (sy < 0 || sy >= h) continue;
+                        // Doubling a proxy offset always yields an even shift,
+                        // keeping every sample on its own colour plane. It is
+                        // the four samples that are blended, never the four
+                        // displacements: an interpolated displacement would be
+                        // fractional, and half of those are odd.
+                        taps[n++] = Tap{
+                            base + static_cast<size_t>(sy) * rowStride,
+                            dx[idx] * 2, wy, i == 1,
+                        };
+                    }
+                }
+                if (n == 0) continue;
 
-                const int xEnd = std::min(run.x1, w - shiftX);
-                const int xStart = std::max(run.x0, -shiftX);
-                if (xStart >= xEnd) continue;
+                // Where every tap is inside the frame the bounds test is dead
+                // weight, so it is lifted out into a span rather than paid per
+                // sample. Displacements are a few pixels, so that span is the
+                // whole run everywhere except against the left and right edges.
+                int core0 = run.x0;
+                int core1 = run.x1;
+                for (int t = 0; t < n; ++t) {
+                    core0 = std::max(core0, -taps[t].shiftX);
+                    core1 = std::min(core1, w - taps[t].shiftX);
+                }
+                core0 = std::clamp(core0, run.x0, run.x1);
+                core1 = std::clamp(core1, core0, run.x1);
 
-                const uint8_t* src = base + static_cast<size_t>(sy) * rowStride +
-                                     static_cast<size_t>(xStart + shiftX) * 2;
-                int x = xStart;
+                auto scalarSpan = [&](int xs, int xe) {
+                    for (int x = xs; x < xe; ++x) {
+                        const uint16_t refRaw = refRow[x];
+                        const float refV = static_cast<float>(refRaw);
+                        // Values above white clamp to the top bin, which is
+                        // what binOf did with them, so the last entry answers
+                        // for them.
+                        const float n2 = noise[static_cast<size_t>(std::min<int>(refRaw, white))];
+                        const float far = farXTable[x];
+                        float acc = 0.0f;
+                        float accW = 0.0f;
+                        for (int t = 0; t < n; ++t) {
+                            const int sx = x + taps[t].shiftX;
+                            if (sx < 0 || sx >= w) continue;
+                            // Assembled from two bytes rather than loaded as a
+                            // half word, which is what keeps this loop
+                            // endian-neutral where the vector one is not.
+                            const uint8_t* p = taps[t].row + static_cast<size_t>(sx) * 2;
+                            const float altV = static_cast<float>(
+                                static_cast<uint16_t>(p[0] | (p[1] << 8)));
+                            const float d = altV - refV;
+                            const float d2 = d * d;
+                            const float wgt = (d2 <= n2) ? 1.0f : n2 / d2;
+                            const float win =
+                                taps[t].wy * (taps[t].farColumn ? far : 1.0f - far);
+                            const float ww = wgt * win;
+                            acc += altV * ww;
+                            accW += ww;
+                        }
+                        sumRow[x] += acc;
+                        weightRow[x] += accW;
+                        localContrib += accW;
+                    }
+                };
 
+                int cursor = run.x0;
+                if (core0 > cursor) {
+                    scalarSpan(cursor, core0);
+                    cursor = core0;
+                }
 #if defined(__ARM_NEON)
-                // Four pixels at a time.
-                //
-                // The compiler cannot do this one itself, and the reason is the
-                // noise lookup: `noise[refRaw]` is a load whose address depends
-                // on the data, and NEON has no gather. So that one term stays
-                // scalar -- four loads straight into lanes, no round trip
-                // through the stack -- and everything either side of it goes
-                // four wide.
-                //
-                // The arithmetic is the same arithmetic, and it is written
-                // the same way -- a multiply and then an add, which under
-                // -ffast-math the compiler contracts into a fused multiply-add
-                // here exactly as it already did in the scalar loop below. That
-                // is not a liberty this change took: both paths emit `fmla`,
-                // and what settles it either way is the parity test, which
-                // holds both against the Kotlin reference pixel for pixel.
-                //
-                // This path reads the source with a 16-bit vector load, where
-                // the scalar one assembles each sample from two bytes and is
-                // therefore endian-neutral. Every ABI this builds for is
-                // little-endian, and the scalar loop below is what would run
-                // anywhere else.
-                for (; x + 4 <= xEnd; x += 4, src += 8) {
-                    const uint16x4_t refRaw4 = vld1_u16(refRow + x);
-                    const float32x4_t refV =
-                        vcvtq_f32_u32(vmovl_u16(refRaw4));
-                    const float32x4_t altV = vcvtq_f32_u32(vmovl_u16(
-                        vld1_u16(reinterpret_cast<const uint16_t*>(src))));
+                if (n == 4) {
+                    // Four pixels at a time, four taps each.
+                    //
+                    // The compiler cannot do this one itself, and the reason is
+                    // the noise lookup: `noise[refRaw]` is a load whose address
+                    // depends on the data, and NEON has no gather. So that one
+                    // term stays scalar -- four loads straight into lanes, no
+                    // round trip through the stack -- and everything either
+                    // side of it goes four wide.
+                    //
+                    // The four taps are summed into registers and written back
+                    // once. Writing each tap straight to memory would read and
+                    // rewrite the same two 50 MB planes four times over, which
+                    // on a pass this wide is the whole cost.
+                    //
+                    // The arithmetic is the same arithmetic, and it is written
+                    // the same way -- a multiply and then an add, which under
+                    // -ffast-math the compiler contracts into a fused
+                    // multiply-add here exactly as it already did in the scalar
+                    // loop above. What settles it either way is the parity
+                    // test, which holds both against the Kotlin reference pixel
+                    // for pixel.
+                    //
+                    // This path reads the source with a 16-bit vector load,
+                    // where the scalar one assembles each sample from two bytes
+                    // and is therefore endian-neutral. Every ABI this builds
+                    // for is little-endian, and the scalar loop above is what
+                    // would run anywhere else.
+                    const float32x4_t one = vdupq_n_f32(1.0f);
+                    for (; cursor + 4 <= core1; cursor += 4) {
+                        const int x = cursor;
+                        const float32x4_t refV =
+                            vcvtq_f32_u32(vmovl_u16(vld1_u16(refRow + x)));
 
-                    const float32x4_t d = vsubq_f32(altV, refV);
-                    const float32x4_t d2 = vmulq_f32(d, d);
+                        float32x4_t n2 = vdupq_n_f32(0.0f);
+                        n2 = vld1q_lane_f32(
+                            noise + std::min<int>(refRow[x + 0], white), n2, 0);
+                        n2 = vld1q_lane_f32(
+                            noise + std::min<int>(refRow[x + 1], white), n2, 1);
+                        n2 = vld1q_lane_f32(
+                            noise + std::min<int>(refRow[x + 2], white), n2, 2);
+                        n2 = vld1q_lane_f32(
+                            noise + std::min<int>(refRow[x + 3], white), n2, 3);
 
-                    // Values above white clamp to the top bin, which is what
-                    // binOf did with them, so the last entry answers for them.
-                    float32x4_t n2 = vdupq_n_f32(0.0f);
-                    n2 = vld1q_lane_f32(
-                        noise + std::min<int>(refRow[x + 0], white), n2, 0);
-                    n2 = vld1q_lane_f32(
-                        noise + std::min<int>(refRow[x + 1], white), n2, 1);
-                    n2 = vld1q_lane_f32(
-                        noise + std::min<int>(refRow[x + 2], white), n2, 2);
-                    n2 = vld1q_lane_f32(
-                        noise + std::min<int>(refRow[x + 3], white), n2, 3);
+                        const float32x4_t far = vld1q_f32(farXTable + x);
+                        const float32x4_t near = vsubq_f32(one, far);
 
-                    // Both arms are evaluated and one is selected. The divide
-                    // is the arm that is almost never taken -- a frame agrees
-                    // with its reference to within tolerance nearly everywhere
-                    // -- and a branch that mispredicts a few percent of twelve
-                    // million times costs more than a divide that is thrown
-                    // away. Where d2 is zero the divide yields an infinity and
-                    // the select discards it.
-                    const float32x4_t wgt = vbslq_f32(
-                        vcleq_f32(d2, n2), vdupq_n_f32(1.0f), vdivq_f32(n2, d2));
+                        float32x4_t acc = vdupq_n_f32(0.0f);
+                        float32x4_t accW = vdupq_n_f32(0.0f);
+                        for (int t = 0; t < 4; ++t) {
+                            const auto* src = reinterpret_cast<const uint16_t*>(
+                                taps[t].row +
+                                static_cast<size_t>(x + taps[t].shiftX) * 2);
+                            const float32x4_t altV =
+                                vcvtq_f32_u32(vmovl_u16(vld1_u16(src)));
+                            const float32x4_t d = vsubq_f32(altV, refV);
+                            const float32x4_t d2 = vmulq_f32(d, d);
+                            // Both arms are evaluated and one is selected. The
+                            // divide is the arm that is almost never taken -- a
+                            // frame agrees with its reference to within
+                            // tolerance nearly everywhere -- and a branch that
+                            // mispredicts a few percent of twelve million times
+                            // costs more than a divide that is thrown away.
+                            // Where d2 is zero the divide yields an infinity and
+                            // the select discards it.
+                            const float32x4_t wgt = vbslq_f32(
+                                vcleq_f32(d2, n2), one, vdivq_f32(n2, d2));
+                            const float32x4_t ww = vmulq_f32(
+                                wgt, vmulq_n_f32(taps[t].farColumn ? far : near,
+                                                 taps[t].wy));
+                            acc = vmlaq_f32(acc, altV, ww);
+                            accW = vaddq_f32(accW, ww);
+                        }
 
-                    vst1q_f32(sumRow + x, vaddq_f32(vld1q_f32(sumRow + x),
-                                                    vmulq_f32(altV, wgt)));
-                    vst1q_f32(weightRow + x,
-                              vaddq_f32(vld1q_f32(weightRow + x), wgt));
+                        vst1q_f32(sumRow + x, vaddq_f32(vld1q_f32(sumRow + x), acc));
+                        vst1q_f32(weightRow + x,
+                                  vaddq_f32(vld1q_f32(weightRow + x), accW));
 
-                    // Widened to double before accumulating. Twelve million
-                    // weights summed in single precision would stop moving the
-                    // total long before the end of the image.
-                    contribLo = vaddq_f64(contribLo, vcvt_f64_f32(vget_low_f32(wgt)));
-                    contribHi = vaddq_f64(contribHi, vcvt_high_f64_f32(wgt));
+                        // Widened to double before accumulating. Twelve million
+                        // weights summed in single precision would stop moving
+                        // the total long before the end of the image.
+                        contribLo = vaddq_f64(contribLo, vcvt_f64_f32(vget_low_f32(accW)));
+                        contribHi = vaddq_f64(contribHi, vcvt_high_f64_f32(accW));
+                    }
                 }
 #endif
-
-                for (; x < xEnd; ++x, src += 2) {
-                    const uint16_t refRaw = refRow[x];
-                    const float refV = static_cast<float>(refRaw);
-                    const float altV = static_cast<float>(
-                        static_cast<uint16_t>(src[0] | (src[1] << 8)));
-                    const float d = altV - refV;
-                    const float d2 = d * d;
-                    // Values above white clamp to the top bin, which is what
-                    // binOf did with them, so the last entry answers for them.
-                    const float n2 = noise[static_cast<size_t>(std::min<int>(refRaw, white))];
-                    const float wgt = (d2 <= n2) ? 1.0f : n2 / d2;
-
-                    sumRow[x] += altV * wgt;
-                    weightRow[x] += wgt;
-                    localContrib += wgt;
-                }
-                localCount += xEnd - xStart;
+                if (run.x1 > cursor) scalarSpan(cursor, run.x1);
             }
         }
 #if defined(__ARM_NEON)
@@ -482,11 +595,16 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
 #endif
         std::lock_guard<std::mutex> guard(totals);
         totalContrib += localContrib;
-        totalCount += localCount;
     });
 
     acc->contributionSum += totalContrib;
-    acc->contributionCount += totalCount;
+    // Every sample counts, including one whose four sources all fell outside
+    // the frame. The count used to be of the samples that had a source, which
+    // made the denominator depend on which of four taps landed where -- a
+    // figure the reference implementation would have had to reproduce exactly
+    // to stay in parity, for a readout quoted as a whole percent. A sample with
+    // no source kept nothing, and now says so.
+    acc->contributionCount += static_cast<long long>(w) * h;
     acc->merged++;
 }
 
