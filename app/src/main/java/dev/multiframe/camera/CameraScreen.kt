@@ -66,6 +66,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInParent
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -233,6 +237,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // Tap to focus and pinch to zoom. Table stakes for a camera: without them
     // the app cannot be pointed at a subject that is not in the middle.
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
+    // Where the picture actually is, which is no longer the whole window.
+    // The preview is letterboxed to the sensor's aspect, so a tap has to be
+    // normalised against this rectangle rather than against the screen.
+    var previewBounds by remember { mutableStateOf<Rect?>(null) }
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var focusAtMillis by remember { mutableLongStateOf(0L) }
     var digitalZoom by remember { mutableFloatStateOf(1f) }
@@ -938,8 +946,23 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 detectTapGestures { offset ->
                     val c = caps ?: return@detectTapGestures
                     if (viewSize.width == 0 || viewSize.height == 0) return@detectTapGestures
-                    val nx = offset.x / viewSize.width
-                    val ny = offset.y / viewSize.height
+                    // Against the image, not the window. With the viewfinder
+                    // letterboxed these differ by the size of the bars, and
+                    // normalising against the window would put the metering
+                    // point steadily further from the finger the nearer the
+                    // top or bottom of the frame it went.
+                    val bounds = previewBounds
+                    val nx: Float
+                    val ny: Float
+                    if (bounds != null && bounds.width > 0f && bounds.height > 0f) {
+                        // A tap on a letterbox bar is not a tap on anything.
+                        if (!bounds.contains(offset)) return@detectTapGestures
+                        nx = (offset.x - bounds.left) / bounds.width
+                        ny = (offset.y - bounds.top) / bounds.height
+                    } else {
+                        nx = offset.x / viewSize.width
+                        ny = offset.y / viewSize.height
+                    }
                     focusPoint = offset
                     focusAtMillis = System.currentTimeMillis()
 
@@ -996,24 +1019,52 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     ZslRawStream.previewSizeFor(ch, d.config)
                 } else null
             }
-            AndroidExternalSurface(
-                modifier = Modifier.fillMaxSize(),
-                surfaceSize = previewSize
-                    ?.let { IntSize(it.width, it.height) } ?: IntSize.Zero,
-                zOrder = AndroidExternalSurfaceZOrder.Behind,
+            // `surfaceSize` sets the buffer's dimensions; it does not size the
+            // view. Left to fill the window, a 4:3 stream was being stretched
+            // to the phone's ~19.5:9 -- faces widened, and the frame shown was
+            // not the frame captured. The view is constrained to the stream's
+            // own shape instead, and the bars are the app's ground.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .then(
+                        previewSize?.let { Modifier.fillMaxWidth().aspectRatio(it.portraitAspect()) }
+                            ?: Modifier.fillMaxSize()
+                    )
+                    .onGloballyPositioned { previewBounds = it.boundsInParent() },
             ) {
-                onSurface { surface, _, _ ->
-                    zslSurface = surface
-                    surface.onDestroyed { zslSurface = null }
+                AndroidExternalSurface(
+                    modifier = Modifier.fillMaxSize(),
+                    surfaceSize = previewSize
+                        ?.let { IntSize(it.width, it.height) } ?: IntSize.Zero,
+                    zOrder = AndroidExternalSurfaceZOrder.Behind,
+                ) {
+                    onSurface { surface, _, _ ->
+                        zslSurface = surface
+                        surface.onDestroyed { zslSurface = null }
+                    }
                 }
             }
         } else {
             Box(Modifier.fillMaxSize().background(Color.Black))
             surfaceRequest?.let { request ->
-                CameraXViewfinder(
-                    surfaceRequest = request,
-                    modifier = Modifier.fillMaxSize(),
-                )
+                // CameraXViewfinder does not stretch -- it centre-crops to fill
+                // whatever it is given, which is its own kind of wrong here: the
+                // sides of a 4:3 frame were simply not on screen. Giving it a
+                // box of the stream's own shape means its crop has nothing left
+                // to take.
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .fillMaxWidth()
+                        .aspectRatio(request.resolution.portraitAspect())
+                        .onGloballyPositioned { previewBounds = it.boundsInParent() },
+                ) {
+                    CameraXViewfinder(
+                        surfaceRequest = request,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
         }
 
@@ -1788,6 +1839,17 @@ private fun LastShotThumb(
         )
     }
 }
+
+/**
+ * The shape this stream makes on a portrait screen.
+ *
+ * Camera streams are quoted landscape -- 1440x1080 for a 4:3 sensor -- and the
+ * display rotation is applied downstream of the buffer, so the ratio a portrait
+ * viewfinder needs is the short side over the long one whichever way round the
+ * numbers arrive.
+ */
+private fun Size.portraitAspect(): Float =
+    minOf(width, height).toFloat() / maxOf(width, height).toFloat()
 
 /**
  * One lens in the strip.
