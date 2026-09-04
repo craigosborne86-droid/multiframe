@@ -26,7 +26,7 @@ separate sessions; they are three different parts of the codebase.
   normalised against the window and the window is no longer the image.
 
 - **Merged images show mosaic or patchwork artefacts. DONE in the code**,
-  commit below, **and not yet confirmed on a photograph.** The owner's read was
+  commit `640a4c8`, **and not yet confirmed on a photograph.** The owner's read was
   exactly right: the merge had hard tile boundaries, no overlap and no blend.
   Tiles now overlap by half and blend with the modified raised cosine of
   Hasinoff et al. 2016 -- four taps a sample, the samples blended and never the
