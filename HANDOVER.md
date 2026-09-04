@@ -6,40 +6,54 @@ holds the reasoning behind everything below.
 
 ## Start here
 
-The tree is green, the last agreed task is done and measured, and the interface
-debt this file carried is discharged -- all five changes have now been seen on a
-phone, and what that found is in *Where things stand*. One small thing is left
-over from it, named below. Past that, the next move is a choice rather than a
-continuation. In order:
+The tree is green. **The Pixel 11 Pro has arrived and been measured**, the
+interface debt is discharged, and the readout that was blank in ZSL mode is
+fixed. What replaces all of that is a brief of three real-device faults, one of
+which is done. In order:
 
-### 1. The phone, when it arrives
+### 1. Three faults from real-device testing, and the bar for them
 
-A Pixel 11 Pro is on order and it reorders everything below, because **any code
-measured on komodo has to be measured again anyway.** Do not start a performance
-session on the old phone. *When the phone changes* at the end of this file has
-the first-day checklist and what does and does not carry over;
-[BASELINE.md](BASELINE.md) is what to compare against, and it is ratios you
-compare, not milliseconds.
+The owner tested on the Pixel 9 Pro and found three things. **The bar is beating
+the stock camera app** -- the same objective Project Indigo has, per CLAUDE.md --
+so judge a fix against that and not against whether it compiles. Treat them as
+separate sessions; they are three different parts of the codebase.
 
-### 2. The readout is blank in the mode the app is for
+- **Viewfinder aspect ratio. DONE**, commit `5aae054`. Two faults with one
+  appearance: `AndroidExternalSurface`'s `surfaceSize` sets the buffer and not
+  the view, so the raw ring stretched 4:3 to the window; and `CameraXViewfinder`
+  centre-crops, so the fallback path cut the sides off instead. Both now get a
+  box of the stream's own shape. Tap to focus was remapped with it, since it had
+  normalised against the window and the window is no longer the image.
 
-Small, known, and the only thing the interface pass left behind.
+- **Merged images show mosaic or patchwork artefacts. NEXT.** Visible tiles
+  rather than one continuous image. The owner's read, which is worth confirming
+  before changing any maths: the merge has hard tile boundaries -- either no
+  overlap, or no blend across it, or neighbouring tiles taking different
+  alignment decisions with nothing smoothing between them. **Read the fusion
+  engine's merge step first and establish what it actually does.** HDR+ overlaps
+  tiles by half their size in each dimension and blends with a raised cosine
+  window precisely to avoid this. Confirm against Hasinoff et al. 2016 and at
+  least one independent reproduction -- <https://www.timothybrooks.com/tech/hdr-plus/>
+  -- before touching the merge. Verify with a burst of foliage, brick or water,
+  where seams show worst.
 
-The live `ISO · shutter · EV` readout is fed from the CameraX preview's
-repeating capture request. Engaging the raw ring unbinds CameraX and runs a
-Camera2 session instead, so **the readout disappears in ZSL mode** -- which is
-the app's headline mode, and the one it now opens in. The histogram does keep
-working there, because it reads the ring directly.
+- **Adapt the frame count to motion, with a manual override. AFTER 2.** Fewer
+  frames when there is motion, more on a tripod. **Two signals, not one**, and
+  the reason is the whole design: accelerometer and gyroscope say the *device* is
+  still and cannot see a person moving in front of a tripod. So device stability
+  decides the capture budget, and scene motion during merge -- the per-tile
+  offsets and match confidence the aligner already computes -- decides how many
+  captured frames are merged in each region. That second signal is also the long
+  term fix for the artefact above: a tile with poor confidence should fall back
+  gracefully rather than blend in bad data. Check current guidance on
+  `SensorManager` before writing any of it, specifically whether
+  `TYPE_ACCELEROMETER` or `TYPE_LINEAR_ACCELERATION` is right, since raw
+  accelerometer output carries gravity and needs filtering, alongside
+  `TYPE_GYROSCOPE`. Big enough to want plan mode, or an interview on the
+  override UI and the thresholds, before code. The override control gets the same
+  screenshot-and-check treatment as any other UI.
 
-The numbers are already in the ring. `ZslRawStream` keeps a ring of
-`TotalCaptureResult` and has a `findResult` lookup for it; what is missing is an
-accessor and a wire-up, so the readout takes whichever source is live. That is
-camera plumbing rather than layout, which is why it was left rather than done in
-a session about how things look.
-
-Needs no new phone.
-
-### 3. Two things that need you rather than a session
+### 2. Two things that need you rather than a session
 
 Both have been waiting longest and both still outrank the code:
 
@@ -52,7 +66,7 @@ Both have been waiting longest and both still outrank the code:
   good. Twenty frames in mixed light, looked at properly, would tell more than
   any test here. Worth doing on the new sensor rather than this one.
 
-### 4. Then one decision, and it is between two things, not a queue
+### 3. Then one decision, and it is between two things, not a queue
 
 The develop is the last large item in a capture, and there are two ways left to
 attack it. **They are alternatives.** If the develop moves to the GPU, the row
@@ -118,7 +132,45 @@ below. Worth knowing when reading anything in this file written earlier, because
 until 2026-09-03 every reading of "the app opens with ZSL" was true of the
 setting and false of the app.
 
+**The test device is now the Pixel 11 Pro (`grizzly`), Tensor G6.** What it has
+established, all of it on 4 September 2026:
+
+- **Zero shutter lag survives the move.** `24mm ZSL 4080x3064 30.0fps
+  stall=0.0ms, ring 32`. That was the one real functional risk of changing phone
+  and it is answered.
+- **It has three rear lenses, not komodo's five** -- 12mm/0.5x, 24mm/1x,
+  105mm/4.4x. The strip builds itself from the catalogue so it adapts, but
+  anything written against komodo's five wants re-reading.
+- **The GPU is a different family**: Imagination PowerVR C-Series at Vulkan 1.1,
+  where komodo had Mali. Every crossing route got *dearer*, not cheaper, which
+  is the opposite of why the measurement was deferred to this phone. See
+  [BASELINE.md](BASELINE.md).
+- **`hoistingTheGridOutOfTheLoop` fails here and should not be silenced.** It
+  needs 36 of 40 rounds and gives 33-37, warm and cold alike, so it is not
+  thermal. The pass is not slower -- 1.77x per round, better than komodo ever
+  read -- it now takes 5-8ms and is too fast to time. Give it more work per
+  round, or swap the round count for a paired median, and say why.
+- **No complete suite on this phone yet.** Wireless adb dropped at 87 of 128.
+  The link has dropped repeatedly after idle; use a cable, or keep the screen
+  awake, for anything that runs long. Komodo is no longer reachable.
+- Grizzly's own develop cost is still unmeasured, so the crossing's share of a
+  develop in BASELINE.md is carried from komodo's.
+
 Recent work, newest first:
+
+- **the viewfinder showed neither the right shape nor the whole frame.**
+  `AndroidExternalSurface`'s `surfaceSize` sets the buffer and not the view, so
+  the raw ring stretched a 4:3 stream to the window; `CameraXViewfinder`
+  centre-crops, so the other path cut the sides off undistorted. SurfaceFlinger
+  now puts the layer at 1280x1707 with 575px bars, 3:4 to the pixel, at equal x
+  and y scale -- which is the evidence, rather than a screenshot looking right.
+  Tap to focus normalises against the image now instead of the window.
+
+- **the exposure readout reads whichever path is driving the sensor.**
+  `ZslRawStream.latestExposure()` reads the result ring the DNG writer already
+  keeps, so the numbers survive the handover to the raw ring. Proved by a cold
+  start into ZSL, where CameraX never delivers a frame, and by forcing manual
+  exposure and watching it move to ISO 200 and 1/125.
 
 - **a cold start with the raw ring enabled was a deadlock, and would have
   shipped that way.** Discovery -- capabilities, lens catalogue, camera id, the
