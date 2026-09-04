@@ -229,3 +229,118 @@ the code, check `/proc/meminfo` and the battery — and if the phone is warm and
 charging, **one re-run is not a diagnosis.** Alternate the versions and count,
 or wait for a rested phone, which is what this file has been saying about every
 other figure in it.
+
+# What grizzly costs
+
+The Pixel 11 Pro's first reading, taken 4 September 2026. **This is a different
+phone, not a third run of komodo's** — the two runs above are one device in two
+states, and their whole argument is that absolutes moved 2x while ratios held.
+Putting grizzly's milliseconds beside theirs would invite exactly the comparison
+this file forbids. Compare the ratios below against komodo's ratios; ignore the
+milliseconds except where they are the finding, which twice they are.
+
+    Device: Pixel 11 Pro (grizzly), Tensor G6
+    Build:  google/grizzly/grizzly:17/CD1A.260714.001.A9/15938155:user/release-keys
+    Screen: 1280x2856 at 480dpi -- 426.7dp wide, against komodo's 448dp
+    State:  35.5 C, unplugged and discharging, 82%, 2.7 GB available
+    Cooled from 38.0 C over six minutes off charge before the run
+
+## The A/As, which is why this reading is the one that counts
+
+Three earlier attempts on this phone were taken warm and on charge, and their
+A/As read 0.95x, 0.93x and 0.94x against komodo's 1.00-1.06x. Nothing measured
+in that state is in this file. Off charge and cooled:
+
+                        komodo run B        grizzly
+    shading A/A         20 of 40, 1.02x     22 of 40, 1.02x
+    prepass A/A         20 of 40, 1.00x     22 of 40, 1.07x
+    tone A/A            23 of 40, 1.06x     18 of 40, 0.98x
+
+That is the instrument agreeing with itself across two phones, and it is what
+earns the right to read anything below.
+
+## The paired ratios, against komodo's
+
+                        komodo              grizzly
+    the prepass fold    1.42x / 1.52x       **1.63x, 40 of 40**
+    the shading hoist   1.52x / 1.57x       1.30x, 33 of 40  (see below)
+
+**The fold is worth more on this phone, and it is the cleanest number here.**
+40 of 40 rounds with a worst round of 1.03x -- it never once lost. Komodo's best
+was 1.52x at 37 of 40. The fold's prize is DRAM traffic, so a memory system that
+got faster making it win *more* is worth someone thinking about rather than
+filing.
+
+## The hoist has outrun its own test
+
+    per-pixel   median 37ms, range 11-88ms
+    hoisted     median 28ms, range  5-78ms
+    hoisted won 33 of 40; per-round median 1.77x, worst 0.56x
+    1.30x by paired median
+
+The two summaries disagree -- 1.77x per round against 1.30x paired -- and the
+raw rounds say why. The first fourteen rounds run at 11-17ms against 5-8ms, and
+then everything jumps to 30-88ms. A regime change partway through, and in the
+fast regime **the hoisted pass takes five to eight milliseconds.** At that size
+the measurement is scheduling noise with a signal somewhere inside it.
+
+So `hoistingTheGridOutOfTheLoop` now fails its round-count assertion on this
+phone: it needs 36 of 40 and returned 33, 34, 35 and 37 across four runs, warm
+and cold alike. **Cooling did not fix it, which is what rules out thermal state
+as the cause.** The pass is not slower here -- per round it is 1.77x, better than
+komodo ever read. It has become too fast to time.
+
+The threshold is calibrated on komodo, where this pass took tens of
+milliseconds. Do not relax it to get green; that hides the finding. Either give
+the hoist more work per round so it clears the timer's noise floor, or drop the
+round-count assertion for a paired-median one and say why.
+
+## The tone ablation, at 82% of the frame above the knee
+
+                                            komodo run A      grizzly
+    everything after the demosaic           2.25x  16/16      1.65x  15/16
+    renderLinear                            1.81x  16/16      1.55x  15/16
+      its highlight desaturation            1.15x  14/16      1.34x  11/16
+      its highlight roll-off                1.12x  13/16      1.14x  14/16
+        the roll-off's lookup alone         1.10x  12/16      1.15x  11/16
+    the whole display chain                 1.13x  11/16      0.99x   7/16
+    the colour matrix                       1.05x  11/16      1.02x  10/16
+    the display table                       1.02x   9/16      1.06x   9/16
+
+And the three that are negative on purpose:
+
+    the computed roll-off, against the table    0.71x  1/16    0.95x  6/16
+    the scalar demosaic, against the vector     0.67x  0/16    0.84x  2/16
+    the per-pixel demosaic, against both        0.61x  0/16    0.80x  2/16
+
+**The vectorised demosaic wins by much less here.** 0.84x against komodo's
+0.67x, and it read 0.85x on the warm run too -- the one figure that reproduced
+across thermal states, which is what makes it a claim about the G6 rather than
+about a hot phone. The scalar version now takes two rounds in sixteen; on komodo
+it never took one.
+
+**The display chain has fallen below the floor.** 0.99x at 7 of 16 is a coin
+flip: on this phone it costs nothing measurable. Komodo read 1.13x at 11 of 16,
+which was already marginal.
+
+Scene dependence holds its shape and loses magnitude:
+
+                                komodo              grizzly
+    at 82% above the knee       1.87x, table 1.20x  1.65x, table 1.10x (12/16)
+    at 1% above the knee        1.20x, table 0.92x  1.16x, table 1.03x (10/16)
+
+The tabulated roll-off still pays at 82%, which corrects a reading taken warm
+earlier the same day that had it at 0.97x and briefly looked like a finding.
+
+## What is not here
+
+The full suite did not complete. Wireless adb dropped partway and it stopped at
+87 of 128 -- no correctness statement for this phone yet, and the two failures
+it did record (the hoist again, and `whatTheRollOffCostsDependsOnHowBrightTheSceneIs`,
+which passed standalone) are from a truncated run. The link dropped three times
+today across two phones, always after idle; keep the screen awake or use a cable
+for a run this long.
+
+Also missing: the ZSL decision on this sensor, the develop cost, and
+`GpuCrossingDeviceTest` -- which is the measurement the handover says decides
+between the row cache and a GPU develop, and the reason this phone matters.
