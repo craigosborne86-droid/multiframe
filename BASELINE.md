@@ -332,6 +332,44 @@ Scene dependence holds its shape and loses magnitude:
 The tabulated roll-off still pays at 82%, which corrects a reading taken warm
 earlier the same day that had it at 0.97x and briefly looked like a finding.
 
+## What it costs to reach the GPU here, on a different GPU
+
+    Probe: PowerVR C-Series CXTP-48-1536 MC1, Vulkan 1.1, setup 24ms
+    State: 33.5 C, unplugged and discharging, 77% -- komodo's run A was 33.1 C,
+           so for once these two are directly comparable conditions.
+    A/A on IMPORTED: 17 of 40, medians 13ms against 13ms. Sound.
+
+**The GPU is not the same family.** Komodo's was Mali; this is Imagination
+PowerVR, and it reports Vulkan 1.1 where a develop might want later features.
+Check that before designing against it.
+
+    route       komodo A   komodo B   grizzly     zero wrong pixels on all
+    staging       37ms       77ms     102-127ms
+    shared        36ms       50ms      75-84ms
+    cached        10ms       20ms      16-22ms
+    imported       7ms       16ms      10-11ms
+
+**Every route is more expensive here, and that contradicts the reason this
+measurement was deferred to this phone.** The argument for re-pricing the
+crossing on new hardware was that a reported doubling of memory bandwidth acts
+on the download, which is the crossing's whole cost. The download did not get
+cheaper. On the cheapest route it went from 7ms to 10-11ms against komodo at a
+comparable temperature, and the uncached shared route roughly doubled.
+
+The ordering survives -- imported beats cached beats shared beats staging on
+both phones -- but the spread widened sharply: importing is **9.05x** of the
+uncached shared route here, 40 of 40, against komodo's 4.01x and 3.77x. On this
+GPU the choice of route matters more than twice as much as it did.
+
+**The prior question is still answered the same way, though.** 10-11ms of
+crossing against a develop in the low hundreds of milliseconds is still a few
+percent, so reaching the GPU is not what would make a GPU develop lose here
+either. What has changed is the margin: the floor a real kernel gets added to is
+half again what it was, on a GPU nobody has written a line for.
+
+Grizzly's own develop cost is still unmeasured, so the percentage above is
+carried from komodo's and is the next thing to replace.
+
 ## What is not here
 
 The full suite did not complete. Wireless adb dropped partway and it stopped at
