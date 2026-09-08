@@ -84,13 +84,14 @@ class BayerAccumulator(
     }
 
     /** Aligns [frame] onto the reference and merges it. */
-    fun add(frame: BayerFrame) {
+    fun add(frame: BayerFrame, gainScale: Float = 1f) {
         val pyramid = refPyramid ?: error("setReference first")
         require(frame.width == width && frame.height == height)
 
         add(
             frame,
-            Aligner.align(pyramid, Aligner.buildPyramid(lumaProxy(frame)), tilesX, tilesY),
+            Aligner.align(pyramid, Aligner.buildPyramid(lumaProxy(frame, gainScale)), tilesX, tilesY),
+            gainScale,
         )
     }
 
@@ -133,14 +134,15 @@ class BayerAccumulator(
      * weight and the pixel falls back on the reference. The failure is less
      * denoising in that band, not a ghost -- and never a seam.
      */
-    fun add(frame: BayerFrame, field: AlignmentField) {
+    fun add(frame: BayerFrame, field: AlignmentField, gainScale: Float = 1f) {
         val ref = reference ?: error("setReference first")
         require(frame.width == width && frame.height == height)
         require(field.tilesX == tilesX && field.tilesY == tilesY) {
             "field is ${field.tilesX}x${field.tilesY}, accumulator is ${tilesX}x$tilesY"
         }
 
-        if (noiseVar == null) noiseVar = estimateNoise(ref, frame, field)
+        val invGain = 1f / gainScale
+        if (noiseVar == null) noiseVar = estimateNoise(ref, frame, field, invGain)
         val nv = noiseVar!!
 
         var localContribution = 0.0
@@ -186,7 +188,9 @@ class BayerAccumulator(
                         val sy = y + field.dy[idx] * 2
                         if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue
 
-                        val altV = (frame.data[sy * width + sx].toInt() and 0xFFFF).toFloat()
+                        val rawAlt = (frame.data[sy * width + sx].toInt() and 0xFFFF).toFloat()
+                        if (invGain < 1f && rawAlt >= profile.whiteLevel.toFloat()) continue
+                        val altV = rawAlt * invGain
                         val d = altV - refV
                         val d2 = d * d
                         val w = if (d2 <= n2) 1f else n2 / d2
@@ -251,7 +255,7 @@ class BayerAccumulator(
      * red, one blue and two green samples whatever the pattern order, so their
      * mean is a valid luma proxy without needing to know the pattern.
      */
-    private fun lumaProxy(frame: BayerFrame): Plane {
+    private fun lumaProxy(frame: BayerFrame, gainScale: Float = 1f): Plane {
         val w = width / 2
         val h = height / 2
         val out = ByteArray(w * h)
@@ -266,7 +270,7 @@ class BayerAccumulator(
                     (frame.data[r1 + c].toInt() and 0xFFFF) +
                     (frame.data[r1 + c + 1].toInt() and 0xFFFF)
                 val black = profile.blackAt(c, y * 2) * 4
-                val norm = ((s - black) / (range * 4f)).coerceIn(0f, 1f)
+                val norm = ((s - black) / (range * 4f * gainScale)).coerceIn(0f, 1f)
                 out[y * w + x] = (norm * 255f).toInt().toByte()
             }
         }
@@ -282,6 +286,7 @@ class BayerAccumulator(
         ref: BayerFrame,
         alt: BayerFrame,
         field: AlignmentField,
+        invGain: Float = 1f,
     ): FloatArray {
         val samples = Array(NOISE_BINS) { ArrayList<Float>(256) }
 
@@ -298,8 +303,10 @@ class BayerAccumulator(
                 val sx = x + field.dx[idx] * 2
                 val sy = y + field.dy[idx] * 2
                 if (sx in 0 until width && sy in 0 until height) {
+                    val rawAlt = alt.data[sy * width + sx].toInt() and 0xFFFF
+                    if (rawAlt >= profile.whiteLevel) { x += SAMPLE_STRIDE; continue }
                     val refV = (ref.data[y * width + x].toInt() and 0xFFFF).toFloat()
-                    val altV = (alt.data[sy * width + sx].toInt() and 0xFFFF).toFloat()
+                    val altV = rawAlt.toFloat() * invGain
                     val b = binOf(refV)
                     if (samples[b].size < 3000) samples[b].add(abs(altV - refV))
                 }

@@ -243,4 +243,119 @@ class BayerMergerTest {
         println("linearity: clean mean=$cm merged mean=$mm")
         assertThat(abs(mm - cm)).isLessThan(3.0)
     }
+
+    // --- Dual conversion gain (gainScale) ---
+
+    @Test
+    fun `gainScale 1 is identical to the existing path`() {
+        val clean = TestBayer.scene(w, h)
+        val frames = (0 until 4).map { TestBayer.addNoise(clean, 10f, seed = 300 + it) }
+
+        val accOld = BayerAccumulator(w, h, TestBayer.PROFILE)
+        accOld.setReference(frames.first())
+        frames.drop(1).forEach { accOld.add(it) }
+        val (oldResult, _) = accOld.finish()
+
+        val accNew = BayerAccumulator(w, h, TestBayer.PROFILE)
+        accNew.setReference(frames.first())
+        frames.drop(1).forEach { accNew.add(it, gainScale = 1f) }
+        val (newResult, _) = accNew.finish()
+
+        for (i in oldResult.data.indices) {
+            assertThat(newResult.data[i]).isEqualTo(oldResult.data[i])
+        }
+    }
+
+    private fun scaleFrame(f: BayerFrame, gain: Float): BayerFrame {
+        val out = ShortArray(f.data.size)
+        val white = TestBayer.PROFILE.whiteLevel
+        for (i in f.data.indices) {
+            val v = ((f.data[i].toInt() and 0xFFFF) * gain).toInt().coerceIn(0, white)
+            out[i] = v.toShort()
+        }
+        return BayerFrame(f.width, f.height, out)
+    }
+
+    @Test
+    fun `gain-normalized merge with mixed ISOs reduces noise`() {
+        val clean = TestBayer.scene(w, h)
+        val gain = 2f
+        val lowFrames = (0 until 4).map { TestBayer.addNoise(clean, 10f, seed = 310 + it) }
+        val highFrames = (0 until 4).map {
+            scaleFrame(TestBayer.addNoise(clean, 10f, seed = 320 + it), gain)
+        }
+
+        val acc = BayerAccumulator(w, h, TestBayer.PROFILE)
+        acc.setReference(lowFrames.first())
+        lowFrames.drop(1).forEach { acc.add(it) }
+        highFrames.forEach { acc.add(it, gainScale = gain) }
+        val (merged, stats) = acc.finish()
+
+        val singleRms = rms(lowFrames.first(), clean)
+        val mergedRms = rms(merged, clean)
+        println("DCG merge: single=$singleRms merged=$mergedRms ratio=${mergedRms / singleRms} stats=$stats")
+
+        assertThat(stats.framesMerged).isEqualTo(8)
+        assertThat(mergedRms).isLessThan(singleRms * 0.55)
+    }
+
+    @Test
+    fun `clipped high-ISO highlights are rejected by the merge`() {
+        val clean = TestBayer.scene(w, h)
+        val gain = 4f
+        val white = TestBayer.PROFILE.whiteLevel
+
+        val highFrame = scaleFrame(clean, gain)
+        var clippedCount = 0
+        for (v in highFrame.data) {
+            if ((v.toInt() and 0xFFFF) >= white) clippedCount++
+        }
+        assertThat(clippedCount).isGreaterThan(0)
+
+        val acc = BayerAccumulator(w, h, TestBayer.PROFILE)
+        acc.setReference(TestBayer.addNoise(clean, 8f, seed = 330))
+        acc.add(TestBayer.addNoise(clean, 8f, seed = 331))
+        acc.add(highFrame, gainScale = gain)
+        val (merged, _) = acc.finish()
+
+        // Where the high-ISO frame clipped, the merged output should stay
+        // close to the reference (the low-ISO frame) rather than being pulled
+        // down toward the clipped value / gainScale.
+        var worstHighlight = 0
+        val inset = 12
+        for (y in inset until h - inset) for (x in inset until w - inset) {
+            val refV = clean.at(x, y)
+            if (refV > white * 0.6) {
+                worstHighlight = maxOf(worstHighlight, abs(merged.at(x, y) - refV))
+            }
+        }
+        println("DCG highlight rejection: worst deviation in bright pixels = $worstHighlight")
+        assertThat(worstHighlight).isLessThan(20)
+    }
+
+    @Test
+    fun `linearity is preserved through a gain-normalized merge`() {
+        val clean = TestBayer.scene(w, h)
+        val gain = 2f
+        val lowFrames = (0 until 3).map { TestBayer.addNoise(clean, 8f, seed = 340 + it) }
+        val highFrames = (0 until 3).map {
+            scaleFrame(TestBayer.addNoise(clean, 8f, seed = 350 + it), gain)
+        }
+
+        val acc = BayerAccumulator(w, h, TestBayer.PROFILE)
+        acc.setReference(lowFrames.first())
+        lowFrames.drop(1).forEach { acc.add(it) }
+        highFrames.forEach { acc.add(it, gainScale = gain) }
+        val (merged, _) = acc.finish()
+
+        var cleanSum = 0.0; var mergedSum = 0.0; var n = 0
+        for (y in 12 until h - 12) for (x in 12 until w - 12) {
+            if (clean.at(x, y) < TestBayer.PROFILE.whiteLevel * 0.5) {
+                cleanSum += clean.at(x, y); mergedSum += merged.at(x, y); n++
+            }
+        }
+        val cm = cleanSum / n; val mm = mergedSum / n
+        println("DCG linearity: clean mean=$cm merged mean=$mm")
+        assertThat(abs(mm - cm)).isLessThan(5.0)
+    }
 }
