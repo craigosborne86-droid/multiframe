@@ -112,11 +112,27 @@ Confirm a green baseline on a **rested, charged** phone:
 adb shell am instrument -w dev.multiframe.camera.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-127 of 128 pass on grizzly. The one failure is `hoistingTheGridOutOfTheLoop`,
-which is a test that has outrun its timer rather than a regression — see below.
+**128 of 128 pass on grizzly, none skipped**, as of 7 September 2026.
+`hoistingTheGridOutOfTheLoop` was the one failure and is now fixed — not by
+relaxing it, but by the second of the two remedies BASELINE.md offered: the
+round count is gone and the assertion is on the median of the within-round
+ratios. See *The hoist has outrun its own test* there for the numbers.
+
 If `repeatedCapturesTakeAConsistentTime` fails, check `/proc/meminfo` and the
-battery before suspecting the code — that has now happened twice and been device
-state twice.
+battery before suspecting the code — that has now happened **three** times and
+been device state three times. The third: it failed at a 373ms slowest against
+a 336ms bar at the end of a six-minute suite, on a phone that had stopped
+charging at 31% and was sitting at 39°C with `Thermal Status: 1`, and then
+passed three times in a row when run on its own. The test is measuring the
+consistency of four develops, so a phone that is throttling part-way through a
+suite is exactly what it is sensitive to.
+
+The screen must be awake for the whole run or the fourteen Compose tests skip.
+`adb shell svc power stayon true` is what does it, and it is also what keeps
+wireless adb from dropping mid-suite — two attempts here were truncated at 35
+and 118 tests without it, one of them taking the adb server down with it. A
+truncated run reports the test that was in flight as a failure **with an empty
+message**, which is how to tell it from a real one.
 
 Run `adb shell svc power stayon true` first. Wireless adb drops after the screen
 idles, and the suite takes eight and a half minutes; that is what truncated the
@@ -171,15 +187,17 @@ established, all of it on 4 September 2026:
   where komodo had Mali. Every crossing route got *dearer*, not cheaper, which
   is the opposite of why the measurement was deferred to this phone. See
   [BASELINE.md](BASELINE.md).
-- **`hoistingTheGridOutOfTheLoop` fails here and should not be silenced.** It
-  needs 36 of 40 rounds and gives 33-37, warm and cold alike, so it is not
-  thermal. The pass is not slower -- 1.77x per round, better than komodo ever
-  read -- it now takes 5-8ms and is too fast to time. Give it more work per
-  round, or swap the round count for a paired median, and say why.
-- **The suite completes now: 127 of 128**, with `adb shell svc power stayon
-  true` before the run. The link drops after the screen idles, which is what
-  truncated the first attempt at 87; it is not the transport. Komodo is no
-  longer reachable.
+- **`hoistingTheGridOutOfTheLoop` was not silenced; it was restated.** It needed
+  36 of 40 rounds and gave 30-39 across eleven runs, warm and cold alike, so it
+  was never thermal. The pass is not slower -- 1.53-1.77x per round, better than
+  komodo ever read -- it now takes 5-8ms and is too fast to time by counting
+  rounds. The count is gone, replaced by the median of the within-round ratios
+  with a bound of 1.25x, which sits between a measured null of 1.00-1.09x and a
+  measured hoist of 1.53x at its lowest. Seven consecutive runs pass.
+- **The suite completes: 128 of 128, none skipped**, with `adb shell svc power
+  stayon true` before the run. The link drops after the screen idles, which is
+  what truncated attempts at 87, 118 and 35 tests; it is not the transport.
+  Komodo is no longer reachable.
 - **A photograph costs 41-45 ms to develop here**, against komodo's 112-199
   rested. Which is a different phone on a different day and not a speedup — but
   it is the denominator the GPU decision rests on, and it moved by more than

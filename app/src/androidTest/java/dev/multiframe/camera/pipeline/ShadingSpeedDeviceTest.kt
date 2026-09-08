@@ -241,7 +241,37 @@ class ShadingSpeedDeviceTest {
         // makes the within-round comparison the one worth making -- and it
         // shows the pairing is not itself biased, which is what earns the
         // right to read anything into this line.
-        assertThat(wins(reference, hoisted)).isAtLeast(ROUNDS - ROUNDS / 10)
+        //
+        // ### Why this is a median and no longer a round count
+        //
+        // It used to read `wins(reference, hoisted) >= ROUNDS - ROUNDS / 10`,
+        // thirty-six of forty. That threshold was calibrated on komodo, where
+        // this pass took tens of milliseconds. On grizzly the hoisted pass runs
+        // in five to eight milliseconds through the fast part of a run, which is
+        // small enough that scheduling noise decides individual rounds. The
+        // count then lands wherever the noise puts it: 30, 31, 33, 34, 35, 36
+        // and 39 across seven runs here, warm and cold alike, against a bar of
+        // 36. A test that passes two times in seven is not measuring anything.
+        //
+        // BASELINE.md, under *The hoist has outrun its own test*, is explicit
+        // that the answer is not to relax the count -- that would hide the
+        // finding -- but either to give the hoist more work per round or to
+        // "drop the round-count assertion for a paired-median one and say why".
+        // This is that, and this is why.
+        //
+        // The median of the per-round ratios is the right statistic because it
+        // keeps the pairing the paragraph above argues for while being immune
+        // to the rounds the noise decides. What it reads, measured:
+        //
+        //     A/A, the null      1.00x, 1.02x, 1.03x
+        //     the hoist          1.53x, 1.62x, and 1.77x in BASELINE.md
+        //     the hoist, komodo  1.52x, 1.57x
+        //
+        // So 1.25x, which noise cannot reach from a null of 1.00-1.03 and a
+        // working hoist cannot miss from 1.53 at its lowest. It is a bound
+        // between two measured populations rather than a number fitted to the
+        // last run, which is the property the old count had lost.
+        assertThat(perRoundRatioMedian(reference, hoisted)).isGreaterThan(1.25)
     }
 
     /** Not a data class: it holds arrays, which have no useful equality. */
@@ -272,8 +302,20 @@ class ShadingSpeedDeviceTest {
     /** Rounds in which the second slot beat the first, on the same cores. */
     private fun wins(a: LongArray, b: LongArray) = a.indices.count { b[it] < a[it] }
 
+    /**
+     * The within-round ratios, ordered. Pairing is what makes these readable:
+     * both slots meet the same governor and the same neighbours in the round
+     * they share, so the phone's wander divides out instead of accumulating.
+     */
+    private fun ratios(a: LongArray, b: LongArray) =
+        a.indices.map { a[it].toDouble() / b[it] }.sorted()
+
+    /** The paired statistic the A/B assertions are stated in. */
+    private fun perRoundRatioMedian(a: LongArray, b: LongArray) =
+        ratios(a, b).let { it[it.size / 2] }
+
     private fun pairing(a: LongArray, b: LongArray): String {
-        val ratios = a.indices.map { a[it].toDouble() / b[it] }.sorted()
+        val ratios = ratios(a, b)
         return "won %d of %d rounds; per-round ratio median %.2fx, worst %.2fx".format(
             wins(a, b), a.size, ratios[ratios.size / 2], ratios.first(),
         )

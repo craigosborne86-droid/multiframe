@@ -295,6 +295,28 @@ milliseconds. Do not relax it to get green; that hides the finding. Either give
 the hoist more work per round so it clears the timer's noise floor, or drop the
 round-count assertion for a paired-median one and say why.
 
+### Resolved, 7 September 2026, by the second of those
+
+The round count was left alone and then removed rather than relaxed. Eleven
+further runs on grizzly put the count at 30, 31, 33, 34, 35, 36, 37, 38, 39 and
+39 against its bar of 36 -- it passed roughly one run in three, which is a
+coin's opinion and not a measurement. The A/A control stayed inside its 30-70%
+band throughout, so the instrument was never the problem.
+
+What replaced it is the median of the within-round ratios, which keeps the
+pairing and is immune to the rounds the noise decides:
+
+    A/A, the null       1.00x, 0.99x, 1.01x, 1.02x, 1.03x, 1.09x
+    the hoist           1.53x, 1.62x, 1.68x, 1.72x, 1.74x, and 1.77x above
+    the hoist on komodo 1.52x, 1.57x
+
+The assertion is now `> 1.25x`, which sits between two measured populations
+rather than beside the last run: noise cannot reach it from a null of 1.00, and
+a working hoist cannot miss it from 1.53 at its lowest. Seven consecutive runs
+of the class pass. The finding this section records is unchanged and still
+true -- the pass has become too fast to time on this phone, and the per-round
+figure remains the better one to quote.
+
 ## The tone ablation, at 82% of the frame above the knee
 
                                             komodo run A      grizzly
