@@ -168,7 +168,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDestroy(JNIEnv*, jobject, jlong
 /** Half-resolution luma proxy: the mean of each 2x2 CFA cell. */
 JNIEXPORT void JNICALL
 Java_dev_multiframe_camera_pipeline_NativeMerge_nLumaProxy(
-        JNIEnv* env, jobject, jlong handle, jobject buffer, jint rowStride, jbyteArray out) {
+        JNIEnv* env, jobject, jlong handle, jobject buffer, jint rowStride,
+        jbyteArray out, jfloat gainScale) {
     auto* acc = reinterpret_cast<Accumulator*>(handle);
     auto* base = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buffer));
     if (base == nullptr) return;
@@ -176,7 +177,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nLumaProxy(
     const int hw = acc->width / 2;
     const int hh = acc->height / 2;
     std::vector<int8_t> tmp(static_cast<size_t>(hw) * hh);
-    const float range = static_cast<float>(acc->range()) * 4.0f;
+    const float range = static_cast<float>(acc->range()) * 4.0f * gainScale;
 
     parallelBands(hh, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
@@ -229,7 +230,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSetReference(
  * scene are noise; a median per brightness bin is robust to what moved.
  */
 static void estimateNoise(Accumulator* acc, const uint8_t* base, int rowStride,
-                          const int* dx, const int* dy, int tilesX, int tilesY) {
+                          const int* dx, const int* dy, int tilesX, int tilesY,
+                          float invGain = 1.0f) {
     std::vector<std::vector<float>> samples(kNoiseBins);
     const int w = acc->width, h = acc->height;
     const int tileW = std::max(1, (w / 2) / tilesX);
@@ -246,8 +248,10 @@ static void estimateNoise(Accumulator* acc, const uint8_t* base, int rowStride,
             int sx = x + dx[idx] * 2;
             int sy = y + dy[idx] * 2;
             if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+            uint16_t rawAlt = sampleAt(base, rowStride, sx, sy);
+            if (rawAlt >= static_cast<uint16_t>(acc->white)) continue;
             float refV = static_cast<float>(acc->reference[static_cast<size_t>(y) * w + x]);
-            float altV = static_cast<float>(sampleAt(base, rowStride, sx, sy));
+            float altV = static_cast<float>(rawAlt) * invGain;
             int b = binOf(refV, acc->white);
             if (samples[b].size() < 3000) samples[b].push_back(std::fabs(altV - refV));
         }
@@ -278,7 +282,8 @@ static void estimateNoise(Accumulator* acc, const uint8_t* base, int rowStride,
 JNIEXPORT void JNICALL
 Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
         JNIEnv* env, jobject, jlong handle, jobject buffer, jint rowStride,
-        jintArray jdx, jintArray jdy, jint tilesX, jint tilesY) {
+        jintArray jdx, jintArray jdy, jint tilesX, jint tilesY,
+        jfloat gainScale) {
     auto* acc = reinterpret_cast<Accumulator*>(handle);
     auto* base = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buffer));
     if (base == nullptr) return;
@@ -288,7 +293,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
     env->GetIntArrayRegion(jdx, 0, tiles, dx.data());
     env->GetIntArrayRegion(jdy, 0, tiles, dy.data());
 
-    if (!acc->noiseReady) estimateNoise(acc, base, rowStride, dx.data(), dy.data(), tilesX, tilesY);
+    const float invGain = 1.0f / gainScale;
+    if (!acc->noiseReady) estimateNoise(acc, base, rowStride, dx.data(), dy.data(), tilesX, tilesY, invGain);
 
     const int w = acc->width, h = acc->height;
 
@@ -474,12 +480,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                         for (int t = 0; t < n; ++t) {
                             const int sx = x + taps[t].shiftX;
                             if (sx < 0 || sx >= w) continue;
-                            // Assembled from two bytes rather than loaded as a
-                            // half word, which is what keeps this loop
-                            // endian-neutral where the vector one is not.
                             const uint8_t* p = taps[t].row + static_cast<size_t>(sx) * 2;
-                            const float altV = static_cast<float>(
-                                static_cast<uint16_t>(p[0] | (p[1] << 8)));
+                            const uint16_t rawAlt = static_cast<uint16_t>(p[0] | (p[1] << 8));
+                            if (invGain < 1.0f && rawAlt >= static_cast<uint16_t>(white)) continue;
+                            const float altV = static_cast<float>(rawAlt) * invGain;
                             const float d = altV - refV;
                             const float d2 = d * d;
                             const float wgt = (d2 <= n2) ? 1.0f : n2 / d2;
@@ -530,6 +534,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                     // for is little-endian, and the scalar loop above is what
                     // would run anywhere else.
                     const float32x4_t one = vdupq_n_f32(1.0f);
+                    const float32x4_t vInvGain = vdupq_n_f32(invGain);
+                    const bool checkSat = invGain < 1.0f;
+                    const uint32x4_t vWhite32 = vdupq_n_u32(static_cast<uint32_t>(white));
+                    const float32x4_t zero = vdupq_n_f32(0.0f);
                     for (; cursor + 4 <= core1; cursor += 4) {
                         const int x = cursor;
                         const float32x4_t refV =
@@ -554,23 +562,21 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                             const auto* src = reinterpret_cast<const uint16_t*>(
                                 taps[t].row +
                                 static_cast<size_t>(x + taps[t].shiftX) * 2);
+                            const uint16x4_t rawVec = vld1_u16(src);
+                            const uint32x4_t rawU32 = vmovl_u16(rawVec);
                             const float32x4_t altV =
-                                vcvtq_f32_u32(vmovl_u16(vld1_u16(src)));
+                                vmulq_f32(vcvtq_f32_u32(rawU32), vInvGain);
                             const float32x4_t d = vsubq_f32(altV, refV);
                             const float32x4_t d2 = vmulq_f32(d, d);
-                            // Both arms are evaluated and one is selected. The
-                            // divide is the arm that is almost never taken -- a
-                            // frame agrees with its reference to within
-                            // tolerance nearly everywhere -- and a branch that
-                            // mispredicts a few percent of twelve million times
-                            // costs more than a divide that is thrown away.
-                            // Where d2 is zero the divide yields an infinity and
-                            // the select discards it.
                             const float32x4_t wgt = vbslq_f32(
                                 vcleq_f32(d2, n2), one, vdivq_f32(n2, d2));
-                            const float32x4_t ww = vmulq_f32(
+                            float32x4_t ww = vmulq_f32(
                                 wgt, vmulq_n_f32(taps[t].farColumn ? far : near,
                                                  taps[t].wy));
+                            if (checkSat) {
+                                const uint32x4_t satOk = vcltq_u32(rawU32, vWhite32);
+                                ww = vbslq_f32(satOk, ww, zero);
+                            }
                             acc = vmlaq_f32(acc, altV, ww);
                             accW = vaddq_f32(accW, ww);
                         }

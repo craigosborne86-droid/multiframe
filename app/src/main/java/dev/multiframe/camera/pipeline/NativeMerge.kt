@@ -32,17 +32,17 @@ class NativeMerge private constructor(
     val proxyWidth = width / 2
     val proxyHeight = height / 2
 
-    fun lumaProxy(frame: ByteBuffer, rowStride: Int): Plane {
+    fun lumaProxy(frame: ByteBuffer, rowStride: Int, gainScale: Float = 1f): Plane {
         val out = ByteArray(proxyWidth * proxyHeight)
-        nLumaProxy(handle, frame, rowStride, out)
+        nLumaProxy(handle, frame, rowStride, out, gainScale)
         return Plane(proxyWidth, proxyHeight, out)
     }
 
     fun setReference(frame: ByteBuffer, rowStride: Int) =
         nSetReference(handle, frame, rowStride)
 
-    fun addFrame(frame: ByteBuffer, rowStride: Int, field: AlignmentField) =
-        nAddFrame(handle, frame, rowStride, field.dx, field.dy, field.tilesX, field.tilesY)
+    fun addFrame(frame: ByteBuffer, rowStride: Int, field: AlignmentField, gainScale: Float = 1f) =
+        nAddFrame(handle, frame, rowStride, field.dx, field.dy, field.tilesX, field.tilesY, gainScale)
 
     /**
      * Writes the merged CFA data into a direct buffer, which is also off the
@@ -145,11 +145,12 @@ class NativeMerge private constructor(
         handle = 0
     }
 
-    private external fun nLumaProxy(h: Long, buf: ByteBuffer, rowStride: Int, out: ByteArray)
+    private external fun nLumaProxy(h: Long, buf: ByteBuffer, rowStride: Int, out: ByteArray, gainScale: Float)
     private external fun nSetReference(h: Long, buf: ByteBuffer, rowStride: Int)
     private external fun nAddFrame(
         h: Long, buf: ByteBuffer, rowStride: Int,
         dx: IntArray, dy: IntArray, tilesX: Int, tilesY: Int,
+        gainScale: Float,
     )
     private external fun nFinish(h: Long, out: ByteBuffer): Float
     private external fun nAutoExposure(
