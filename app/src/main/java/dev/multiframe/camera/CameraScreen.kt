@@ -137,6 +137,7 @@ import dev.multiframe.camera.ui.HistogramGauge
 import dev.multiframe.camera.ui.FocusGauge
 import dev.multiframe.camera.ui.ZoomGauge
 import dev.multiframe.camera.ui.AboutSheet
+import dev.multiframe.camera.ui.GalleryScreen
 import dev.multiframe.camera.ui.GuideMode
 import dev.multiframe.camera.ui.Guides
 import dev.multiframe.camera.ui.Peaking
@@ -199,6 +200,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var abMode by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
+    var showGallery by remember { mutableStateOf(false) }
     var rawCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var characteristics by remember { mutableStateOf<CameraCharacteristics?>(null) }
     // DngCreator needs the capture metadata that produced the frame, which
@@ -363,9 +365,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         onDispose { orientation.disable() }
     }
 
-    // The last capture, refreshed whenever one completes.
-    LaunchedEffect(busy) {
-        if (busy) return@LaunchedEffect
+    // The last capture, refreshed whenever one completes -- and whenever the
+    // gallery closes, because what it pointed at may have been deleted there.
+    LaunchedEffect(busy, showGallery) {
+        if (busy || showGallery) return@LaunchedEffect
         val shot = withContext(Dispatchers.IO) { RecentCapture.latest(context) }
         lastShot = shot
         thumbnail = if (shot == null) null else withContext(Dispatchers.IO) {
@@ -1545,19 +1548,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             .align(Alignment.CenterStart)
                             .padding(start = 28.dp),
                         onOpen = {
-                            lastShot?.let { shot ->
-                                // Handed to whatever the user views photographs
-                                // with, rather than this app growing a gallery.
-                                runCatching {
-                                    context.startActivity(
-                                        android.content.Intent(
-                                            android.content.Intent.ACTION_VIEW, shot.uri,
-                                        ).addFlags(
-                                            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                                        )
-                                    )
-                                }.onFailure { Log.w(TAG, "nothing can view that image", it) }
-                            }
+                            // The app's own gallery, rather than handing the
+                            // user to another app. Reviewing a merge means
+                            // looking at it at pixel level and comparing it
+                            // against what was expected, and a general-purpose
+                            // viewer does not know the difference between the
+                            // JPEG and the DNG beside it.
+                            Haptics.segment(view)
+                            showGallery = true
                         },
                     )
                     ShutterButton(
@@ -1793,6 +1791,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
         if (showAbout) {
             AboutSheet(onDismiss = { showAbout = false })
+        }
+
+        // Above everything, including the About sheet: it is a place rather
+        // than a panel, and the viewfinder underneath is still composed.
+        if (showGallery) {
+            // Closing it re-reads the last capture, which may have been
+            // deleted in there -- see the refresh effect above.
+            GalleryScreen(context = context, onDismiss = { showGallery = false })
         }
     }
 }

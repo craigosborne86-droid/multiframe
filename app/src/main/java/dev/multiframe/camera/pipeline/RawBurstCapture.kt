@@ -426,6 +426,11 @@ object RawBurstCapture {
         // worked only while the two were sequential -- now that they overlap,
         // whichever finished last would win the race and a DNG thumbnail is a
         // blank square. The caller decides once both are done.
+        //
+        // The gallery log is not that decision and is written here. A DNG that
+        // exists belongs in the gallery whether or not it is also the
+        // thumbnail, and it pairs with its JPEG by name once both are in.
+        CaptureLog.record(context, uri, displayName)
         Log.i(TAG, "merged DNG written: $uri")
         uri
     } catch (e: Exception) {

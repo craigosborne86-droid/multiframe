@@ -60,12 +60,23 @@ object RawCapture {
             ContextCompat.getMainExecutor(context),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    val kind = when (output.imageFormat) {
-                        ImageFormat.RAW_SENSOR -> "dng"
-                        else -> "jpeg"
-                    }
+                    val raw = output.imageFormat == ImageFormat.RAW_SENSOR
+                    val kind = if (raw) "dng" else "jpeg"
                     saved.add(kind)
                     Log.i(TAG, "RAW capture saved $kind ${output.savedUri}")
+
+                    // CameraX writes these itself rather than going through
+                    // ImageSaver, so the gallery has to be told here or a
+                    // capture taken by this path is invisible to it.
+                    output.savedUri?.let { uri ->
+                        val name = "MF_${stamp}_raw." + if (raw) "dng" else "jpg"
+                        CaptureLog.record(context, uri, name)
+                        // The JPEG is the thumbnail whenever there is one, for
+                        // the reason RawBurstCapture records: a DNG has no
+                        // preview this app can cheaply decode.
+                        if (!raw) RecentCapture.remember(context, uri, name)
+                    }
+
                     // The callback fires once per file written.
                     onResult("saved ${saved.joinToString(" + ")} (single frame)")
                 }

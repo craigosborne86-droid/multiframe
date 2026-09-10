@@ -183,8 +183,11 @@ object ImageSaver {
 
         // Recorded as it is written, which is the only moment the app is
         // certain which image is its own without asking to read the whole
-        // photo library.
+        // photo library. Both records are written here so that a capture which
+        // reaches the viewfinder thumbnail is exactly one that reaches the
+        // gallery -- two sources of truth about what was shot would drift.
         RecentCapture.remember(context, uri, displayName)
+        CaptureLog.record(context, uri, displayName)
         return uri
     }
 }
