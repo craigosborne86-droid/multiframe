@@ -1507,7 +1507,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                         ),
                                     )
                                     status = r.stats?.let {
-                                        CaptureReadout.of(it.framesMerged, it.meanContribution)
+                                        CaptureReadout.of(
+                                            it.framesMerged, it.meanContribution,
+                                            dcgActive = r.dcgActive,
+                                        )
                                     } ?: r.message
                                     busy = false
                                 }

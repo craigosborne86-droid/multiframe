@@ -50,6 +50,8 @@ data class RawBurstResult(
      * it.
      */
     val publishMillis: Long = 0,
+    /** Whether the burst alternated ISO levels for dual conversion gain. */
+    val dcgActive: Boolean = false,
 )
 
 /**
@@ -187,6 +189,7 @@ object RawBurstCapture {
         handoverMicros: Long = 0,
         burstSpanMillis: Long = 0,
         streamStats: String? = null,
+        dcgActive: Boolean = false,
     ): RawBurstResult {
         val stamp = stamp()
 
@@ -325,6 +328,7 @@ object RawBurstCapture {
             else "raw merge -> ${parts.joinToString(" + ")}, $captured frames",
             handoverMicros, burstSpanMillis, streamStats,
             publishMillis = publish[0],
+            dcgActive = dcgActive,
         )
     }
 

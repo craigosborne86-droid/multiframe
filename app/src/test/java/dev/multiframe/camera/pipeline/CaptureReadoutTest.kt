@@ -59,6 +59,20 @@ class CaptureReadoutTest {
     }
 
     @Test
+    fun dcgIsShownWhenActive() {
+        assertThat(CaptureReadout.of(8, 0.85f, dcgActive = true))
+            .isEqualTo("8 frames · 85% kept · DCG")
+    }
+
+    @Test
+    fun dcgIsAbsentWhenOff() {
+        assertThat(CaptureReadout.of(8, 0.85f, dcgActive = false))
+            .isEqualTo("8 frames · 85% kept")
+        assertThat(CaptureReadout.of(8, 0.85f))
+            .isEqualTo("8 frames · 85% kept")
+    }
+
+    @Test
     fun theDetailedFormSpellsOutWhatActuallyWentIn() {
         // Twelve frames that kept half of each is not a burst of twelve.
         assertThat(CaptureReadout.detailed(12, 0.5f))

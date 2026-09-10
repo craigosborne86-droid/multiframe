@@ -183,6 +183,7 @@ object ZslCapture {
                 handoverMicros = handoverMicros,
                 burstSpanMillis = spanMillis,
                 streamStats = statsAfter.toString(),
+                dcgActive = stream.dcg,
             )
         } catch (e: Exception) {
             Log.e(TAG, "ZSL merge failed", e)

@@ -40,10 +40,15 @@ object CaptureReadout {
      * the reference. [meanContribution] is the mean weight given to the others,
      * in 0..1; the reference always carries a full share and is not in it.
      */
-    fun of(framesMerged: Int, meanContribution: Float): String {
+    fun of(
+        framesMerged: Int,
+        meanContribution: Float,
+        dcgActive: Boolean = false,
+    ): String {
         if (framesMerged <= 1) return "1 frame"
         val kept = (meanContribution.coerceIn(0f, 1f) * 100).roundToInt()
-        return "$framesMerged frames · $kept% kept"
+        val dcg = if (dcgActive) " · DCG" else ""
+        return "$framesMerged frames · $kept% kept$dcg"
     }
 
     /**
@@ -53,10 +58,16 @@ object CaptureReadout {
      * this is the honest way to say so: the reference plus what the rest
      * actually contributed. Shown where there is room for it.
      */
-    fun detailed(framesMerged: Int, meanContribution: Float): String {
+    fun detailed(
+        framesMerged: Int,
+        meanContribution: Float,
+        dcgActive: Boolean = false,
+    ): String {
         if (framesMerged <= 1) return "1 frame"
         val effective = effectiveFrames(framesMerged, meanContribution)
-        return "%s · %.1f effective".format(of(framesMerged, meanContribution), effective)
+        return "%s · %.1f effective".format(
+            of(framesMerged, meanContribution, dcgActive), effective,
+        )
     }
 
     /**
