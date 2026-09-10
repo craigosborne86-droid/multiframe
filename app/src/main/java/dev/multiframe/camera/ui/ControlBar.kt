@@ -116,6 +116,55 @@ data class ControlBarState(
     val dngOffered: Boolean = false,
 )
 
+/**
+ * Where the dials have stops.
+ *
+ * A slider on a touchscreen has no mechanical detents, so the value under the
+ * finger is something you read rather than something you feel. These are the
+ * positions worth feeling: the ISO stops a photographer already thinks in, and
+ * zero on the exposure compensation scale, which is the one value on that
+ * control anybody navigates back to.
+ *
+ * Here rather than in the panel that draws them for the reason the rest of this
+ * file exists: it is arithmetic, and arithmetic can be tested without a phone.
+ */
+object Detents {
+
+    /** The full-stop ISO series, which is what an ISO dial has always clicked at. */
+    val ISO_STOPS = listOf(
+        50f, 100f, 200f, 400f, 800f, 1600f, 3200f, 6400f, 12800f, 25600f,
+    )
+
+    /** How near counts as arrived, as a fraction of the distance to the next stop. */
+    const val TOLERANCE = 0.06f
+
+    /** The ISO stops the hardware can actually reach. */
+    fun isoStops(min: Int, max: Int): List<Float> =
+        ISO_STOPS.filter { it >= min && it <= max }
+
+    /**
+     * Exposure compensation, which has exactly one stop: zero.
+     *
+     * The index scale is the camera's own, so zero index is zero compensation
+     * whatever the step size happens to be.
+     */
+    fun evStops(): List<Float> = listOf(0f)
+
+    /**
+     * The stop [value] is sitting at, or null if it is between two.
+     *
+     * Proportional rather than absolute tolerance, because the ISO series is
+     * geometric: 6 units either side of 100 is a different part of the scale
+     * from 6 units either side of 6400, and an absolute window would make the
+     * bottom of the dial one long detent and the top of it frictionless.
+     */
+    fun nearest(value: Float, stops: List<Float>): Float? =
+        stops.firstOrNull { stop ->
+            val window = (kotlin.math.abs(stop) * TOLERANCE).coerceAtLeast(0.5f)
+            kotlin.math.abs(value - stop) <= window
+        }
+}
+
 object ControlBar {
 
     const val MERGE = "merge"

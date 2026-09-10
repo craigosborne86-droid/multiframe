@@ -93,6 +93,26 @@ data class ColorProfile(
             return ColorProfile(gains = fallback.gains, matrix = matrix.m)
         }
 
+        /**
+         * The sensor's colorimetric characterisation on its own, for callers
+         * that need the matrices rather than a rendered profile.
+         *
+         * The viewfinder's temperature gauge is the one that does: it has white
+         * balance gains and needs to know what chromaticity they correspond to,
+         * which is a question about the sensor and not about any one frame.
+         * Same two routes and same order as [calibrated] — the documented keys
+         * first, DngCreator second — so the gauge and the develop are reading
+         * the same characterisation.
+         *
+         * Null on a device that publishes neither, where a temperature cannot
+         * be computed and the gauge shows nothing.
+         */
+        fun calibrationFrom(
+            characteristics: CameraCharacteristics,
+        ): ColorScience.Calibration? =
+            readCalibration(characteristics)
+                ?: calibrationViaDng(characteristics, null)
+
         /** Per-camera, and unchanging, so it is worked out once. */
         private val dngCalibrationCache =
             ConcurrentHashMap<String, ColorScience.Calibration>()

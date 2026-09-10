@@ -241,4 +241,105 @@ object ColorScience {
         return ((TUNGSTEN_WARMTH - warmth) / (TUNGSTEN_WARMTH - DAYLIGHT_WARMTH))
             .coerceIn(0f, 1f)
     }
+
+    /**
+     * The bounds a reported temperature is held to.
+     *
+     * Not a preference. Below about 1500 K and above about 15000 K, McCamy's
+     * cubic is being asked about chromaticities that are nowhere near the
+     * Planckian locus, and what it returns there is a number rather than a
+     * temperature. Clamping says so instead of printing it.
+     */
+    const val CCT_MIN = 1500
+    const val CCT_MAX = 15000
+
+    /**
+     * Correlated colour temperature of the scene's light, in kelvin.
+     *
+     * [neutral] is the camera-space colour of a white object under that light —
+     * AsShotNeutral, the same vector [cameraToSrgb] and [blendFor] take. The
+     * route is the textbook one: take the neutral to XYZ with the sensor's own
+     * characterisation, reduce to xy chromaticity, then McCamy's cubic.
+     *
+     * ### Why this is not the ratio [blendFor] uses
+     *
+     * That ratio is a *proxy*, and it is honest about being one: it only has to
+     * order two illuminants correctly, and it is allowed to err toward the
+     * middle because the two matrices it chooses between are most alike there.
+     * A number displayed to the photographer as "5200K" is a different promise.
+     * It has to be right in the middle of the range as well as at the ends,
+     * which means going through chromaticity rather than around it.
+     *
+     * Returns null when the calibration cannot be inverted or the neutral is
+     * degenerate — the gauge shows nothing rather than a fabricated figure.
+     */
+    fun correlatedColourTemperature(
+        calibration: Calibration,
+        neutral: FloatArray,
+    ): Int? {
+        if (neutral.size < 3) return null
+        if (neutral[0] <= 0f || neutral[1] <= 0f || neutral[2] <= 0f) return null
+
+        // The neutral is camera-space, so it needs the camera-to-XYZ transform
+        // to become a chromaticity. Use the same illuminant blend the develop
+        // would use, so the temperature shown is the one the picture is
+        // rendered against rather than an independent guess.
+        val blend = blendFor(neutral)
+        val cameraToXyz = interpolatedForward(calibration, blend)
+            ?: run {
+                val colour =
+                    Mat3.lerp(calibration.colorMatrix1, calibration.colorMatrix2, blend)
+                val calibrationTransform =
+                    Mat3.lerp(calibration.calibration1, calibration.calibration2, blend)
+                (calibrationTransform * colour).invert() ?: return null
+            }
+
+        val xyz = FloatArray(3)
+        cameraToXyz.apply(neutral[0], neutral[1], neutral[2], xyz)
+
+        val sum = xyz[0] + xyz[1] + xyz[2]
+        if (sum <= 0f) return null
+        val x = xyz[0] / sum
+        val y = xyz[1] / sum
+
+        return cctFromChromaticity(x, y)
+    }
+
+    /**
+     * McCamy's cubic approximation, which is accurate to within a couple of
+     * kelvin over the range a camera ever meets.
+     *
+     * The epicentre is the point the isotemperature lines converge on; the
+     * cubic is in the slope from it. Near that point the slope diverges, which
+     * is what the guard is for — a chromaticity sitting on the epicentre has no
+     * temperature, not an infinite one.
+     */
+    fun cctFromChromaticity(x: Float, y: Float): Int? {
+        val dy = 0.1858f - y
+        if (kotlin.math.abs(dy) < 1e-6f) return null
+        val n = (x - 0.3320f) / dy
+        val cct = 449f * n * n * n + 3525f * n * n + 6823.3f * n + 5520.33f
+        if (cct.isNaN() || cct.isInfinite()) return null
+        return cct.toInt().coerceIn(CCT_MIN, CCT_MAX)
+    }
+
+    /**
+     * Correlated colour temperature straight from white balance gains.
+     *
+     * The gains are the reciprocal of the neutral, which is the form a capture
+     * result reports them in (`COLOR_CORRECTION_GAINS`, as R, Gr, Gb, B). The
+     * two greens are averaged: they differ only by sensor row and mean the same
+     * thing to a white point.
+     */
+    fun cctFromGains(calibration: Calibration, gains: FloatArray): Int? {
+        if (gains.size < 4) return null
+        val r = gains[0]
+        val g = (gains[1] + gains[2]) / 2f
+        val b = gains[3]
+        if (r <= 0f || g <= 0f || b <= 0f) return null
+        return correlatedColourTemperature(
+            calibration,
+            floatArrayOf(1f / r, 1f / g, 1f / b),
+        )
+    }
 }

@@ -74,6 +74,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -90,6 +91,8 @@ import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.CaptureMode
 import dev.multiframe.camera.pipeline.CaptureReadout
 import dev.multiframe.camera.pipeline.CaptureModes
+import dev.multiframe.camera.pipeline.ColorProfile
+import dev.multiframe.camera.pipeline.ColorScience
 import dev.multiframe.camera.pipeline.SceneAnalysis
 import dev.multiframe.camera.pipeline.FocusPeaking
 import dev.multiframe.camera.pipeline.Plane
@@ -122,10 +125,16 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.graphics.Brush
 import dev.multiframe.camera.ui.Ink
+import dev.multiframe.camera.ui.Type
+import dev.multiframe.camera.ui.Haptics
+import dev.multiframe.camera.ui.GaugeState
+import dev.multiframe.camera.ui.ExposureGauge
+import dev.multiframe.camera.ui.HistogramGauge
+import dev.multiframe.camera.ui.FocusGauge
+import dev.multiframe.camera.ui.ZoomGauge
 import dev.multiframe.camera.ui.AboutSheet
 import dev.multiframe.camera.ui.GuideMode
 import dev.multiframe.camera.ui.Guides
-import dev.multiframe.camera.ui.Histogram
 import dev.multiframe.camera.ui.Peaking
 import dev.multiframe.camera.ui.SweepMap
 import dev.multiframe.camera.ui.ControlsPanel
@@ -172,6 +181,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
+    // The view the haptics are performed against. See `Haptics` for the
+    // vocabulary and for why nothing fires during a burst.
+    val view = LocalView.current
 
     // Restored before any state that depends on it, so the first composition
     // already shows what the user left the app in rather than the defaults.
@@ -264,7 +276,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     }
     val level = remember { LevelSensor(context) }
     var attitude by remember { mutableStateOf<Attitude?>(null) }
-    var histogram by remember { mutableStateOf<IntArray?>(null) }
+
+    // Every live reading, held in one object that the screen writes and only
+    // the gauges read. See `GaugeState`: at 120Hz, hoisting these here meant
+    // five whole-tree recompositions a second to change two digits.
+    val gauges = remember { GaugeState() }
 
     // What the sensor actually used, as opposed to what was asked for. In
     // auto-exposure those are different numbers and only the first is worth
@@ -275,10 +291,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // Compose state directly from that callback would recompose the whole
     // screen sixty times a second to change two digits.
     val liveExposure = remember { AtomicReference(0 to 0L) }
-    var exposureReadout by remember { mutableStateOf<Pair<Int, Long>?>(null) }
 
-    LaunchedEffect(zslStream) {
+    LaunchedEffect(zslStream, characteristics) {
         val stream = zslStream
+        // The sensor's own colour characterisation, read once. Without it a
+        // temperature cannot be computed at all -- the gains are camera-space
+        // and mean nothing until this takes them to XYZ.
+        val calibration = characteristics?.let {
+            runCatching { ColorProfile.calibrationFrom(it) }.getOrNull()
+        }
         while (true) {
             // Whichever path is actually driving the sensor.
             //
@@ -289,7 +310,21 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // first rather than falling back to a value that stopped being
             // true when the handover happened.
             val reading = stream?.latestExposure() ?: liveExposure.get()
-            exposureReadout = reading.takeIf { it.first > 0 && it.second > 0L }
+            if (reading.first > 0 && reading.second > 0L) {
+                gauges.setExposure(reading.first, reading.second)
+            } else {
+                gauges.clearExposure()
+            }
+
+            // Temperature comes from the gains the camera settled on, not from
+            // the AWB mode the user picked: under AUTO those are different
+            // answers and only the first is a reading.
+            if (calibration != null) {
+                val gains = stream?.latestAwbGains()
+                val kelvin = gains?.let { ColorScience.cctFromGains(calibration, it) }
+                gauges.setColourTemperature(kelvin ?: 0)
+            }
+
             kotlinx.coroutines.delay(200)
         }
     }
@@ -406,7 +441,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         val stream = zslStream
         if (stream == null || !settings.manualFocus) {
             peakingMask = null
-            focusScore = 0f
+            gauges.setFocusScore(0f)
             return@LaunchedEffect
         }
         val luma = ByteArray(PEAK_W * PEAK_H)
@@ -416,7 +451,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 if (!stream.luma(luma, PEAK_W, PEAK_H)) return@withContext false
                 val plane = Plane(PEAK_W, PEAK_H, luma)
                 FocusPeaking.detect(plane, mask)
-                focusScore = FocusPeaking.focusScore(plane)
+                gauges.setFocusScore(FocusPeaking.focusScore(plane))
                 true
             }
             peakingMask = if (ready) mask.copyOf() else null
@@ -432,13 +467,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     LaunchedEffect(zslStream) {
         val stream = zslStream
         if (stream == null) {
-            histogram = null
+            gauges.setHistogram(null)
             return@LaunchedEffect
         }
         val bins = IntArray(48)
         while (true) {
             val ok = withContext(Dispatchers.Default) { stream.histogram(bins) }
-            histogram = if (ok) bins.copyOf() else null
+            gauges.setHistogram(if (ok) bins.copyOf() else null)
             kotlinx.coroutines.delay(250)
         }
     }
@@ -1003,12 +1038,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     if (stream != null) {
                         digitalZoom = (digitalZoom * gestureZoom)
                             .coerceIn(1f, stream.maxZoom)
+                        gauges.setZoom(digitalZoom)
                         stream.setZoom(digitalZoom, settings, c)
                     } else {
                         camera?.let { cam ->
                             val state = cam.cameraInfo.zoomState.value ?: return@let
                             digitalZoom = (digitalZoom * gestureZoom)
                                 .coerceIn(state.minZoomRatio, state.maxZoomRatio)
+                            gauges.setZoom(digitalZoom)
                             runCatching { cam.cameraControl.setZoomRatio(digitalZoom) }
                         }
                     }
@@ -1080,17 +1117,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
         Peaking(mask = peakingMask, maskWidth = PEAK_W, maskHeight = PEAK_H)
 
-        if (settings.manualFocus && focusScore > 0f) {
-            Text(
-                text = "FOCUS %.0f".format(focusScore * 1000),
-                color = Ink.Amber,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
+        if (settings.manualFocus) {
+            FocusGauge(
+                gauges = gauges,
                 modifier = Modifier
                     .align(Alignment.CenterStart)
-                    .padding(start = 16.dp)
-                    .background(Ink.Readout, RoundedCornerShape(6.dp))
-                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                    .padding(start = 16.dp),
             )
         }
 
@@ -1169,6 +1201,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         )
 
         val handleControl: (String) -> Unit = { id ->
+            // Every control in the row and the strip is a detent except the two
+            // openers, which change nothing and whose panel animation is its own
+            // feedback. The actions get one too: the tick is acknowledging the
+            // press, and the capture it starts is asynchronous -- nothing is
+            // vibrating while the sensor is integrating.
+            if (id != ControlBar.PRO && id != ControlBar.ABOUT) {
+                Haptics.segment(view)
+            }
             when (id) {
                 ControlBar.MERGE -> mergeEnabled = !mergeEnabled
                 ControlBar.AB -> abMode = !abMode
@@ -1275,12 +1315,20 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         ) {
             ControlRow(ControlBar.modes(barState), onControl = handleControl)
 
-            ExposureReadout(
-                iso = exposureReadout?.first,
-                exposureNs = exposureReadout?.second,
-                evLabel = caps?.takeIf { it.supportsExposureCompensation && settings.evActive }
-                    ?.let { c -> "%+.1f".format(settings.effectiveEvIndex(c) * c.evStep) },
-                manual = caps?.let { settings.manualExposureActive(it) } == true,
+            // The EV label and the manual flag are settings, not sensor
+            // readings: they change when the user changes them and not
+            // otherwise, so they are pushed into the holder from here rather
+            // than sampled alongside the exposure.
+            val evLabel = caps
+                ?.takeIf { it.supportsExposureCompensation && settings.evActive }
+                ?.let { c -> "%+.1f".format(settings.effectiveEvIndex(c) * c.evStep) }
+            val manualExposure = caps?.let { settings.manualExposureActive(it) } == true
+            LaunchedEffect(evLabel, manualExposure) {
+                gauges.setEv(evLabel, manualExposure)
+            }
+
+            ExposureGauge(
+                gauges = gauges,
                 modifier = Modifier.padding(top = 10.dp),
             )
 
@@ -1297,23 +1345,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // the reference keeps them together in the top chrome for that
             // reason. Same ground and radius as the readout, so the two read
             // as one instrument rather than two overlays.
-            histogram?.let { bins ->
-                Histogram(
-                    bins = bins,
-                    modifier = Modifier
-                        .padding(top = 8.dp)
-                        .size(width = 132.dp, height = 40.dp)
-                        .background(Ink.Readout, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 7.dp, vertical = 5.dp),
-                )
-            }
+            HistogramGauge(gauges = gauges, modifier = Modifier.padding(top = 8.dp))
 
             if (status.isNotEmpty()) {
                 Text(
                     text = status,
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
+                    style = Type.Status,
                     modifier = Modifier
                         .padding(top = 8.dp)
                         .background(Ink.Readout, RoundedCornerShape(6.dp))
@@ -1343,7 +1380,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             lens = option,
                             selected = option.cameraId == lens?.cameraId,
                             enabled = !busy,
-                        ) { lens = option }
+                        ) {
+                            Haptics.segment(view)
+                            lens = option
+                        }
                     }
                 }
             }
@@ -1458,6 +1498,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         onClick = {
                             if (countdown > 0) {
                                 // Called off before anything was locked.
+                                Haptics.reject(view)
                                 captureJob?.cancel()
                                 captureJob = null
                                 countdown = 0
@@ -1466,6 +1507,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 return@ShutterButton
                             }
                             if (busy) return@ShutterButton
+
+                            // Fires here, at the press, and nowhere later: the
+                            // burst has not started yet, so the motor is still
+                            // by the time the sensor is integrating. A haptic
+                            // during the burst would be motion blur.
+                            Haptics.shutter(view)
 
                             // Zero shutter lag: the frames already exist, so this press
                             // locks them rather than starting a capture.
@@ -1486,6 +1533,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                     // countdown ends rather than when it began.
                                     for (remaining in timerSeconds downTo 1) {
                                         countdown = remaining
+                                        // A metronome you can feel without
+                                        // watching the screen, which is the
+                                        // point of a self-timer.
+                                        Haptics.tick(view)
                                         status = "$remaining… tap the shutter to cancel"
                                         kotlinx.coroutines.delay(1000)
                                     }
@@ -1602,19 +1653,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             }
         }
 
-        if (digitalZoom > 1.02f) {
-            Text(
-                text = "%.1fx".format(digitalZoom),
-                color = Color.White,
-                fontSize = 13.sp,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 16.dp)
-                    .background(Ink.Readout, RoundedCornerShape(6.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-            )
-        }
+        ZoomGauge(
+            gauges = gauges,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 16.dp),
+        )
 
         sweepProgress?.let { progress ->
             // The sweep is the one moment this app takes the screen over, so
@@ -1642,32 +1686,22 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 // The number is the reading and takes the accent; the noun is
                 // not, and does not. Same rule as every other value here.
                 Row(verticalAlignment = Alignment.Bottom) {
-                    Text(
-                        text = progress.placed.toString(),
-                        color = Ink.Amber,
-                        fontSize = 26.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
+                    Text(text = progress.placed.toString(), style = Type.GaugeLarge)
                     Text(
                         text = "tiles",
+                        style = Type.Control,
                         color = Ink.Muted,
-                        fontSize = 12.sp,
                         modifier = Modifier.padding(start = 6.dp, bottom = 3.dp),
                     )
                 }
                 Text(
                     text = "%.0f%% covered".format(progress.coverage * 100),
-                    color = Ink.Bone,
-                    fontSize = 13.sp,
-                    fontFamily = FontFamily.Monospace,
+                    style = Type.GaugeBone,
                     modifier = Modifier.padding(top = 2.dp),
                 )
                 Text(
                     text = "PAN SLOWLY",
-                    color = Ink.Muted,
-                    fontSize = 10.sp,
-                    letterSpacing = 1.2.sp,
-                    fontWeight = FontWeight.Medium,
+                    style = Type.Instruction,
                     modifier = Modifier.padding(top = 14.dp),
                 )
             }
@@ -1684,9 +1718,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             ) {
                 Text(
                     text = countdown.toString(),
-                    color = Ink.Bone,
-                    fontSize = 76.sp,
-                    fontFamily = FontFamily.Monospace,
+                    style = Type.Countdown,
                 )
             }
         }
@@ -1702,100 +1734,6 @@ private val LensChipSize = 72.dp
 
 /** The manual panel's top corners, and the only place the radius is stated. */
 private val PanelShape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-
-/**
- * What the sensor is actually doing, kept on screen.
- *
- * The one thing every serious camera shows and this one did not. Indigo keeps a
- * histogram and `1/30s ISO 12500` in permanent chrome; this app had an empty
- * third of a screen where that belongs, and the histogram it does have was
- * switched on by the *guides* control, of all things.
- *
- * Reading only, never a control, so it is deliberately not a chip: no border,
- * no fill, no touch target. Numbers in the accent and their units muted, which
- * is the rule the sliders and the cycling chips already follow.
- */
-@Composable
-private fun ExposureReadout(
-    iso: Int?,
-    exposureNs: Long?,
-    evLabel: String?,
-    manual: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    if (iso == null || exposureNs == null) return
-    val shutter = remember(exposureNs) {
-        val seconds = exposureNs / 1_000_000_000.0
-        if (seconds >= 0.4) "%.1fs".format(seconds) else "1/${(1.0 / seconds).toInt()}"
-    }
-    Row(
-        modifier = modifier
-            .background(Ink.Readout, RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .semantics {
-                contentDescription = "ISO $iso, shutter $shutter"
-            },
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        ReadoutValue("ISO", iso.toString())
-        ReadoutDot()
-        ReadoutValue(null, shutter)
-        if (evLabel != null) {
-            ReadoutDot()
-            ReadoutValue(null, evLabel, unit = "EV")
-        }
-        if (manual) {
-            ReadoutDot()
-            Text(
-                text = "MAN",
-                color = Ink.Bone,
-                fontSize = 11.sp,
-                letterSpacing = 0.5.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ReadoutValue(label: String?, value: String, unit: String? = null) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        if (label != null) {
-            Text(
-                text = label,
-                color = Ink.Muted,
-                fontSize = 11.sp,
-                letterSpacing = 0.5.sp,
-                modifier = Modifier.padding(end = 5.dp),
-            )
-        }
-        Text(
-            text = value,
-            color = Ink.Amber,
-            fontSize = 13.sp,
-            fontFamily = FontFamily.Monospace,
-        )
-        if (unit != null) {
-            Text(
-                text = unit,
-                color = Ink.Muted,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(start = 3.dp),
-            )
-        }
-    }
-}
-
-/** The separator between readings. Indigo's dot, and for the same reason. */
-@Composable
-private fun ReadoutDot() {
-    Text(
-        text = "·",
-        color = Ink.Muted,
-        fontSize = 13.sp,
-        modifier = Modifier.padding(horizontal = 9.dp),
-    )
-}
 
 /**
  * The handle on the manual panel.
@@ -1907,18 +1845,16 @@ private fun LensChip(
     ) {
         Text(
             text = lens.label,
+            style = Type.LensFocal,
             color = if (selected) Ink.OnBone else Ink.Bone,
-            fontSize = 13.sp,
-            fontFamily = FontFamily.Monospace,
         )
         Text(
             text = lens.zoomLabel,
             // Was 9sp at 60% white, which over a lit road was not so much
             // low-contrast as absent. The zoom factor is the half of this
             // chip most people actually read.
+            style = Type.LensZoom,
             color = if (selected) Ink.OnBoneMuted else Ink.Muted,
-            fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
         )
     }
 }

@@ -23,16 +23,18 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.ManualSettings
 import kotlin.math.ln
@@ -106,6 +108,7 @@ fun ControlsPanel(
                     value = settings.iso.toFloat(),
                     valueText = settings.iso.toString(),
                     range = caps.isoMin!!.toFloat()..caps.isoMax!!.toFloat(),
+                    detents = Detents.isoStops(caps.isoMin, caps.isoMax),
                 ) { onChange(settings.copy(iso = it.toInt())) }
             }
             if (caps.hasExposureRange) {
@@ -127,6 +130,7 @@ fun ControlsPanel(
                 valueText = "%+.1f".format(settings.evIndex * caps.evStep),
                 range = caps.evMin.toFloat()..caps.evMax.toFloat(),
                 centered = true,
+                detents = Detents.evStops(),
             ) { onChange(settings.copy(evIndex = it.toInt())) }
         }
 
@@ -194,13 +198,7 @@ fun ControlsPanel(
                     .semantics { contentDescription = "Reset all settings" },
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = "RESET ALL SETTINGS",
-                    color = Ink.Muted,
-                    fontSize = 11.sp,
-                    letterSpacing = 0.6.sp,
-                    fontWeight = FontWeight.Medium,
-                )
+                Text(text = "RESET ALL SETTINGS", style = Type.Reset)
             }
         }
 
@@ -221,7 +219,7 @@ fun ControlsPanel(
         )
         Text(
             text = caps.summary(),
-            color = Ink.Muted,
+            style = Type.Spec,
             // Not monospace, which is the one place in this app that rule is
             // worth breaking. Monospace at a size anyone can read is wider
             // than the panel, so the line wrapped mid-phrase -- "focus to 11
@@ -229,8 +227,6 @@ fun ControlsPanel(
             // wrap for something nobody can read. This is a sentence about
             // what the camera can do, not a live reading, so it is set like
             // one and fits on a line.
-            fontSize = 11.sp,
-            lineHeight = 15.sp,
             modifier = Modifier.padding(top = 10.dp),
         )
     }
@@ -251,10 +247,7 @@ private val MinTouch = 48.dp
 private fun SectionLabel(text: String) {
     Text(
         text = text.uppercase(),
-        color = Ink.Muted,
-        fontSize = 10.sp,
-        letterSpacing = 1.2.sp,
-        fontWeight = FontWeight.Medium,
+        style = Type.Section,
         modifier = Modifier.padding(top = Gap, bottom = 8.dp),
     )
 }
@@ -296,22 +289,41 @@ private fun LabelledSlider(
      * anyway, so it costs one branch.
      */
     centered: Boolean = false,
+    /**
+     * Where the dial has a stop, in the same units as [value]. Crossing one
+     * fires a tick, which is what turns a drag along glass into a dial with
+     * detents -- the value the finger is passing is felt, not just read.
+     *
+     * Empty for a control with no natural stops, which is silent by design:
+     * a tick on every pixel of travel is noise, not feedback.
+     */
+    detents: List<Float> = emptyList(),
     onValue: (Float) -> Unit,
 ) {
+    val view = LocalView.current
+    // Which detent the value last sat at. Held across recompositions so the
+    // tick fires on the crossing rather than on every frame of the drag.
+    var lastDetent by remember { mutableStateOf(Detents.nearest(value, detents)) }
+
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Text(
             label,
-            color = Ink.Muted,
-            fontSize = 11.sp,
-            letterSpacing = 0.5.sp,
+            style = Type.SliderLabel,
             modifier = Modifier.width(66.dp),
         )
         Slider(
             value = value.coerceIn(range.start, range.endInclusive),
-            onValueChange = onValue,
+            onValueChange = { v ->
+                val here = Detents.nearest(v, detents)
+                if (here != null && here != lastDetent) {
+                    Haptics.tick(view)
+                }
+                lastDetent = here
+                onValue(v)
+            },
             valueRange = range,
             colors = SliderDefaults.colors(
                 thumbColor = Ink.Amber,
@@ -362,9 +374,7 @@ private fun LabelledSlider(
         )
         Text(
             valueText,
-            color = Ink.Amber,
-            fontSize = 13.sp,
-            fontFamily = FontFamily.Monospace,
+            style = Type.SliderValue,
             modifier = Modifier
                 .width(70.dp)
                 .padding(start = 10.dp),
@@ -372,9 +382,15 @@ private fun LabelledSlider(
     }
 }
 
+/**
+ * A setting that flips. Fires a detent tick, because a toggle that changes what
+ * the next capture does should feel like a switch rather than like a tap on
+ * glass.
+ */
 @Composable
 private fun Toggle(label: String, active: Boolean, onClick: () -> Unit) {
     val shape = RoundedCornerShape(24.dp)
+    val view = LocalView.current
     Box(
         modifier = Modifier
             .padding(end = 6.dp)
@@ -385,17 +401,18 @@ private fun Toggle(label: String, active: Boolean, onClick: () -> Unit) {
                 if (active) Modifier
                 else Modifier.border(BorderStroke(1.dp, Ink.Hairline), shape)
             )
-            .clickable(onClick = onClick)
+            .clickable {
+                Haptics.segment(view)
+                onClick()
+            }
             .padding(horizontal = 15.dp)
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
+            style = Type.Control,
             color = if (active) Ink.OnBone else Ink.Bone,
-            fontSize = 12.sp,
-            letterSpacing = 0.3.sp,
-            fontWeight = FontWeight.Medium,
         )
     }
 }

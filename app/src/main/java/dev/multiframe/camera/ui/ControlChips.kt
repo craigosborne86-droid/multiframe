@@ -24,14 +24,11 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 
 /**
  * How a control looks, given what kind of thing it is.
@@ -120,14 +117,6 @@ fun ControlRow(
         modifier = modifier.fillMaxWidth().padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // The settings scroll, and on a narrow screen most of them start off
-        // the edge. That is deliberate -- the row is longer than the phone.
-        //
-        // What is not deliberate is a pill sliced down the middle at the
-        // boundary, which reads as a broken layout rather than as a hint that
-        // there is more. So both edges fade, and each only when there is in
-        // fact more that way: faded with nothing beyond it, the outermost
-        // control would look disabled.
         Row(
             modifier = Modifier
                 .weight(1f, fill = false)
@@ -137,9 +126,6 @@ fun ControlRow(
         ) {
             settings.forEach { spec -> ControlChip(spec) { onControl(spec.id) } }
         }
-        // The openers do not scroll. They are the way into the manual controls
-        // and the way to find out what any of this does, and putting them at
-        // the end of a row nine long meant they were never once on screen.
         if (openers.isNotEmpty()) {
             Spacer(Modifier.width(8.dp))
             openers.forEach { spec -> ControlChip(spec) { onControl(spec.id) } }
@@ -178,9 +164,6 @@ fun ActionStrip(
 private fun ControlChip(spec: ControlSpec, onClick: () -> Unit) {
     val shape: Shape = if (spec.kind == ControlKind.Action) ActionShape else PillShape
     val filled = spec.active && spec.kind != ControlKind.Cycle
-    // A cycler is never "on" -- it always holds some value -- so an active one
-    // is marked by a brighter edge rather than by a fill. Filling it would say
-    // the same thing a mode's fill says, which is the confusion being undone.
     val edge = when {
         filled -> Ink.Bone
         spec.active -> Ink.Bone
@@ -203,24 +186,18 @@ private fun ControlChip(spec: ControlSpec, onClick: () -> Unit) {
     ) {
         Text(
             text = spec.label,
+            style = if (spec.kind == ControlKind.Action) Type.Action else Type.Control,
             color = if (filled) Ink.OnBone else Ink.Bone,
-            fontSize = 12.sp,
-            letterSpacing = 0.4.sp,
-            fontWeight = if (spec.kind == ControlKind.Action) FontWeight.SemiBold
-                         else FontWeight.Medium,
         )
         spec.value?.let { value ->
             Text(
                 text = value,
-                // The one accent, spent where an instrument has always spent
-                // it: on the reading, and not on the word for not having one.
+                style = Type.Gauge,
                 color = when {
                     filled -> Ink.OnBone
                     spec.valueIsReading -> Ink.Amber
                     else -> Ink.Muted
                 },
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
                 modifier = Modifier.padding(start = 7.dp),
             )
         }

@@ -1,9 +1,15 @@
 package dev.multiframe.camera.ui
 
+import android.view.HapticFeedbackConstants
+import android.view.View
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 
 /**
  * The palette, such as it is.
@@ -24,8 +30,14 @@ object Ink {
      *  as paper next to a photograph instead of as a light leak. */
     val Bone = Color(0xFFF2F0EA)
 
+    /** Bone at reduced presence: tertiary text, disabled labels. */
+    val BoneDim = Color(0x80F2F0EA)
+
     /** An inactive control: a pane over the image, not a block of colour. */
     val Pane = Color(0xD9141A1F)
+
+    /** Non-overlay screen backgrounds (gallery, settings). Opaque, not over the photograph. */
+    val PaneSolid = Color(0xFF0F1215)
 
     /** The edge of a pane. Enough to separate it from a dark photograph. */
     val Hairline = Color(0x26FFFFFF)
@@ -35,6 +47,9 @@ object Ink {
 
     /** The one accent. Values, sliders, and anything reporting a live reading. */
     val Amber = Color(0xFFFFB020)
+
+    /** Amber at reduced presence: pressed/focused state of accent elements. */
+    val AmberDim = Color(0x66FFB020)
 
     /** Behind a panel, where the image has to give way to be readable. */
     val Panel = Color(0xF00A0C0E)
@@ -99,11 +114,204 @@ object Ink {
     val Level = Color(0xFF6FE39A)
     val Clipping = Color(0xFFFF6B6B)
 
+    /**
+     * Semantic colours for states outside the viewfinder. These never appear
+     * on the photograph during normal operation. [Confirm] appears in the
+     * sweep reticle guidance; [Danger] appears in gallery delete confirmation.
+     */
+    val Confirm = Color(0xFF5BC87A)
+    val Danger = Color(0xFFE85B5B)
+
     /** The About sheet, which covers the picture rather than floating on it. */
     val Sheet = Color(0xFF06090C)
     val SheetBody = Color(0xFFD4DDE6)
     val SheetMuted = Color(0xFF8A97A5)
     val SheetCode = Color(0xFF161C22)
+}
+
+/**
+ * The type scale.
+ *
+ * Monospace is reserved for values the user reads as numbers: ISO, shutter
+ * speed, EV, zoom, tile count, coverage, focus distance, lens focal length,
+ * countdown digits. The system default is used for labels, buttons, section
+ * headers, and prose.
+ *
+ * Every composable that displays text uses one of these styles rather than
+ * writing a raw [fontSize] or [fontFamily]. This is what makes the interface
+ * look like one instrument instead of five prototypes.
+ */
+object Type {
+    /** Live reading: ISO 400, 1/125s, 2.1x, 89%. The accent, monospaced. */
+    val Gauge = TextStyle(
+        fontSize = 13.sp,
+        fontFamily = FontFamily.Monospace,
+        color = Ink.Amber,
+    )
+
+    /** Prominent reading: tile count during sweep, large zoom indicator. */
+    val GaugeLarge = TextStyle(
+        fontSize = 26.sp,
+        fontFamily = FontFamily.Monospace,
+        color = Ink.Amber,
+    )
+
+    /** Reading that is informational, not accented: coverage %, shutter label. */
+    val GaugeBone = TextStyle(
+        fontSize = 13.sp,
+        fontFamily = FontFamily.Monospace,
+        color = Ink.Bone,
+    )
+
+    /** Static label next to a reading: "ISO", "SHUTTER", "EV". */
+    val Label = TextStyle(
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 0.5.sp,
+        color = Ink.Muted,
+    )
+
+    /** Chip/button text: "MERGE ON", "FRAMES", "GUIDES". */
+    val Control = TextStyle(
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 0.4.sp,
+        color = Ink.Bone,
+    )
+
+    /** Section header in the PRO panel: "EXPOSURE AND FOCUS", "WHITE BALANCE". */
+    val Section = TextStyle(
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 1.2.sp,
+        color = Ink.Muted,
+    )
+
+    /** Transient status: "raw burst...", "12 frames · 89% kept". */
+    val Status = TextStyle(
+        fontSize = 12.sp,
+        fontFamily = FontFamily.Monospace,
+        color = Color.White,
+    )
+
+    /** Self-timer countdown numeral. */
+    val Countdown = TextStyle(
+        fontSize = 76.sp,
+        fontFamily = FontFamily.Monospace,
+        color = Ink.Bone,
+    )
+
+    /** Guidance text during sweep: "PAN SLOWLY". Uppercase by convention. */
+    val Instruction = TextStyle(
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 1.2.sp,
+        color = Ink.Muted,
+    )
+
+    /** Action chip labels beside the shutter. Slightly heavier than [Control]. */
+    val Action = TextStyle(
+        fontSize = 12.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.4.sp,
+        color = Ink.Bone,
+    )
+
+    /** Slider label in the PRO panel: "ISO", "SHUTTER", "FOCUS". */
+    val SliderLabel = TextStyle(
+        fontSize = 11.sp,
+        letterSpacing = 0.5.sp,
+        color = Ink.Muted,
+    )
+
+    /** Slider value readout in the PRO panel. Amber, monospaced. */
+    val SliderValue = TextStyle(
+        fontSize = 13.sp,
+        fontFamily = FontFamily.Monospace,
+        color = Ink.Amber,
+    )
+
+    /** Readout unit suffix: "EV", "mm", "s". Smaller, muted. */
+    val Unit = TextStyle(
+        fontSize = 11.sp,
+        color = Ink.Muted,
+    )
+
+    /** "MAN" indicator in the readout bar. Bone, semi-bold. */
+    val Indicator = TextStyle(
+        fontSize = 11.sp,
+        letterSpacing = 0.5.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = Ink.Bone,
+    )
+
+    /** Readout separator dot. */
+    val Dot = TextStyle(
+        fontSize = 13.sp,
+        color = Ink.Muted,
+    )
+
+    /** The specification line at the bottom of the PRO panel. */
+    val Spec = TextStyle(
+        fontSize = 11.sp,
+        lineHeight = 15.sp,
+        color = Ink.Muted,
+    )
+
+    /** Lens chip focal length. */
+    val LensFocal = TextStyle(
+        fontSize = 13.sp,
+        fontFamily = FontFamily.Monospace,
+        color = Ink.Bone,
+    )
+
+    /** Lens chip zoom factor. */
+    val LensZoom = TextStyle(
+        fontSize = 10.sp,
+        fontFamily = FontFamily.Monospace,
+        color = Ink.Muted,
+    )
+
+    /** Reset button text. */
+    val Reset = TextStyle(
+        fontSize = 11.sp,
+        letterSpacing = 0.6.sp,
+        fontWeight = FontWeight.Medium,
+        color = Ink.Muted,
+    )
+}
+
+/**
+ * Tactile feedback for every state change worth feeling.
+ *
+ * Centralised here so every haptic in the app is catalogued in one place, and
+ * so the vocabulary can be audited against the mapping table in
+ * docs/REFERENCE.md section 1.3.
+ *
+ * **No haptics during capture.** Vibration motor activation during the burst
+ * introduces motion blur. The shutter haptic fires at press time, before the
+ * burst begins.
+ */
+object Haptics {
+    /** Shutter pressed — a photograph was taken. */
+    fun shutter(view: View) =
+        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+
+    /** Self-timer tick, slider detent (ISO round number, EV zero). */
+    fun tick(view: View) =
+        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+
+    /** Mode toggle, cycle step, lens switch — discrete mechanical detent. */
+    fun segment(view: View) =
+        view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK)
+
+    /** Sweep tile rejected, invalid action, error. */
+    fun reject(view: View) =
+        view.performHapticFeedback(HapticFeedbackConstants.REJECT)
+
+    /** Sweep tile locked, gallery delete confirmed. */
+    fun confirm(view: View) =
+        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
 }
 
 private val MultiframeColors = darkColorScheme(

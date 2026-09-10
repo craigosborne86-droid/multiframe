@@ -461,6 +461,22 @@ class ZslRawStream private constructor(
         return iso to exposureNs
     }
 
+    /**
+     * The white balance the sensor settled on, as R, Gr, Gb, B gains.
+     *
+     * Same source and same reason as [latestExposure]: under auto white balance
+     * what the camera chose is not what was asked for, and only the first is
+     * worth showing. Null before any result has arrived, or on a device that
+     * does not report the gains.
+     */
+    fun latestAwbGains(): FloatArray? {
+        val result = synchronized(resultLock) {
+            if (dcg) lastLowResult else newestLocked()
+        } ?: return null
+        val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS) ?: return null
+        return floatArrayOf(gains.red, gains.greenEven, gains.greenOdd, gains.blue)
+    }
+
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(
             s: CameraCaptureSession,
