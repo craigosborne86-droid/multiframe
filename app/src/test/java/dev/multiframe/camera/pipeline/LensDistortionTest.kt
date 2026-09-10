@@ -254,6 +254,68 @@ class LensDistortionTest {
         ).isNull()
     }
 
+    // --- orientation -------------------------------------------------------
+
+    /**
+     * The bug this exists for, caught on the phone rather than here.
+     *
+     * Optics were being corrected after the frame was rotated, so a 3064x4080
+     * image was being matched against a 4080x3064 array. `scaledTo` then
+     * divided fx by 1.33 and multiplied fy by it, and the 24mm main lens --
+     * which is close to rectilinear -- reported a peak displacement of 75.5px.
+     * That was not distortion, it was the correction being computed against a
+     * frame the model does not describe.
+     */
+    @Test
+    fun aRotatedFrameIsRefusedRatherThanRescaled() {
+        // Portrait image, landscape array: a quarter turn.
+        assertThat(LensDistortion.modelFor(profile(), height, width)).isNull()
+    }
+
+    @Test
+    fun aFrameInTheArraysOwnOrientationIsAccepted() {
+        assertThat(LensDistortion.modelFor(profile(), width, height)).isNotNull()
+    }
+
+    /**
+     * A capture may legitimately be a different size -- a crop, a binned
+     * readout -- and only a transposed one is the error. The tolerance has to
+     * admit the first without admitting the second.
+     */
+    @Test
+    fun aCroppedFrameIsStillTheSameWayRound() {
+        assertThat(
+            LensDistortion.matchesArrayOrientation(4080, 3064, 4080, 3064)
+        ).isTrue()
+        // 16:9 crop of a 4:3 array: a real capture mode, wider but not turned.
+        assertThat(
+            LensDistortion.matchesArrayOrientation(4080, 3064, 4080, 2296)
+        ).isTrue()
+        // Half resolution, same shape.
+        assertThat(
+            LensDistortion.matchesArrayOrientation(4080, 3064, 2040, 1532)
+        ).isTrue()
+    }
+
+    @Test
+    fun aTransposedFrameNeverPassesWhateverItsSize() {
+        assertThat(
+            LensDistortion.matchesArrayOrientation(4080, 3064, 3064, 4080)
+        ).isFalse()
+        assertThat(
+            LensDistortion.matchesArrayOrientation(4080, 3064, 1532, 2040)
+        ).isFalse()
+        assertThat(
+            LensDistortion.matchesArrayOrientation(4080, 3064, 2296, 4080)
+        ).isFalse()
+    }
+
+    /** Nothing to compare against is not a reason to refuse. */
+    @Test
+    fun anUnknownArraySizeDoesNotBlockTheCorrection() {
+        assertThat(LensDistortion.matchesArrayOrientation(0, 0, 4080, 3064)).isTrue()
+    }
+
     // --- resampling --------------------------------------------------------
 
     /**

@@ -79,8 +79,7 @@ data class DevelopParams(
  */
 object RawDeveloper {
 
-    private val threads = max(2, Runtime.getRuntime().availableProcessors())
-    private val pool = Executors.newFixedThreadPool(threads)
+    private val threads = Bands.threads
 
     /** sRGB transfer function, applied only at the very end. */
     private val gammaLut = FloatArray(4096) { i ->
@@ -320,15 +319,10 @@ object RawDeveloper {
     /** Retained for callers that want the roll-off alone. */
     fun shoulder(x: Float, knee: Float): Float = ToneCurve.shoulder(x, knee)
 
-    private inline fun parallelRows(height: Int, crossinline body: (Int, Int) -> Unit) {
-        val band = (height + threads - 1) / threads
-        val tasks = ArrayList<Callable<Unit>>(threads)
-        for (t in 0 until threads) {
-            val start = t * band
-            val end = min(start + band, height)
-            if (start >= end) continue
-            tasks.add(Callable { body(start, end) })
-        }
-        pool.invokeAll(tasks).forEach { it.get() }
-    }
+    /**
+     * Banding, now shared with the optics passes. See [Bands] for why it moved
+     * out of here.
+     */
+    private inline fun parallelRows(height: Int, crossinline body: (Int, Int) -> Unit) =
+        Bands.rows(height, body)
 }

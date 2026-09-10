@@ -67,6 +67,18 @@ object Optics {
          * lens. Null asks for it to be estimated from this frame.
          */
         val aberration: ChromaticAberration.Scale? = null,
+        /**
+         * Which lens this describes, for the log alone.
+         *
+         * Carried because a field report of "peak 75.5px" is not actionable
+         * without it -- the ultrawide and the main lens differ by most of an
+         * order of magnitude in how much they bend a straight line, and a
+         * figure that could belong to either says nothing about whether the
+         * correction is right.
+         */
+        val lensLabel: String = "lens",
+        /** Camera id, for the per-lens aberration cache. */
+        val lensId: String? = null,
     ) {
         val hasWork: Boolean
             get() = correctAberration || (distortion != null && !distortion.isIdentity)
@@ -90,8 +102,44 @@ object Optics {
         return Params(
             distortion = if (worthCorrecting) model else null,
             correctAberration = true,
+            aberration = measured[profile.cameraId],
+            lensLabel = "${profile.equivalent35mm}mm",
+            lensId = profile.cameraId,
         )
     }
+
+    /**
+     * Lateral aberration measured per lens, kept for the life of the process.
+     *
+     * ### Why it is cached rather than measured each time
+     *
+     * Because it is a property of the glass, not of the photograph. The radial
+     * scale between red and green is fixed by the lens's dispersion; pointing
+     * the camera somewhere else does not change it.
+     *
+     * Re-measuring every capture was wrong on three counts, and the device
+     * suite caught the third:
+     *
+     *  * It answers the same question repeatedly.
+     *  * A single frame is a worse estimate than one taken from whichever frame
+     *    happened to have the most edges in it.
+     *  * **Its cost depends on the scene.** The search runs over pixels found
+     *    on an edge, and a busy scene has many times more of them than a plain
+     *    one. That made develop time scene-dependent, and
+     *    `ZslStreamDeviceTest.repeatedCapturesTakeAConsistentTime` -- which
+     *    holds four consecutive shots to within 1.4x of each other -- failed
+     *    on the spread.
+     *
+     * In memory rather than on disk. One estimate per lens per launch is
+     * already cheap, and a stored calibration would need a format, a version
+     * and an invalidation rule to save a few hundred milliseconds once.
+     */
+    private val measured = java.util.concurrent.ConcurrentHashMap<
+        String, ChromaticAberration.Scale,
+        >()
+
+    /** For the settings reset, and for tests that need a clean slate. */
+    fun forgetMeasurements() = measured.clear()
 
     /**
      * Applies both corrections to a packed ARGB frame, in place.
@@ -108,11 +156,18 @@ object Optics {
         var scale = ChromaticAberration.NONE
 
         if (params.correctAberration) {
-            scale = params.aberration
-                ?: ChromaticAberration.estimate(pixels, width, height)
+            val known = params.aberration
+            scale = known ?: ChromaticAberration.estimate(pixels, width, height)
+
+            // Kept for the rest of the session, so the search runs once per
+            // lens rather than once per photograph. See `measured`.
+            if (known == null) {
+                params.lensId?.let { measured[it] = scale }
+                Log.i(TAG, "${params.lensLabel}: measured $scale")
+            }
+
             if (!scale.isIdentity) {
                 ChromaticAberration.apply(pixels, width, height, scale)
-                Log.i(TAG, "corrected $scale")
             }
         }
 
@@ -124,7 +179,8 @@ object Optics {
             LensDistortion.apply(source, pixels, width, height, model)
             Log.i(
                 TAG,
-                "undistorted, peak %.1fpx".format(
+                "%s: undistorted %dx%d, peak %.1fpx".format(
+                    params.lensLabel, width, height,
                     LensDistortion.peakDisplacement(model, width, height),
                 ),
             )

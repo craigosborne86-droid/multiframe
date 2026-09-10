@@ -1,5 +1,11 @@
 package dev.multiframe.camera.pipeline
 
+import android.util.Log
+import kotlin.math.max
+import kotlin.math.min
+
+private const val TAG = "LensDistortion"
+
 /**
  * Undoing what the glass did to straight lines.
  *
@@ -120,10 +126,70 @@ object LensDistortion {
         )
         if (model.fx <= 0f || model.fy <= 0f) return null
 
-        return model.scaledTo(
+        if (!matchesArrayOrientation(
+                profile.activeArrayWidth, profile.activeArrayHeight, width, height,
+            )
+        ) {
+            // A frame that has been turned is not in the coordinates the
+            // intrinsics were written in, and rescaling to fit does not turn
+            // them -- it squashes one axis and stretches the other, moving the
+            // optical axis somewhere it has never been.
+            //
+            // This shipped once. The 24mm main lens, close to rectilinear,
+            // reported a 75.5px peak displacement because the correction was
+            // being built for a 3064x4080 frame from a 4080x3064 array. The
+            // caller now corrects before rotating; this refuses rather than
+            // letting the mistake come back quietly.
+            Log.w(
+                TAG,
+                "declining ${width}x$height against a " +
+                    "${profile.activeArrayWidth}x${profile.activeArrayHeight} array: " +
+                    "correct before rotating",
+            )
+            return null
+        }
+
+        val scaled = model.scaledTo(
             profile.activeArrayWidth, profile.activeArrayHeight, width, height,
         )
+        Log.i(
+            TAG,
+            "%dmm k=[%.5f %.5f %.5f] p=[%.5f %.5f] f=[%.1f %.1f] c=[%.1f %.1f]".format(
+                profile.equivalent35mm,
+                scaled.k1, scaled.k2, scaled.k3, scaled.p1, scaled.p2,
+                scaled.fx, scaled.fy, scaled.cx, scaled.cy,
+            ),
+        )
+        return scaled
     }
+
+    /**
+     * Whether an image is the same way round as the array the lens was
+     * calibrated against.
+     *
+     * Compared as an aspect ratio rather than by exact size, because a capture
+     * is legitimately a different resolution -- a crop, a binned readout -- and
+     * only a *transposed* one is the error being caught. The tolerance is loose
+     * enough to admit a modest crop and far tighter than the 1.33 against 0.75
+     * that a quarter turn produces.
+     */
+    internal fun matchesArrayOrientation(
+        activeWidth: Int,
+        activeHeight: Int,
+        width: Int,
+        height: Int,
+    ): Boolean {
+        if (activeWidth <= 0 || activeHeight <= 0 || width <= 0 || height <= 0) return true
+        val array = activeWidth.toFloat() / activeHeight
+        val image = width.toFloat() / height
+        // Landscape against portrait, or the reverse, is always wrong.
+        if ((array >= 1f) != (image >= 1f)) return false
+        val ratio = max(array, image) / min(array, image)
+        return ratio <= ASPECT_TOLERANCE
+    }
+
+    /** A capture may be cropped; it may not be transposed. */
+    private const val ASPECT_TOLERANCE = 1.35f
 
     /**
      * Where the pixel that belongs at [outX], [outY] is to be found in the
@@ -207,15 +273,23 @@ object LensDistortion {
         require(src.size >= width * height) { "source is smaller than $width x $height" }
         require(dst.size >= width * height) { "destination is smaller than $width x $height" }
 
-        val out = FloatArray(2)
         val maxX = width - 1
         val maxY = height - 1
 
-        for (y in 0 until height) {
-            val row = y * width
-            for (x in 0 until width) {
-                sourceFor(model, x.toFloat(), y.toFloat(), out)
-                dst[row + x] = sampleBilinear(src, width, maxX, maxY, out[0], out[1])
+        // Banded across the cores. Rows are independent -- this gathers from
+        // the source and writes only to its own row of the destination -- and
+        // single-threaded it was measured at 1.85 seconds on a twelve
+        // megapixel frame, which is more than twice the budget for the whole
+        // capture-to-review path.
+        Bands.rows(height) { yStart, yEnd ->
+            // One scratch pair per band, not per pixel.
+            val out = FloatArray(2)
+            for (y in yStart until yEnd) {
+                val row = y * width
+                for (x in 0 until width) {
+                    sourceFor(model, x.toFloat(), y.toFloat(), out)
+                    dst[row + x] = sampleBilinear(src, width, maxX, maxY, out[0], out[1])
+                }
             }
         }
     }

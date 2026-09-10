@@ -175,19 +175,35 @@ object ChromaticAberration {
         edges: IntArray,
         shift: Int,
     ): Float {
+        // Each candidate is an independent sweep over the same sample set, so
+        // the costs are computed in parallel and compared afterwards. Written
+        // into a per-candidate slot rather than reduced under a lock: the
+        // comparison is trivial and a shared minimum would need synchronising
+        // on every improvement.
+        val costs = FloatArray(SEARCH_STEPS)
+        Bands.slices(SEARCH_STEPS) { from, until ->
+            for (step in from until until) {
+                costs[step] = costAt(
+                    pixels, width, height, cx, cy, edges, shift, scaleAt(step),
+                )
+            }
+        }
+
         var bestScale = 1f
         var bestCost = Float.MAX_VALUE
-
         for (step in 0 until SEARCH_STEPS) {
-            val t = step.toFloat() / (SEARCH_STEPS - 1) * 2f - 1f
-            val scale = 1f + t * MAX_SCALE_DEVIATION
-            val cost = costAt(pixels, width, height, cx, cy, edges, shift, scale)
-            if (cost < bestCost) {
-                bestCost = cost
-                bestScale = scale
+            if (costs[step] < bestCost) {
+                bestCost = costs[step]
+                bestScale = scaleAt(step)
             }
         }
         return bestScale
+    }
+
+    /** The candidate scale at [step], spanning the allowed deviation either way. */
+    private fun scaleAt(step: Int): Float {
+        val t = step.toFloat() / (SEARCH_STEPS - 1) * 2f - 1f
+        return 1f + t * MAX_SCALE_DEVIATION
     }
 
     /**
@@ -285,27 +301,33 @@ object ChromaticAberration {
         // pixel already rewritten is never used as a source for the next one.
         val source = pixels.copyOf(width * height)
 
-        for (y in 0 until height) {
-            val row = y * width
-            for (x in 0 until width) {
-                val px = x.toFloat()
+        // Banded, for the reason in `LensDistortion.apply`: this was 1.53
+        // seconds of a 3.54 second develop on the phone, single-threaded,
+        // beside a develop that is native and parallel. Reading from the
+        // untouched copy is what makes the rows independent.
+        Bands.rows(height) { yStart, yEnd ->
+            for (y in yStart until yEnd) {
+                val row = y * width
                 val py = y.toFloat()
+                for (x in 0 until width) {
+                    val px = x.toFloat()
 
-                val rx = cx + (px - cx) * scale.red
-                val ry = cy + (py - cy) * scale.red
-                val bx = cx + (px - cx) * scale.blue
-                val by = cy + (py - cy) * scale.blue
+                    val rx = cx + (px - cx) * scale.red
+                    val ry = cy + (py - cy) * scale.red
+                    val bx = cx + (px - cx) * scale.blue
+                    val by = cy + (py - cy) * scale.blue
 
-                val r = kotlin.math.round(
-                    sampleChannel(source, width, maxX, maxY, rx, ry, SHIFT_RED)
-                ).toInt().coerceIn(0, 255)
-                val b = kotlin.math.round(
-                    sampleChannel(source, width, maxX, maxY, bx, by, SHIFT_BLUE)
-                ).toInt().coerceIn(0, 255)
+                    val r = kotlin.math.round(
+                        sampleChannel(source, width, maxX, maxY, rx, ry, SHIFT_RED)
+                    ).toInt().coerceIn(0, 255)
+                    val b = kotlin.math.round(
+                        sampleChannel(source, width, maxX, maxY, bx, by, SHIFT_BLUE)
+                    ).toInt().coerceIn(0, 255)
 
-                val original = source[row + x]
-                pixels[row + x] = (original and 0xFF00FF00.toInt()) or
-                    (r shl SHIFT_RED) or (b shl SHIFT_BLUE)
+                    val original = source[row + x]
+                    pixels[row + x] = (original and 0xFF00FF00.toInt()) or
+                        (r shl SHIFT_RED) or (b shl SHIFT_BLUE)
+                }
             }
         }
     }

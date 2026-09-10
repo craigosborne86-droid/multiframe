@@ -278,14 +278,21 @@ object RawBurstCapture {
                 BayerFrame(width, height, shorts), profile, color, shading = shading,
             )
         }
-        val tRotate = System.currentTimeMillis()
-        bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
-        val rotateMillis = System.currentTimeMillis() - tRotate
-
-        // The optics, corrected on the developed frame. Deliberately after the
-        // rotation: the distortion model is stated in sensor coordinates, and
-        // an image that has been turned no longer agrees with it about which
-        // way is radial.
+        // Optics before the rotation, and the ordering is not a preference.
+        //
+        // `LENS_INTRINSIC_CALIBRATION` gives the principal point and focal
+        // length in *active array* pixels, which are sensor coordinates. A
+        // rotated frame is not those coordinates: after 90 degrees the image is
+        // 3064x4080 against an array of 4080x3064, and rescaling the intrinsics
+        // to fit divides fx by 1.33 while multiplying fy by the same -- putting
+        // the optical axis nowhere near the optical axis.
+        //
+        // Measured on the phone before this was moved: the 24mm main lens,
+        // which is close to rectilinear, reported a peak displacement of
+        // 75.5px. That was not the lens's distortion, it was the correction
+        // being computed against a frame the model did not describe.
+        //
+        // Corrected in the orientation the model was written in, then turned.
         opticsFor(lensProfile, bitmap)?.let { params ->
             val tOptics = System.currentTimeMillis()
             val pixels = IntArray(bitmap.width * bitmap.height)
@@ -294,6 +301,10 @@ object RawBurstCapture {
             bitmap.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
             Log.i(TAG, "optics %dms".format(System.currentTimeMillis() - tOptics))
         }
+
+        val tRotate = System.currentTimeMillis()
+        bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
+        val rotateMillis = System.currentTimeMillis() - tRotate
 
         val tEncode = System.currentTimeMillis()
         val publish = longArrayOf(0L)
