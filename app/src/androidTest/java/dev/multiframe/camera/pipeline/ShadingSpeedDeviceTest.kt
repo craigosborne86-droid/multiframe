@@ -151,11 +151,14 @@ class ShadingSpeedDeviceTest {
         // comparison exact rather than nearly exact.
         assertThat(worst / 1e9).isLessThan(1e-5)
 
-        // One-sided, and at three quarters rather than at half: half the rounds
-        // is exactly where a true null sits, so "must not be slower" written as
-        // half fails 40% of the time when nothing is wrong. Three quarters of
-        // forty costs 1.1%.
-        assertThat(wins(three, folded)).isAtLeast(PREPASS_ROUNDS * 3 / 4)
+        // The paired-median ratio, for the same reason the shading A/B below
+        // moved away from a round count: the folded pass is fast enough on this
+        // phone that scheduling noise decides individual rounds, and a win count
+        // threshold calibrated on slower hardware becomes flaky. The median of
+        // within-round ratios keeps the pairing while being immune to the rounds
+        // noise decides. Measured: A/A null sits at 1.00-1.07x, the fold at
+        // 1.51x at its lowest, so 1.25x separates the two populations.
+        assertThat(perRoundRatioMedian(three, folded)).isGreaterThan(1.25)
     }
 
     @Test
