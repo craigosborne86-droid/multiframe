@@ -474,7 +474,10 @@ Output: 8-bit sRGB ARGB int array -> JPEG via libjpeg-turbo
 - **After step 5, before step 6 (Phase 2):** Geometric lens distortion
   correction (Brown-Conrady undistortion) and lateral CA correction (per-channel
   radial warp).
-- **After step 7, before step 8 (Phase 3):** Bilateral-grid local tone mapping.
+- **Replacing step 5 (Phase 3):** Sub-pixel kernel accumulation, which produces
+  full colour at 2x resolution and removes the demosaic entirely for bursts that
+  take that path. See §3.6, and §3.6.5 for what the chain becomes.
+- **After step 7, before step 8 (Phase 4):** Bilateral-grid local tone mapping.
 
 ### 3.2 Merge Accumulation Mathematics
 
@@ -512,6 +515,8 @@ Mean contribution: sum(w_i) / (N - 1)
 
 ### 3.3 Alignment Mathematics
 
+#### 3.3.1 Tile Search
+
 Tile-based alignment with sub-pixel refinement:
 
 ```
@@ -534,6 +539,75 @@ Per-pixel displacement is bilinearly interpolated from the tile grid.
 The luma proxy is computed with `gainScale` normalization: `proxy_value = (raw /
 gainScale)`, so brightness differences from ISO bracketing don't confuse the SAD
 metric.
+
+#### 3.3.2 OIS-Seeded Search (Phase 3)
+
+**What the search currently does not know.** Every tile starts its search at
+zero displacement and hunts outward over a ±16 pixel window: 33 × 33 = 1089 SAD
+evaluations per tile, per frame, with no prior on where the answer is. Yet the
+camera already knows roughly where the scene moved — the optical stabiliser
+spent the exposure measuring and counteracting exactly that motion, and Camera2
+will hand over its record of it.
+
+**The data.** Gated on `STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES` containing
+`STATISTICS_OIS_DATA_MODE_ON`. Set `STATISTICS_OIS_DATA_MODE` on the request;
+read `STATISTICS_OIS_SAMPLES` from the `TotalCaptureResult` as a
+`List<OisSample>`, each carrying:
+
+| Field | Meaning |
+|---|---|
+| `getTimestamp()` | Nanoseconds, on the same clock as `SENSOR_TIMESTAMP` |
+| `getXshift()` | Lens shift, active-array pixels |
+| `getYshift()` | Lens shift, active-array pixels |
+
+Several samples arrive per frame, spread across the exposure window.
+
+**Deriving a seed.**
+
+```
+For each frame f:
+  samples(f) = OIS samples whose timestamp lies within f's exposure window
+  ois(f)     = time-weighted mean of (xShift, yShift) over samples(f)
+
+For an alt frame a against reference r:
+  seed(a) = k * (ois(a) - ois(r))     scaled to proxy resolution
+```
+
+The difference matters, not the absolute position: a constant OIS offset shared
+by both frames displaces neither relative to the other. The result is scaled by
+the proxy's downsample factor, since the search runs on the 2x-downsampled luma
+proxy rather than at sensor resolution.
+
+**On the sign of `k`.** It is written as a constant here because its sign is not
+something to assume. The OIS shift is a *lens* displacement applied to cancel
+scene motion, so whether the corresponding image displacement runs with it or
+against it depends on the optical path, and vendors have been known to differ in
+convention. Determine it empirically: run a burst with OIS data captured
+alongside the existing blind search, and correlate the measured tile
+displacements against the OIS deltas. If the correlation is strongly negative,
+`k` is negative. A device test that asserts the correlation exceeds a threshold
+in the expected direction is what keeps a later firmware change from silently
+inverting it.
+
+**What it buys.** With a seed accurate to a pixel or two, the search window
+shrinks from ±16 to ±4: 81 evaluations per tile instead of 1089, a 13x
+reduction in the dominant cost of alignment. The sub-pixel parabola refinement
+is unchanged and still runs on the 3×3 neighbourhood of the minimum.
+
+The accuracy matters as much as the speed. A ±16 blind search can lock onto a
+repeating texture at the wrong period; seeded to within a couple of pixels, that
+ambiguity mostly disappears. This is why the accumulation in §3.6 depends on
+this: it places samples at sub-pixel positions and is only as good as the
+displacements it is given.
+
+**Fallbacks.** No OIS on the lens, the mode unsupported, or an empty sample list
+for a frame — each falls back to the current blind ±16 search for that frame.
+The seed is an optimisation, never a requirement, and a frame without one is
+aligned exactly as it is today.
+
+**Guard.** If the seeded search finds its minimum at the edge of the ±4 window,
+the seed was wrong and the tile is re-searched at ±16. Without this, a bad seed
+silently produces a confidently wrong alignment, which is worse than a slow one.
 
 ### 3.4 Super-Resolution Stitching Mathematics
 
@@ -591,7 +665,7 @@ This blends low-frequency differences (exposure, color temperature) over wide
 regions while preserving high-frequency detail (texture, edges) at the seam.
 The result has no visible seam even when tiles differ in exposure by 1+ stop.
 
-### 3.5 Bilateral Grid Local Tone Mapping (Phase 3)
+### 3.5 Bilateral Grid Local Tone Mapping (Phase 4)
 
 ```
 Input: linear RGB image after color matrix, before global tone curve.
@@ -617,6 +691,145 @@ no halos (the grid's spatial binning prevents them).
 
 ---
 
+### 3.6 Sub-Pixel Kernel Accumulation (Phase 3)
+
+**The measurement demosaicing throws away.** A Bayer sensor measures one colour
+per photosite. Demosaicing invents the other two by interpolating neighbours —
+§3.1 step 5 does it as well as a linear method can, but two thirds of every
+pixel in the output is still a guess.
+
+A burst does not have to guess. Between frames the sensor moves a fraction of a
+photosite, so a site that measured green in one frame sits over a slightly
+different part of the scene in the next, and across the burst red, green and
+blue samples land all over the scene at sub-pixel spacing. **The missing colours
+were measured.** Demosaicing first and merging second discards that: it
+interpolates each frame independently, then averages the interpolations.
+
+This inverts the order. Raw CFA samples are accumulated directly onto a
+double-resolution canvas at their measured sub-pixel positions, and the picture
+that falls out has real colour at every cell — no interpolation step at all.
+
+#### 3.6.1 The Accumulation
+
+```
+Canvas: 2x sensor resolution in each axis.
+Per cell, per colour channel c: a weighted sum and a weight.
+    acc[c], wsum[c]
+
+For each frame f, for each CFA sample s at sensor position (sx, sy):
+    c        = colour of the CFA site (0 red, 1 green, 2 blue)
+    (dx, dy) = per-pixel displacement, bilinearly interpolated
+               from f's AlignmentField
+    (u, v)   = 2 * (sx - dx, sy - dy)        canvas coordinates, fractional
+
+    For each canvas cell (i, j) within the kernel radius of (u, v):
+        d  = distance from (i, j) to (u, v)
+        k  = kernel(d)
+        r  = robustness weight of s          as in 3.2
+        w  = k * r
+
+        acc[c] (i,j)  += w * (value(s) / gainScale(f))
+        wsum[c](i,j)  += w
+
+Resolve, per cell, per channel:
+    out[c] = acc[c] / wsum[c]       where wsum[c] > threshold
+```
+
+Three things carry over from §3.2 unchanged: gain normalisation, so a DCG burst
+accumulates on one scale; robustness weighting, so a sample that disagrees with
+the reference contributes little; and the reference frame's guaranteed
+contribution, so a cell is never composed entirely of rejected samples.
+
+#### 3.6.2 The Kernel
+
+Baseline is a radially symmetric Gaussian, σ ≈ 0.5 canvas cells, truncated at
+2σ. Simple, has no parameters to tune per scene, and cannot introduce structure
+that was not measured.
+
+The refinement, if the baseline proves too soft: steer the kernel by the local
+gradient — narrow across an edge, wide along it — which resolves edges more
+sharply without the ringing an isotropic sharpen would add. This is a
+*refinement*, gated on the baseline shipping and being measurably too soft. An
+anisotropic kernel has failure modes on fine repeating texture that an isotropic
+one does not, and it is not worth them until the simple version is known to be
+the limiting factor.
+
+#### 3.6.3 Coverage and Holes
+
+A cell can end a burst with no samples of some channel — insufficient sub-pixel
+diversity, or every candidate sample rejected as an outlier. `wsum[c]` below
+threshold marks it.
+
+Holes are filled from the nearest cells that do have that channel. This is
+interpolation, and it is the one place in this path where a value is inferred
+rather than measured — so it is confined to cells the burst genuinely did not
+reach, and the hole fraction is recorded. **A high hole fraction means the burst
+lacked sub-pixel diversity**, which is precisely the tripod case §2.3.6 of the
+PRD detects and dithers for. The two features are the same problem seen from
+either end, and the hole fraction is the honest measurement of whether the
+dither worked.
+
+#### 3.6.4 Memory
+
+This is the constraint that shapes the implementation.
+
+A 12 MP sensor gives a 48 M-cell canvas. Carrying three channels of accumulator
+and three of weight as `float` is 24 bytes per cell — **1.15 GB**, against a
+`MemoryBudget` that assumes a 256 MB heap on this device. Not viable whole.
+
+Resolved the way `MosaicCanvas` already resolves it: process in horizontal
+strips, mmap-backed, one strip resident at a time. A 256-row strip of a
+4080-wide sensor at 2x is 8160 × 512 cells ≈ 100 MB, which fits. The kernel
+radius is 2σ ≈ 1 cell, so strips need only a one-cell halo of overlap for the
+kernel to reach across the boundary — a hundredth of the strip.
+
+`float16` accumulators would halve it again and are worth measuring, but only
+after correctness: a burst of 32 frames accumulating into a 10-bit mantissa is
+close enough to the precision floor that it needs a parity test against the
+`float32` version rather than an assumption.
+
+#### 3.6.5 What This Does to the Develop Chain
+
+For bursts taking this path, §3.1 changes:
+
+```
+Merged CFA -> black -> hot pixel -> shading -> white balance
+  -> DEMOSAIC                                    <-- removed
+  -> colour matrix -> tone curve -> ...
+```
+
+becomes
+
+```
+Aligned raw samples -> black -> hot pixel -> shading -> white balance
+  -> SUB-PIXEL ACCUMULATION (this section)       <-- replaces demosaic,
+                                                     and outputs at 2x
+  -> colour matrix -> tone curve -> ...
+```
+
+The preparatory passes move ahead of accumulation because they are per-sample
+corrections and must be applied to a sample before it is placed. Everything
+downstream of the colour matrix is unchanged and simply receives a larger,
+full-colour buffer.
+
+**This does not replace the existing merge.** A single frame, a burst with no
+measurable sub-pixel diversity that dither could not supply, or a device short
+of memory all still take the §3.2 path and demosaic normally. The two coexist,
+and which one ran is recorded in the capture readout — a 2x output is a
+different claim about the photograph and should say so.
+
+#### 3.6.6 Verification
+
+| Property | Test |
+|---|---|
+| A/A null | A burst of one frame, accumulated, must match that frame demosaiced to within the kernel's known softening. It cannot invent detail from a single sample set. |
+| Synthetic ground truth | Render a known high-resolution target, sample it through a simulated Bayer grid at known sub-pixel offsets, accumulate, and compare against the original. The recovered detail is measurable rather than a matter of opinion. |
+| Native/Kotlin parity | As `MergeParityTest` does for §3.2 — a reference implementation in Kotlin, bit-comparable to the NEON path within the `-ffast-math` bound of 1e-5. |
+| Hole fraction | Recorded per capture and asserted near zero on a dithered tripod burst; a rise is the signal that dither has stopped working. |
+| No-diversity guard | A burst captured rigidly with dither disabled must decline this path rather than produce a 2x output built from interpolation. |
+
+---
+
 ## Appendix: File Inventory by Subsystem
 
 ### Pipeline (app/src/main/java/dev/multiframe/camera/pipeline/)
@@ -628,10 +841,11 @@ no halos (the grid's spatial binning prevents them).
 | **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
 | **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` |
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt` |
-| **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |
+| **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `LensProfile.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |
+| **DCG calibration** | `DcgCalibration.kt`, `DcgProfiler.kt`, `DcgCalibrationStore.kt` |
 | **Mosaic** | `MosaicSession.kt`, `MosaicCapture.kt`, `MosaicPlanner.kt`, `MosaicAssembler.kt`, `MosaicCanvas.kt`, `MosaicRefiner.kt` |
 | **Memory** | `MemoryBudget.kt`, `MemoryPressure.kt` |
-| **Settings** | `AppSettings.kt`, `CaptureReadout.kt`, `RecentCapture.kt` |
+| **Settings** | `AppSettings.kt`, `CaptureReadout.kt`, `RecentCapture.kt`, `CaptureLog.kt` |
 | **GPU** | `GpuCrossing.kt` (benchmark only) |
 | **Geometry** | `Homography.kt`, `FeatureMatcher.kt` |
 | **Sensor** | `LevelGauge.kt`, `YuvFrame.kt` |
@@ -640,8 +854,8 @@ no halos (the grid's spatial binning prevents them).
 
 | File | Purpose |
 |---|---|
-| `bayer_merge.cpp` | NEON-vectorized merge accumulation, noise estimation, shading correction, prepass |
-| `Align.cpp` | Native tile alignment (SAD-based matching in luma proxy) |
+| `bayer_merge.cpp` | NEON-vectorized merge accumulation, noise estimation, shading correction, prepass. **Phase 3** adds sub-pixel kernel accumulation onto a 2x canvas (§3.6). |
+| `Align.cpp` | Native tile alignment (SAD-based matching in luma proxy). **Phase 3** adds OIS-seeded search windows (§3.3.2). |
 | `RingBuffer.cpp` / `.h` | mmap-backed AHardwareBuffer ring buffer |
 | `Mosaic.cpp` / `.h` | Native mosaic tile compositing |
 | `Rotate.cpp` | NEON-accelerated image rotation |
@@ -652,10 +866,12 @@ no halos (the grid's spatial binning prevents them).
 
 | File | Purpose |
 |---|---|
-| `Theme.kt` | Ink palette, Material3 dark color scheme, `MultiframeTheme` |
-| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, mode/action builders |
+| `Theme.kt` | `Ink` palette, `Type` scale, `Haptics` vocabulary, `MultiframeTheme` |
+| `Gauges.kt` | `GaugeState` holder and the live readouts: exposure, histogram, focus, zoom |
+| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`, mode/action builders |
 | `ControlChips.kt` | Composable rendering of chips: `ControlRow`, `ActionStrip`, `ControlChip` |
 | `ControlsPanel.kt` | PRO panel: manual exposure, focus, WB, toggles, sliders |
+| `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation |
 | `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.) |
 | `AboutSheet.kt` | About/info bottom sheet |
 

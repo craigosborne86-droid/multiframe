@@ -311,6 +311,85 @@ For each locked tile:
 - Tiles are composited as they arrive — only one tile is held in memory at a
   time alongside the canvas.
 
+#### 2.3.6 IMU Tripod Detection & Haptic Micro-Dither (Phase 3)
+
+**The problem this solves.** Multi-frame super-resolution does not extract
+detail from a burst by averaging it. It works because each frame samples the
+scene at a *slightly different sub-pixel offset* — hand tremor moves the sensor
+a fraction of a photosite between frames, so the burst collectively samples the
+scene more densely than any one frame does. That is the entire mechanism.
+
+Remove the tremor and the mechanism stops. On a tripod, every frame samples the
+scene at exactly the same positions, so the burst contains N copies of one
+sampling grid. Averaging them reduces noise, which is worth having, but there is
+no additional detail to recover and no new colour information at any photosite.
+The result is worse than handheld in the one situation the user reasonably
+expects to be best.
+
+**Detection.** The IMU says which regime the device is in:
+
+| Signal | Handheld | Rigidly mounted |
+|---|---|---|
+| Gyroscope RMS, 500 ms window | 0.01–0.05 rad/s | below ~0.001 rad/s (sensor noise floor) |
+| Accelerometer RMS, 500 ms window | 0.05–0.3 m/s² | below ~0.01 m/s² |
+
+The threshold sits an order of magnitude above the noise floor and an order
+below ordinary handheld: gyro RMS under 0.005 rad/s *and* accelerometer RMS
+under 0.02 m/s², sustained across a full window, is treated as mounted. Both
+axes are required because a phone resting flat on a table is still against
+gravity but not against a tap on the surface.
+
+**Dither.** When mounted, the app induces the sub-pixel motion the scene is not
+providing: a brief haptic pulse between frames, displacing the sensor by a
+fraction of a photosite, so successive frames sample on offset grids. The
+target displacement is 0.3–0.7 photosite pitch — enough to change the sampling
+phase, far too little to be visible as movement.
+
+**Reconciling this with "no haptics during capture."** §1.3.3 of
+`docs/REFERENCE.md` forbids firing the vibration motor during a burst, and that
+rule stands. It is about a different situation. The prohibition exists because a
+handheld capture already has motion the merge must reject, and adding motor
+vibration during an exposure smears a frame that was going to be usable. Micro-
+dither is the inverse case in every respect:
+
+- It fires **only when the IMU says there is no hand motion at all**, so there
+  is no existing motion to compound.
+- It fires **between exposures, never during one**. The pulse must start and
+  fully settle inside the inter-frame dead time, so every frame integrates while
+  the sensor is stationary at a new position.
+- Its displacement is **deliberate and measured**, and is the mechanism the
+  feature depends on rather than a side effect.
+
+The rule as it should be read: the motor never runs while the sensor is
+integrating. That is true both of the haptic vocabulary in §1.3 and of this.
+
+**The timing risk, stated rather than assumed.** At 30 fps the inter-frame
+interval is 33.3 ms. With an 8 ms exposure there is roughly 25 ms of dead time
+to fit a pulse and its settle into. A linear resonant actuator typically rings
+down over 10–30 ms, which may not fit — and a dither that has not settled is
+motion blur, i.e. exactly the failure the rule above exists to prevent.
+
+This must be measured before the feature is built, not designed around an
+assumption. Verification: drive a pulse, capture at known exposure, and measure
+residual blur against an undithered reference on the same static scene. If the
+actuator cannot settle in time, the fallbacks in order of preference are:
+
+1. **Drive the OIS actuator instead of the haptic motor.** It is designed for
+   precise sub-pixel lens positioning, settles far faster, and is silent. This
+   is what the published handheld super-resolution work does. It requires a
+   vendor path to command OIS position directly, which Camera2 does not expose —
+   so it is preferred but not portable.
+2. **Lengthen the inter-frame interval deliberately** while mounted, trading
+   burst duration for settle time. On a tripod a longer burst costs nothing.
+3. **Report the tripod condition and shoot a plain merge**, telling the user
+   that detail enhancement is unavailable. A merge with honest noise reduction
+   beats a smeared frame.
+
+**Failure mode to avoid.** If dither is applied and the device turns out not to
+be mounted — the user picks the phone up mid-burst — the pulse adds motion to a
+handheld capture. The IMU is therefore re-evaluated every frame, and the first
+window that reads as handheld cancels dithering for the remainder of the burst.
+
 ---
 
 ### 2.4 Integrated Review & Gallery
@@ -444,6 +523,38 @@ A dedicated screen accessible from the last-shot thumbnail in the viewfinder.
 | Unit tests | 356 | 400 (new: gallery, settings, lens profile, DCG calibration) |
 | Device tests | 104 | 140 (new: lens profile probing, sweep guidance, gallery CRUD) |
 | Parity tests | Present for merge, shading, JPEG | Must also cover: distortion correction, CA correction |
+
+*Phase 1 delivered 467 unit and 133 device tests, both past the v1.0 minimum.*
+
+---
+
+## 5. Delivery Phases
+
+Headings throughout both documents carry a `(Phase N)` marker where the thing
+described is not yet built. This is what those numbers mean.
+
+| Phase | Name | Contents |
+|---|---|---|
+| 1 | Foundation & Hardware Truth | **Delivered.** Design tokens, haptic vocabulary, decoupled viewfinder HUD, `LensProfile` discovery, non-invasive DCG noise profiling, gallery and review surface. |
+| 2 | Lens Corrections & Develop Quality | Geometric distortion correction from `LensProfile`, lateral chromatic aberration correction, dual-illuminant colour matrix, HEIF output. |
+| 3 | Merge & Alignment Optimisation | OIS-seeded alignment, sub-pixel kernel accumulation onto a 2x canvas, IMU tripod detection with haptic micro-dither, local motion and ghost rejection. |
+| 4 | GPU Develop & Local Tone Mapping | Vulkan compute develop, bilateral-grid local tone mapping. |
+| 5 | Super-Res UX & Responsive UI | Sweep mode with reticle guidance, configurable tile matrices, responsive layout, accessibility pass. |
+| 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
+
+### 5.1 A note on the Phase 3 and 4 contents
+
+An earlier draft of this roadmap put the GPU develop and the bilateral-grid
+local tone map at Phase 3. They are now Phase 4, and Phase 3 is the merge and
+alignment work described in §2.3.6 above and §§3.3.2 and 3.6 of
+`docs/REFERENCE.md`.
+
+The reordering is not arbitrary. Sub-pixel kernel accumulation changes what the
+develop stage receives: it produces a full-colour 2x canvas and removes the
+demosaic step entirely for that path. Building a GPU develop against the current
+pipeline shape and then changing that shape underneath it would mean writing the
+compute kernels twice. Settling the merge output first costs nothing and saves
+that.
 
 ---
 
