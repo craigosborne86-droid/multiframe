@@ -95,6 +95,8 @@ import dev.multiframe.camera.pipeline.ColorProfile
 import dev.multiframe.camera.pipeline.ColorScience
 import dev.multiframe.camera.pipeline.DcgCalibrationStore
 import dev.multiframe.camera.pipeline.DcgProfiler
+import dev.multiframe.camera.pipeline.HeifEncoder
+import dev.multiframe.camera.pipeline.OutputFormat
 import dev.multiframe.camera.pipeline.SceneAnalysis
 import dev.multiframe.camera.pipeline.FocusPeaking
 import dev.multiframe.camera.pipeline.Plane
@@ -240,6 +242,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var highlightGuard by remember { mutableStateOf(restored.highlightGuard) }
     var guardPull by remember { mutableFloatStateOf(0f) }
     var dcgEnabled by remember { mutableStateOf(restored.dcgEnabled) }
+    var outputFormat by remember { mutableStateOf(restored.outputFormat) }
 
     // What the user is photographing. The right settings for a night scene and
     // a moving subject are opposites, and only the user knows which it is.
@@ -1032,7 +1035,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(
         settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, captureMode,
-        timerSeconds, guides, dcgEnabled,
+        timerSeconds, guides, dcgEnabled, outputFormat,
     ) {
         AppSettings.save(
             context,
@@ -1047,6 +1050,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 timerSeconds = timerSeconds,
                 guides = guides.name,
                 dcgEnabled = dcgEnabled,
+                outputFormat = outputFormat,
             ),
         )
     }
@@ -1326,6 +1330,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 // catalogue's to know, not the capture
                                 // result's.
                                 lens = lens,
+                                lensProfile = lens?.let { lensProfiles[it.cameraId] },
+                                outputFormat = outputFormat,
                                 rotationDegrees = caps?.let {
                                     orientation.captureRotation(it.sensorOrientation)
                                 } ?: 0,
@@ -1499,6 +1505,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         onHighlightGuard = { if (!busy) highlightGuard = it },
                         dcgEnabled = if (caps?.supportsBracketing == true) dcgEnabled else null,
                         onDcgEnabled = { if (!busy) dcgEnabled = it },
+                        outputFormat = if (HeifEncoder.isAvailable) outputFormat else null,
+                        onOutputFormat = { if (!busy) outputFormat = it },
                         onReset = {
                             // Back to what the app ships with. The save effect above
                             // is watching every one of these, so persisting it needs
@@ -1514,6 +1522,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             guides = GuideMode.OFF
                             abMode = false
                             dcgEnabled = fresh.dcgEnabled
+                            outputFormat = fresh.outputFormat
                             status = "settings reset"
                         },
                     )
@@ -1611,6 +1620,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                     val r = withContext(Dispatchers.Default) {
                                         ZslCapture.captureAndMerge(
                                             context, stream, frames, rot,
+                                            lensProfile = lensProfiles[stream.lensId],
+                                            outputFormat = outputFormat,
                                         )
                                     }
                                     Log.i(TAG, "ZSL result: $r")

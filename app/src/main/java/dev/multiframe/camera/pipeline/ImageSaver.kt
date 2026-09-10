@@ -80,6 +80,66 @@ object ImageSaver {
     }
 
     /**
+     * Writes [bitmap] as HEIF, or as JPEG if the encoder declines it.
+     *
+     * The decision is made before the MediaStore entry is created, not after,
+     * and that ordering is the whole reason this is a separate function rather
+     * than a flag on [saveJpeg]. A row's `DISPLAY_NAME` and `MIME_TYPE` are set
+     * when it is inserted; discovering mid-encode that HEIF is unavailable
+     * would leave a row called `.heic` with JPEG bytes in it, which every
+     * gallery on the device would then mis-decode.
+     *
+     * So the encoder is asked first, on a throwaway descriptor, and only then
+     * is the real row created with a name and type that match what will
+     * actually be written.
+     *
+     * Returns the published URI and the name it was written under -- which is
+     * not necessarily the name that was asked for, since the extension follows
+     * the format that won.
+     */
+    fun saveImage(
+        context: Context,
+        bitmap: Bitmap,
+        baseName: String,
+        format: OutputFormat,
+        quality: Int = 95,
+        metadata: CaptureMetadata? = null,
+    ): Pair<Uri, String>? {
+        if (format == OutputFormat.HEIF &&
+            HeifEncoder.dimensionsAcceptable(bitmap.width, bitmap.height)
+        ) {
+            val name = "$baseName.heic"
+            val values = pendingEntry(name, MIME_HEIF)
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+
+            if (uri != null) {
+                val encoded = try {
+                    resolver.openFileDescriptor(uri, "w")?.use {
+                        HeifEncoder.encodeToFd(bitmap, it.fileDescriptor, quality)
+                    } ?: false
+                } catch (e: Exception) {
+                    Log.w(TAG, "could not open $name for writing", e)
+                    false
+                }
+
+                if (encoded) {
+                    return publish(context, uri, values, metadata, name) to name
+                }
+                // The encoder declined after the row existed. Remove it rather
+                // than leaving a `.heic` holding nothing.
+                resolver.delete(uri, null, null)
+                Log.i(TAG, "HEIF unavailable for this image; writing JPEG instead")
+            }
+        }
+
+        val name = "$baseName.jpg"
+        return saveJpeg(context, bitmap, name, quality, metadata)?.let { it to name }
+    }
+
+    const val MIME_HEIF = "image/heif"
+
+    /**
      * Saves an image whose pixels never become a [Bitmap].
      *
      * [write] is handed the open descriptor and returns whether it filled it.
@@ -150,9 +210,12 @@ object ImageSaver {
         return publish(context, uri, values, metadata, displayName)
     }
 
-    private fun pendingEntry(displayName: String) = ContentValues().apply {
+    private fun pendingEntry(
+        displayName: String,
+        mimeType: String = "image/jpeg",
+    ) = ContentValues().apply {
         put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-        put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+        put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
         put(
             MediaStore.MediaColumns.RELATIVE_PATH,
             "${Environment.DIRECTORY_DCIM}/Multiframe",

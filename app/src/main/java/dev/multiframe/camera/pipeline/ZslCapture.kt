@@ -28,6 +28,9 @@ object ZslCapture {
         stream: ZslRawStream,
         frameCount: Int,
         rotationDegrees: Int,
+        /** Optical calibration for the streaming lens, where the device has any. */
+        lensProfile: LensProfile? = null,
+        outputFormat: OutputFormat = OutputFormat.JPEG,
         onProgress: (String) -> Unit = {},
     ): RawBurstResult {
         val profile = SensorProfile.from(stream.characteristics)
@@ -180,6 +183,8 @@ object ZslCapture {
                 mergeMillis = mergeMillis,
                 tag = "zsl",
                 lens = stream.lens,
+                lensProfile = lensProfile,
+                outputFormat = outputFormat,
                 handoverMicros = handoverMicros,
                 burstSpanMillis = spanMillis,
                 streamStats = statsAfter.toString(),

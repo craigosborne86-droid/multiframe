@@ -169,7 +169,55 @@ object ColorScience {
         val calibration2: Mat3 = Mat3.IDENTITY,
         val forward1: Mat3? = null,
         val forward2: Mat3? = null,
-    )
+        /**
+         * Colour temperatures of the two illuminants the matrices were measured
+         * under, in kelvin.
+         *
+         * Null where the device did not publish them, which is common enough to
+         * plan for. Without them the pair cannot be interpolated by
+         * temperature and [blendFor]'s ratio proxy is used instead.
+         */
+        val illuminant1Kelvin: Int? = null,
+        val illuminant2Kelvin: Int? = null,
+    ) {
+        /** Whether this calibration supports temperature interpolation. */
+        val hasIlluminants: Boolean
+            get() = illuminant1Kelvin != null &&
+                illuminant2Kelvin != null &&
+                illuminant1Kelvin != illuminant2Kelvin
+    }
+
+    /**
+     * Colour temperatures of the standard illuminants, by the EXIF LightSource
+     * code Camera2 reports in `SENSOR_REFERENCE_ILLUMINANT1` and `2`.
+     *
+     * These are the values the DNG specification and every raw converter agree
+     * on. Codes not listed are ones no camera has been seen to report for a
+     * calibration illuminant -- an unknown code returns null and the pair falls
+     * back to the ratio proxy rather than being interpolated against a guess.
+     */
+    fun illuminantKelvin(code: Int): Int? = when (code) {
+        1 -> 5500     // Daylight
+        2 -> 4200     // Fluorescent
+        3 -> 2856     // Tungsten
+        4 -> 5500     // Flash
+        9 -> 5500     // Fine weather
+        10 -> 6500    // Cloudy weather
+        11 -> 7500    // Shade
+        12 -> 6400    // Daylight fluorescent
+        13 -> 4900    // Day white fluorescent
+        14 -> 4200    // Cool white fluorescent
+        15 -> 3450    // White fluorescent
+        17 -> 2856    // Standard A
+        18 -> 4874    // Standard B
+        19 -> 6774    // Standard C
+        20 -> 5503    // D55
+        21 -> 6504    // D65
+        22 -> 7504    // D75
+        23 -> 5003    // D50
+        24 -> 3200    // ISO studio tungsten
+        else -> null
+    }
 
     /**
      * Builds the matrix taking white-balanced camera RGB to linear sRGB.
@@ -243,6 +291,116 @@ object ColorScience {
     }
 
     /**
+     * Where a scene at [kelvin] sits between two calibration illuminants.
+     *
+     * Zero selects the matrix belonging to [kelvin1], one selects [kelvin2],
+     * and the interpolation between them runs in *mired* -- reciprocal
+     * temperature -- not in kelvin.
+     *
+     * ### Why reciprocal
+     *
+     * Because that is the scale colour temperature is perceptually and
+     * physically linear on. The step from 2800 K to 3300 K is a large visible
+     * shift; the step from 6000 K to 6500 K, the same 500 kelvin, is slight.
+     * In mired both are about 54 units. Interpolating linearly in kelvin would
+     * weight the daylight end far too heavily and leave every tungsten scene
+     * rendered against nearly the wrong matrix. The DNG specification
+     * interpolates in mired for exactly this reason.
+     *
+     * Outside the pair the result clamps: extrapolating a measured
+     * characterisation past the illuminants it was measured under is not
+     * supported by anything.
+     */
+    fun blendForTemperature(kelvin: Int, kelvin1: Int, kelvin2: Int): Float {
+        if (kelvin <= 0 || kelvin1 <= 0 || kelvin2 <= 0) return 0.5f
+        if (kelvin1 == kelvin2) return 0.5f
+
+        val mired = 1e6f / kelvin
+        val mired1 = 1e6f / kelvin1
+        val mired2 = 1e6f / kelvin2
+
+        return ((mired - mired1) / (mired2 - mired1)).coerceIn(0f, 1f)
+    }
+
+    /**
+     * How many rounds the blend is allowed to chase itself. Three is generous:
+     * it settles in two on every real calibration tried.
+     */
+    private const val BLEND_ITERATIONS = 6
+
+    /** Blend movement below this is settled. */
+    private const val BLEND_EPSILON = 1e-3f
+
+    /**
+     * The blend a scene's [neutral] actually calls for, resolved by iteration.
+     *
+     * ### The circularity, and how the specification resolves it
+     *
+     * Choosing between the two matrices requires knowing the scene's colour
+     * temperature. Computing that temperature requires taking the neutral to
+     * chromaticity, which requires a matrix. Each needs the other first.
+     *
+     * The DNG specification's answer is to iterate, and it converges quickly
+     * because the dependency is weak: the two matrices disagree most about
+     * saturated colour and very little about where a near-neutral lands, so
+     * even a poor starting blend produces a temperature close to the right one,
+     * and the second round is usually within a few kelvin of the fixed point.
+     *
+     * Starts from [blendFor]'s ratio proxy rather than from the midpoint. It is
+     * a worse answer than this one but a much better starting guess than 0.5,
+     * and it costs nothing.
+     *
+     * Falls back to the proxy where the illuminant temperatures are unknown --
+     * without them there is no temperature scale to interpolate on.
+     */
+    fun solveBlend(calibration: Calibration, neutral: FloatArray): Float {
+        if (!calibration.hasIlluminants) return blendFor(neutral)
+        val k1 = calibration.illuminant1Kelvin!!
+        val k2 = calibration.illuminant2Kelvin!!
+
+        var blend = blendFor(neutral)
+        repeat(BLEND_ITERATIONS) {
+            val kelvin = cctForBlend(calibration, neutral, blend) ?: return blend
+            val next = blendForTemperature(kelvin, k1, k2)
+            if (kotlin.math.abs(next - blend) < BLEND_EPSILON) return next
+            blend = next
+        }
+        return blend
+    }
+
+    /**
+     * The scene's colour temperature as seen through a specific [blend].
+     *
+     * Separated from [correlatedColourTemperature] so the iteration above has
+     * something to call that does not itself choose a blend -- which would
+     * recurse forever.
+     */
+    fun cctForBlend(
+        calibration: Calibration,
+        neutral: FloatArray,
+        blend: Float,
+    ): Int? {
+        if (neutral.size < 3) return null
+        if (neutral[0] <= 0f || neutral[1] <= 0f || neutral[2] <= 0f) return null
+
+        val cameraToXyz = interpolatedForward(calibration, blend)
+            ?: run {
+                val colour =
+                    Mat3.lerp(calibration.colorMatrix1, calibration.colorMatrix2, blend)
+                val calibrationTransform =
+                    Mat3.lerp(calibration.calibration1, calibration.calibration2, blend)
+                (calibrationTransform * colour).invert() ?: return null
+            }
+
+        val xyz = FloatArray(3)
+        cameraToXyz.apply(neutral[0], neutral[1], neutral[2], xyz)
+
+        val sum = xyz[0] + xyz[1] + xyz[2]
+        if (sum <= 0f) return null
+        return cctFromChromaticity(xyz[0] / sum, xyz[1] / sum)
+    }
+
+    /**
      * The bounds a reported temperature is held to.
      *
      * Not a preference. Below about 1500 K and above about 15000 K, McCamy's
@@ -276,34 +434,7 @@ object ColorScience {
     fun correlatedColourTemperature(
         calibration: Calibration,
         neutral: FloatArray,
-    ): Int? {
-        if (neutral.size < 3) return null
-        if (neutral[0] <= 0f || neutral[1] <= 0f || neutral[2] <= 0f) return null
-
-        // The neutral is camera-space, so it needs the camera-to-XYZ transform
-        // to become a chromaticity. Use the same illuminant blend the develop
-        // would use, so the temperature shown is the one the picture is
-        // rendered against rather than an independent guess.
-        val blend = blendFor(neutral)
-        val cameraToXyz = interpolatedForward(calibration, blend)
-            ?: run {
-                val colour =
-                    Mat3.lerp(calibration.colorMatrix1, calibration.colorMatrix2, blend)
-                val calibrationTransform =
-                    Mat3.lerp(calibration.calibration1, calibration.calibration2, blend)
-                (calibrationTransform * colour).invert() ?: return null
-            }
-
-        val xyz = FloatArray(3)
-        cameraToXyz.apply(neutral[0], neutral[1], neutral[2], xyz)
-
-        val sum = xyz[0] + xyz[1] + xyz[2]
-        if (sum <= 0f) return null
-        val x = xyz[0] / sum
-        val y = xyz[1] / sum
-
-        return cctFromChromaticity(x, y)
-    }
+    ): Int? = cctForBlend(calibration, neutral, solveBlend(calibration, neutral))
 
     /**
      * McCamy's cubic approximation, which is accurate to within a couple of

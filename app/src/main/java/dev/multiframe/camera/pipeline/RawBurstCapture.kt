@@ -55,6 +55,21 @@ data class RawBurstResult(
 )
 
 /**
+ * The optics correction a developed frame calls for, or null when there is
+ * nothing to do.
+ *
+ * Sized against the *rotated* bitmap rather than the sensor, because that is
+ * the image the correction will run on and the model has to describe its
+ * geometry. A rotation of 90 or 270 degrees swaps the axes, which the model's
+ * rescale handles by being given the dimensions it will actually see.
+ */
+private fun opticsFor(
+    profile: LensProfile?,
+    bitmap: android.graphics.Bitmap,
+): Optics.Params? =
+    Optics.paramsFor(profile, bitmap.width, bitmap.height)?.takeIf { it.hasWork }
+
+/**
  * Captures a burst of raw frames and merges them in the Bayer domain, so the
  * resulting DNG carries the benefit of the burst rather than being a single
  * unprocessed frame.
@@ -80,6 +95,9 @@ object RawBurstCapture {
         frameCount: Int,
         rotationDegrees: Int,
         lens: Lens? = null,
+        /** Optical calibration for [lens], where the device published any. */
+        lensProfile: LensProfile? = null,
+        outputFormat: OutputFormat = OutputFormat.JPEG,
         onProgress: (String) -> Unit,
     ): RawBurstResult {
         val profile = SensorProfile.from(characteristics)
@@ -161,6 +179,8 @@ object RawBurstCapture {
                 characteristics, captureResult, rotationDegrees,
                 frameCount, captured, stats, captureMillis, mergeMillis,
                 lens = lens,
+                lensProfile = lensProfile,
+                outputFormat = outputFormat,
             )
         } finally {
             merger?.close()
@@ -186,6 +206,8 @@ object RawBurstCapture {
         mergeMillis: Long,
         tag: String = "merged",
         lens: Lens? = null,
+        lensProfile: LensProfile? = null,
+        outputFormat: OutputFormat = OutputFormat.JPEG,
         handoverMicros: Long = 0,
         burstSpanMillis: Long = 0,
         streamStats: String? = null,
@@ -260,23 +282,37 @@ object RawBurstCapture {
         bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
         val rotateMillis = System.currentTimeMillis() - tRotate
 
+        // The optics, corrected on the developed frame. Deliberately after the
+        // rotation: the distortion model is stated in sensor coordinates, and
+        // an image that has been turned no longer agrees with it about which
+        // way is radial.
+        opticsFor(lensProfile, bitmap)?.let { params ->
+            val tOptics = System.currentTimeMillis()
+            val pixels = IntArray(bitmap.width * bitmap.height)
+            bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+            Optics.apply(pixels, bitmap.width, bitmap.height, params)
+            bitmap.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+            Log.i(TAG, "optics %dms".format(System.currentTimeMillis() - tOptics))
+        }
+
         val tEncode = System.currentTimeMillis()
         val publish = longArrayOf(0L)
-        val jpegName = "MF_${stamp}_${tag}_${captured}f.jpg"
+        val baseName = "MF_${stamp}_${tag}_${captured}f"
         // Bitmap.compress writes no metadata at all, so without this every
         // photograph arrives in a library with no camera, no lens and no
         // exposure. The DNG needs none of it -- DngCreator has already written
         // full metadata from the same capture result.
-        val jpegOk = ImageSaver.saveJpeg(
-            context, bitmap, jpegName,
+        val saved = ImageSaver.saveImage(
+            context, bitmap, baseName, outputFormat,
             metadata = ExifWriter.from(
                 result = captureResult,
                 characteristics = characteristics,
                 lens = lens,
                 frames = captured,
             ),
-            publishMillis = publish,
-        ) != null
+        )
+        val jpegOk = saved != null
+        val jpegName = saved?.second ?: "$baseName.jpg"
         bitmap.recycle()
         val encodeMillis = System.currentTimeMillis() - tEncode
         val developMillis = System.currentTimeMillis() - t3

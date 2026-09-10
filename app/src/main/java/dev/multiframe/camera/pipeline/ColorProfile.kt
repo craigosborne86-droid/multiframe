@@ -82,14 +82,25 @@ data class ColorProfile(
                     1f / fallback.gains[3].coerceAtLeast(1e-3f),
                 )
 
-            val blend = ColorScience.blendFor(neutral)
+            // Interpolated by colour temperature where the device published the
+            // illuminants its matrices were measured under, and by the
+            // red-to-blue proxy where it did not. See `ColorScience.solveBlend`
+            // for the circularity this resolves.
+            val blend = ColorScience.solveBlend(calibration, neutral)
             // The demosaic has already applied the white balance gains, so by
             // the time this matrix is used a neutral is (1, 1, 1). Normalising
             // against the raw neutral instead would balance the picture twice.
             val matrix = ColorScience.cameraToSrgb(
                 calibration, floatArrayOf(1f, 1f, 1f), blend,
             )
-            Log.i(TAG, "calibrated colour: blend %.2f toward daylight".format(blend))
+            val kelvin = ColorScience.cctForBlend(calibration, neutral, blend)
+            Log.i(
+                TAG,
+                "calibrated colour: blend %.2f toward daylight%s".format(
+                    blend,
+                    kelvin?.let { ", scene %dK".format(it) } ?: "",
+                ),
+            )
             return ColorProfile(gains = fallback.gains, matrix = matrix.m)
         }
 
@@ -196,6 +207,18 @@ data class ColorProfile(
             val colour2 = transform(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2)
             if (colour1 == null && colour2 == null) return null
 
+            // The illuminants the two matrices were measured under, which is
+            // what lets them be interpolated by temperature rather than by the
+            // red-to-blue proxy. Optional in the specification; absent, the
+            // pair still works and simply blends the older way.
+            val illuminant1 = characteristics
+                .get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1)
+                ?.let { ColorScience.illuminantKelvin(it) }
+            val illuminant2 = characteristics
+                .get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2)
+                ?.toInt()
+                ?.let { ColorScience.illuminantKelvin(it) }
+
             return ColorScience.Calibration(
                 colorMatrix1 = colour1 ?: colour2!!,
                 colorMatrix2 = colour2 ?: colour1!!,
@@ -205,6 +228,8 @@ data class ColorProfile(
                     ?: Mat3.IDENTITY,
                 forward1 = transform(CameraCharacteristics.SENSOR_FORWARD_MATRIX1),
                 forward2 = transform(CameraCharacteristics.SENSOR_FORWARD_MATRIX2),
+                illuminant1Kelvin = illuminant1,
+                illuminant2Kelvin = illuminant2,
             )
         }
 

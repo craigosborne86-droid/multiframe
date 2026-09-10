@@ -37,6 +37,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.ManualSettings
+import dev.multiframe.camera.pipeline.OutputFormat
 import kotlin.math.ln
 import kotlin.math.exp
 
@@ -70,6 +71,9 @@ fun ControlsPanel(
     /** Null where the camera cannot bracket ISO (no manual sensor, ISO range or raw). */
     dcgEnabled: Boolean? = null,
     onDcgEnabled: (Boolean) -> Unit = {},
+    /** Null where the device cannot write HEIF, in which case there is no choice. */
+    outputFormat: OutputFormat? = null,
+    onOutputFormat: (OutputFormat) -> Unit = {},
     onReset: (() -> Unit)? = null,
 ) {
     if (caps == null) return
@@ -177,6 +181,13 @@ fun ControlsPanel(
             }
             dcgEnabled?.let { on ->
                 Toggle("DCG ${if (on) "ON" else "OFF"}", on) { onDcgEnabled(!on) }
+            }
+            // Only where the device can actually write one. A control that
+            // silently produces JPEGs is worse than no control.
+            outputFormat?.let { format ->
+                Toggle(format.label, format == OutputFormat.HEIF) {
+                    onOutputFormat(format.next())
+                }
             }
         }
 

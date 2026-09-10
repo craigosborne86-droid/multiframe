@@ -52,6 +52,14 @@ data class DevelopParams(
     val hotPixelThreshold: Float = HotPixels.DEFAULT_THRESHOLD,
     /** Colour fringe suppression. See [Defringe] for what it does and does not fix. */
     val defringe: Defringe.Params = Defringe.Params(),
+    /**
+     * Geometry the lens got wrong: barrel and pincushion, and the per-channel
+     * scale difference that shows as coloured fringing.
+     *
+     * Null on a lens that published no calibration, and on every path that has
+     * no lens to describe. See [Optics].
+     */
+    val optics: Optics.Params? = null,
 ) {
     companion object {
         const val AUTO_EXPOSURE = -1f
@@ -172,12 +180,19 @@ object RawDeveloper {
             bitmap.setPixels(band, 0, w, 0, y, w, rows)
             y += rows
         }
-        // Applied after the whole image exists, since both need each pixel's
-        // neighbours and a band does not have them at its edges.
-        if (params.sharpen.enabled || params.defringe.enabled) {
+        // Applied after the whole image exists, since all of them need each
+        // pixel's neighbours and a band does not have them at its edges. The
+        // optics correction needs more than neighbours -- it gathers from
+        // several pixels away -- so it could not be banded at all.
+        val optics = params.optics?.takeIf { it.hasWork }
+        if (params.sharpen.enabled || params.defringe.enabled || optics != null) {
             val all = IntArray(w * h)
             bitmap.getPixels(all, 0, w, 0, 0, w, h)
-            // Defringe first: sharpening a fringe would make it worse.
+            // Geometry first, for the reason in `develop`: the two passes below
+            // read neighbourhoods, and correcting after them would be deciding
+            // pixels from neighbours that are about to move.
+            optics?.let { Optics.apply(all, w, h, it) }
+            // Defringe next: sharpening a fringe would make it worse.
             if (params.defringe.enabled) Defringe.apply(all, w, h, params.defringe)
             if (params.sharpen.enabled) Sharpen.apply(all, w, h, params.sharpen)
             bitmap.setPixels(all, 0, w, 0, 0, w, h)
@@ -221,7 +236,16 @@ object RawDeveloper {
         parallelRows(h) { yStart, yEnd ->
             renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading)
         }
-        // Defringe first: sharpening a fringe would make it worse.
+        // Geometry before anything that reads a neighbourhood. Both of the
+        // passes below decide what a pixel is from the pixels around it, and
+        // doing that before the optics are corrected means deciding it from
+        // neighbours that are about to move.
+        //
+        // It also removes most of the work Defringe would otherwise have: a
+        // fringe that has been put back where it belongs is not a fringe.
+        resolved.optics?.takeIf { it.hasWork }?.let { Optics.apply(out, w, h, it) }
+
+        // Defringe next: sharpening a fringe would make it worse.
         if (resolved.defringe.enabled) Defringe.apply(out, w, h, resolved.defringe)
         if (resolved.sharpen.enabled) Sharpen.apply(out, w, h, resolved.sharpen)
         return out
