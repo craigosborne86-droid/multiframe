@@ -51,6 +51,17 @@ object DcgProfiler {
      */
     private const val SETTLE_FRAMES = 3
 
+    /**
+     * How many times to wait again before giving a rung up.
+     *
+     * The pipeline depth the specification guarantees is three frames, but a
+     * busy phone can take longer, and the ring has to have flushed *both* of
+     * its newest slots before a pair reads as settled. Four attempts is about
+     * four hundred milliseconds of patience per rung in the worst case, and in
+     * practice the first attempt succeeds on every rung but the first.
+     */
+    private const val SETTLE_ATTEMPTS = 4
+
     /** At 30fps, one frame. Used to pace the settle. */
     private const val FRAME_MS = 34L
 
@@ -89,29 +100,80 @@ object DcgProfiler {
             return null
         }
 
-        val ladder = DcgCalibration.isoLadder(isoMin, isoMax, STEPS)
+        // What the scene is currently worth, which is what the ladder is
+        // exposed against. Without a reading there is no reference brightness
+        // and the measurement cannot be set up.
+        val (aeIso, aeExposureNs) = stream.latestExposure()
+            ?: run {
+                Log.i(TAG, "no exposure reading yet; not profiling")
+                return null
+            }
+        val reference = aeIso.toLong() * aeExposureNs
+
+        // The ladder starts where auto-exposure already is, not at the sensor's
+        // floor.
+        //
+        // Holding brightness constant means trading time against sensitivity,
+        // and below the metered point that trade asks for *longer* exposures --
+        // half a second at the bottom of this sensor's range. At half a second
+        // the repeating request delivers two frames a second, and the ring runs
+        // dry: the first attempt at this reported "ring reports none" for five
+        // consecutive rungs. Above the metered point every exposure is shorter
+        // than the one the viewfinder is already running at, so the stream
+        // stays at frame rate throughout.
+        //
+        // The cost is that a dark scene has little range above its metered
+        // point and may not offer enough rungs. That is reported and retried on
+        // a later launch rather than worked around -- a measurement taken in
+        // the dark would be the kind that produces a confident wrong answer.
+        val floor = maxOf(isoMin, aeIso)
+        val ladder = DcgCalibration.isoLadder(floor, isoMax, STEPS)
         if (ladder.size < DcgCalibration.MIN_SAMPLES) {
-            Log.i(TAG, "sensitivity range too narrow to profile: $isoMin-$isoMax")
+            Log.i(
+                TAG,
+                "only ${ladder.size} rungs available above ISO $floor " +
+                    "(range $isoMin-$isoMax); too dark to profile here",
+            )
             return null
         }
 
         val samples = ArrayList<DcgCalibration.Sample>(ladder.size)
         try {
             for (iso in ladder) {
-                // Exposure is pinned short and constant across the ladder. Two
-                // things depend on it: a short integration keeps the scene from
-                // moving between the pair, and a *constant* one means the only
-                // thing changing across the ladder is the analog gain, which is
-                // the variable being fitted.
+                // Exposure time is traded against sensitivity so that every
+                // rung of the ladder produces the *same brightness*. See
+                // [exposureFor]: holding the product constant is what makes
+                // analog gain the only thing that changes.
+                val exposureNs = exposureFor(reference, iso, caps) ?: continue
                 val probe = settings.copy(
                     manualExposure = true,
                     iso = iso,
-                    exposureTimeNs = probeExposureNs(caps),
+                    exposureTimeNs = exposureNs,
                 )
                 stream.applySettings(probe, caps)
-                delay(FRAME_MS * SETTLE_FRAMES)
 
-                val variance = measurePair(stream) ?: continue
+                // Verified rather than assumed, and retried rather than
+                // dropped. A request takes effect some frames after it is
+                // submitted: the first rung was reading 140 where its
+                // neighbours read fractions, because the ring still held
+                // auto-exposure frames from before the ladder started. Asking
+                // the metadata what the frame was actually shot at costs
+                // nothing and cannot be fooled by a slow pipeline -- and
+                // waiting again is cheaper than losing the rung.
+                var variance: Double? = null
+                for (attempt in 0 until SETTLE_ATTEMPTS) {
+                    delay(FRAME_MS * SETTLE_FRAMES)
+                    variance = measurePair(stream, iso)
+                    if (variance != null) break
+                }
+                if (variance == null) {
+                    Log.i(
+                        TAG,
+                        "ISO $iso (${exposureNs / 1000}us) never settled; " +
+                            "ring reports ${reportedIsos(stream)}",
+                    )
+                    continue
+                }
                 samples.add(DcgCalibration.Sample(iso, variance))
             }
         } finally {
@@ -124,6 +186,16 @@ object DcgProfiler {
             return null
         }
 
+        // The curve itself, not just the conclusion. A fit that collapses and a
+        // sensor with no gain switch report the same thing, and the only way to
+        // tell them apart from a field log is to see what went in.
+        Log.i(
+            TAG,
+            "$cameraId curve: " + samples.joinToString(" ") {
+                "%d=%.0f".format(it.iso, it.variance)
+            },
+        )
+
         val result = DcgCalibration.fit(samples)
         DcgCalibrationStore.record(context, cameraId, result)
         Log.i(TAG, "$cameraId: $result")
@@ -131,28 +203,88 @@ object DcgProfiler {
     }
 
     /**
-     * The shortest exposure the sensor will honour, within reason.
+     * The exposure time that keeps this rung as bright as the scene already is.
      *
-     * Short because the two frames of a pair must see the same scene: a hand
-     * holding a phone moves, and at 1/30s that movement is signal the
-     * subtraction will not cancel. Not *the* shortest, because some sensors
-     * report a minimum they do not really support.
+     * ### Why not simply the shortest exposure
+     *
+     * Because the first version did that, and it measured nothing. A one
+     * millisecond exposure indoors is a near-black frame: there is no signal,
+     * so there is no shot noise, and the read noise of a modern sensor at base
+     * gain is a fraction of one code value. The frame-to-frame difference is
+     * then almost always exactly zero, and what the fit received was
+     * quantisation rather than a noise curve -- variances of 0, 0, 0, 1, 1, 1
+     * across the bottom half of the ladder.
+     *
+     * Holding the *exposure product* constant instead gives every rung the same
+     * brightness as the scene the user is pointing at. Sensitivity and time
+     * trade against each other exactly, so the signal level is fixed and the
+     * analog gain is the only thing varying -- which is the measurement wanted,
+     * and it is well above the quantisation floor at every rung.
+     *
+     * Null where the required time falls outside what the sensor accepts, which
+     * is what caps the usable end of the ladder on a bright scene.
      */
-    private fun probeExposureNs(caps: CameraCapabilities): Long {
-        val floor = caps.exposureMinNs ?: return 1_000_000L
-        // A millisecond, or the sensor's floor if that is longer.
-        return floor.coerceAtLeast(1_000_000L)
+    internal fun exposureFor(
+        referenceProduct: Long,
+        iso: Int,
+        caps: CameraCapabilities,
+    ): Long? {
+        if (iso <= 0 || referenceProduct <= 0L) return null
+        val wanted = referenceProduct / iso
+        val floor = caps.exposureMinNs ?: 1_000L
+        val ceiling = caps.exposureMaxNs ?: Long.MAX_VALUE
+        // Clamped rather than coerced silently: a rung whose exposure had to be
+        // changed to fit is a rung at a different brightness from the others,
+        // which is the one thing this is arranging not to happen.
+        return if (wanted < floor || wanted > ceiling) null else wanted
     }
 
     /**
-     * Variance from two consecutive frames currently in the ring.
+     * Whether a frame was shot at the sensitivity that was asked for.
      *
-     * Null when the ring cannot give two frames, which happens while the stream
-     * is still filling and is not an error.
+     * Not equality. A sensor implements its own sensitivity steps and rounds a
+     * request to the nearest one: asked for ISO 316 this phone delivers 315 and
+     * says so. Held to a couple of percent, which is far tighter than the gaps
+     * between rungs -- the ladder is geometric over four stops, so neighbouring
+     * rungs differ by tens of percent and cannot be confused for one another.
      */
-    private fun measurePair(stream: ZslRawStream): Double? {
+    internal fun isoMatches(reported: Int, requested: Int): Boolean {
+        if (requested <= 0) return false
+        return kotlin.math.abs(reported - requested).toFloat() / requested <= 0.02f
+    }
+
+    /** What the newest two frames say they were shot at, for diagnosis. */
+    private fun reportedIsos(stream: ZslRawStream): String =
+        stream.snapshot(2).use { burst ->
+            (0 until burst.count).joinToString(",") { i ->
+                burst.results.getOrNull(i)
+                    ?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
+                    ?.toString() ?: "?"
+            }.ifEmpty { "none" }
+        }
+
+    /**
+     * Variance from two consecutive frames currently in the ring, but only if
+     * they were both actually shot at [expectedIso].
+     *
+     * Null when the ring cannot give two frames, or when the frames it gives
+     * were shot at some other sensitivity -- which happens for the first rung
+     * of every ladder, where the ring is still full of auto-exposure frames
+     * from before the profiling started.
+     */
+    private fun measurePair(stream: ZslRawStream, expectedIso: Int): Double? {
         stream.snapshot(2).use { burst ->
             if (burst.count < 2) return null
+
+            // Both frames, because a pair that straddles the change measures the
+            // difference between two sensitivities rather than the noise at one.
+            for (i in 0 until 2) {
+                val shotAt = burst.results.getOrNull(i)
+                    ?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
+                    ?: return null
+                if (!isoMatches(shotAt, expectedIso)) return null
+            }
+
             val first = burst.frames.buffer(0) ?: return null
             val second = burst.frames.buffer(1) ?: return null
 

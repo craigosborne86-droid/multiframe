@@ -201,7 +201,23 @@ object DcgCalibration {
 
         val base = usable.first().iso.toDouble()
         val g = DoubleArray(usable.size) { usable[it].iso / base }
-        val v = DoubleArray(usable.size) { usable[it].variance }
+
+        // The variance axis is normalised as well as the gain axis, and for a
+        // stronger reason than tidiness.
+        //
+        // The weights are 1/v^2, so a variance in raw counts squared -- which
+        // on a 10-bit sensor reaches millions at the top of the range -- gives
+        // weights around 1e-13, and the weighted moments underflow. The 3x3
+        // determinant then falls under any fixed guard and every segment
+        // returns a residual of zero, which is not "no gain switch found" but
+        // the fit collapsing and reporting F=0 as though it were an answer.
+        // That is exactly what the phone did: every camera, every time.
+        //
+        // Dividing through by the first variance makes the system scale-free.
+        // The residuals are relative, so the fit and the F statistic are
+        // unchanged by it -- only the conditioning is.
+        val scale = usable.first().variance
+        val v = DoubleArray(usable.size) { usable[it].variance / scale }
 
         val singleRss = quadraticRss(g, v, 0, usable.size)
 
@@ -301,7 +317,16 @@ object DcgCalibration {
         val det = s4 * (s2 * s0 - s1 * s1) -
             s3 * (s3 * s0 - s1 * s2) +
             s2 * (s3 * s1 - s2 * s2)
-        if (abs(det) < 1e-12) return 0.0
+
+        // Singular relative to the size of the matrix, not against a fixed
+        // number. An absolute threshold is a scale assumption in disguise: it
+        // calls a perfectly well-conditioned system singular as soon as the
+        // moments are small, which is how this silently answered "no gain
+        // switch" for every sensor before the axes were normalised.
+        val magnitude = maxOf(abs(s4), abs(s3), abs(s2), abs(s1), abs(s0))
+        if (magnitude <= 0.0 || abs(det) < 1e-12 * magnitude * magnitude * magnitude) {
+            return 0.0
+        }
 
         val a = (
             t2 * (s2 * s0 - s1 * s1) -

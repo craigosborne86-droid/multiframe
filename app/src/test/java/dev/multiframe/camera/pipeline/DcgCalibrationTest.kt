@@ -132,6 +132,49 @@ class DcgCalibrationTest {
         }
     }
 
+    /**
+     * The same curves at the magnitudes a real sensor produces.
+     *
+     * The synthetic cases above run to variances in the tens of thousands,
+     * which is what you get from a normalised model. A 10-bit sensor measured
+     * in raw counts squared reaches millions, and on the phone this reported
+     * `F=0.0` for every camera -- not "no switch found" but the fit collapsing
+     * and saying so as though it were an answer.
+     *
+     * The cause was conditioning: with weights of 1/v^2 and v in the millions,
+     * the weighted moments underflow and the 3x3 determinant falls under the
+     * guard, so every segment returned a residual of zero and the F statistic
+     * was 0/0. Held here at the magnitude the device actually delivers.
+     */
+    @Test
+    fun theFitSurvivesTheMagnitudesARealSensorProduces() {
+        val isos = DcgCalibration.isoLadder(24, 6023, 16)
+
+        // Raw counts squared, as a 10-bit sensor at base gain: a read noise of
+        // about 40 counts and shot noise to match, so the curve runs from
+        // thousands at base to millions at the top of the range.
+        val unbroken = isos.map { iso ->
+            val g = iso / 24.0
+            DcgCalibration.Sample(iso, g * g * 1600.0 + g * 90_000.0)
+        }
+        val unbrokenResult = DcgCalibration.fit(unbroken)
+        assertThat(unbrokenResult.foundThreshold).isFalse()
+        // The finding is that the *fit ran*. A collapsed fit also reports no
+        // threshold, which is why the statistic is asserted rather than only
+        // the conclusion.
+        assertThat(unbrokenResult.singleLineRss).isGreaterThan(0.0)
+
+        val switch = isos[9]
+        val broken = isos.map { iso ->
+            val g = iso / 24.0
+            val read = if (iso < switch) 900.0 else 14_400.0
+            DcgCalibration.Sample(iso, g * g * read + g * 90_000.0)
+        }
+        val brokenResult = DcgCalibration.fit(broken)
+        assertThat(brokenResult.fStatistic).isGreaterThan(DcgCalibration.F_THRESHOLD)
+        assertThat(brokenResult.foundThreshold).isTrue()
+    }
+
     @Test
     fun tooFewSamplesIsNotFittedAtAll() {
         val samples = (1..DcgCalibration.MIN_SAMPLES - 1).map {
