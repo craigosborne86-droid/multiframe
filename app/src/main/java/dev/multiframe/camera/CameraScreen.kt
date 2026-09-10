@@ -790,9 +790,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // Push manual settings whenever they change. Camera2Interop.Extender only
     // applies at use-case build time, so live updates go through
     // Camera2CameraControl instead.
-    LaunchedEffect(settings, camera, caps, zslStream) {
+    LaunchedEffect(settings, camera, caps, zslStream, dcgEnabled) {
         val c = caps ?: return@LaunchedEffect
-        zslStream?.applySettings(settings, c)
+        zslStream?.let { stream ->
+            stream.applySettings(settings, c)
+            val canBracket = c.supportsBracketing
+            if (stream.dcg != (dcgEnabled && canBracket)) {
+                stream.setDcg(dcgEnabled && canBracket, settings, c)
+            }
+        }
         val cam = camera ?: return@LaunchedEffect
         try {
             Camera2CameraControl.from(cam.cameraControl)

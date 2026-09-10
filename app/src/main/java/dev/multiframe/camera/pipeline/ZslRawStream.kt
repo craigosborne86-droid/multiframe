@@ -93,11 +93,37 @@ class ZslRawStream private constructor(
     private var resultWrite = 0
     private val resultLock = Any()
 
+    /** Most recent low-ISO result, for [latestExposure] during DCG. */
+    private var lastLowResult: TotalCaptureResult? = null
+
     private val buffersLost = AtomicLong(0)
     private val captureFailures = AtomicLong(0)
 
     @Volatile
     private var closed = false
+
+    /**
+     * Whether the stream is alternating between two ISO levels.
+     *
+     * Set through [setDcg] rather than directly, because changing it needs
+     * to rebuild the repeating request -- an idle flag flip with no rebuild
+     * would leave the old request running until something else happened to
+     * call [applySettings].
+     */
+    @Volatile
+    var dcg: Boolean = false
+        private set
+
+    /**
+     * Last ISO the low-ISO (AE-driven) request converged to.
+     * Zero before the first low-ISO result arrives.
+     */
+    @Volatile
+    private var convergedIso = 0
+
+    /** Last exposure time from a low-ISO result, in nanoseconds. */
+    @Volatile
+    private var convergedExposureNs = 0L
 
     /**
      * Exposure compensation the highlight guard has asked for, overriding what
@@ -339,15 +365,45 @@ class ZslRawStream private constructor(
         applySettings(settings, caps)
     }
 
+    /**
+     * Engages or disengages dual conversion gain on this stream.
+     *
+     * When enabled, the repeating request becomes a two-element burst that
+     * alternates between the current auto-exposure (or manual) ISO and a
+     * high-ISO frame at [DCG_RATIO] times higher. When disabled, the stream
+     * falls back to a single repeating request identical to what it was
+     * before DCG existed.
+     */
+    fun setDcg(enabled: Boolean, settings: ManualSettings, caps: CameraCapabilities) {
+        if (dcg == enabled) return
+        dcg = enabled
+        if (!enabled) {
+            convergedIso = 0
+            convergedExposureNs = 0
+        }
+        applySettings(settings, caps)
+    }
+
     /** Applies manual settings by rebuilding the repeating request. */
     fun applySettings(settings: ManualSettings, caps: CameraCapabilities) {
         if (closed) return
         lastSettings = settings
         lastCaps = caps
+        submitRepeating(settings, caps)
+    }
+
+    private fun submitRepeating(settings: ManualSettings, caps: CameraCapabilities) {
         try {
-            session.setRepeatingRequest(
-                buildRequest(settings, caps), captureCallback, Handler(cameraThread.looper),
-            )
+            val low = buildRequest(settings, caps)
+            val high = if (dcg) buildHighRequest(settings, caps) else null
+            val handler = Handler(cameraThread.looper)
+            if (high != null) {
+                session.setRepeatingBurst(
+                    listOf(low, high), captureCallback, handler,
+                )
+            } else {
+                session.setRepeatingRequest(low, captureCallback, handler)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "ZSL repeating request update failed", e)
         }
@@ -388,9 +444,15 @@ class ZslRawStream private constructor(
      * metadata of the frame it is writing. This is the same ring read for a
      * cheaper purpose. Null before the session has completed a frame, and on
      * a device that reports neither key.
+     *
+     * When DCG is active, returns the low-ISO result only -- the high-ISO
+     * frame's boosted sensitivity is an implementation detail, not what the
+     * photographer set or the scene demanded.
      */
     fun latestExposure(): Pair<Int, Long>? {
-        val result = synchronized(resultLock) { newestLocked() } ?: return null
+        val result = synchronized(resultLock) {
+            if (dcg) lastLowResult else newestLocked()
+        } ?: return null
         val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return null
         val exposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return null
         return iso to exposureNs
@@ -407,7 +469,11 @@ class ZslRawStream private constructor(
                 resultSlots[resultWrite] = result
                 resultStamps[resultWrite] = stamp
                 resultWrite = (resultWrite + 1) % RESULT_RING
+
+                if (dcg && request.tag == TAG_LOW) lastLowResult = result
             }
+
+            if (dcg && request.tag == TAG_LOW) trackConvergence(result)
         }
 
         override fun onCaptureBufferLost(
@@ -430,66 +496,142 @@ class ZslRawStream private constructor(
         }
     }
 
-    private fun buildRequest(
+    /**
+     * Updates [convergedIso] and [convergedExposureNs] from a low-ISO result,
+     * and rebuilds the burst when the ISO changes by more than 10%.
+     *
+     * Called on the camera thread from the capture callback, so the rebuild
+     * runs on the same thread the session expects.
+     */
+    private fun trackConvergence(result: TotalCaptureResult) {
+        val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return
+        val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return
+        val prev = convergedIso
+        convergedIso = iso
+        convergedExposureNs = exposure
+
+        val firstConvergence = prev <= 0
+        val significantChange = prev > 0 &&
+            kotlin.math.abs(iso - prev).toFloat() / prev > ISO_REBUILD_THRESHOLD
+        if (firstConvergence || significantChange) {
+            val s = lastSettings ?: return
+            val c = lastCaps ?: return
+            submitRepeating(s, c)
+        }
+    }
+
+    /**
+     * A builder carrying everything two requests have in common: targets,
+     * frame rate, ISP suppression, focus, white balance, zoom, metering
+     * regions and lens shading. Exposure is left to the caller.
+     */
+    private fun createBaseBuilder(
         settings: ManualSettings,
         caps: CameraCapabilities,
-    ): CaptureRequest {
+    ): CaptureRequest.Builder {
         // ZERO_SHUTTER_LAG is the template that tells the HAL frames are being
         // retained rather than previewed and discarded. Not every device offers
         // it, so PREVIEW is the fallback.
-        val template = runCatching {
+        val builder = runCatching {
             device.createCaptureRequest(CameraDevice.TEMPLATE_ZERO_SHUTTER_LAG)
         }.getOrElse {
             device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
         }
 
-        template.addTarget(previewSurface)
-        template.addTarget(reader.surface)
+        builder.addTarget(previewSurface)
+        builder.addTarget(reader.surface)
 
         // Pin the frame rate. Left to itself, auto-exposure lengthens the frame
         // duration in dim light, which is precisely where a tight burst window
         // matters most; the extra noise that costs is what the merge is for.
-        fpsRange()?.let { template.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+        fpsRange()?.let { builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
 
         if (settings.suppressIspProcessing) {
             if (caps.canDisableNoiseReduction()) {
-                template.set(
+                builder.set(
                     CaptureRequest.NOISE_REDUCTION_MODE,
                     android.hardware.camera2.CameraMetadata.NOISE_REDUCTION_MODE_OFF,
                 )
             }
             if (caps.canDisableEdgeEnhancement()) {
-                template.set(
+                builder.set(
                     CaptureRequest.EDGE_MODE,
                     android.hardware.camera2.CameraMetadata.EDGE_MODE_OFF,
                 )
             }
         }
 
+        if (settings.manualFocus && caps.hasManualFocus) {
+            builder.set(
+                CaptureRequest.CONTROL_AF_MODE,
+                android.hardware.camera2.CameraMetadata.CONTROL_AF_MODE_OFF,
+            )
+            builder.set(
+                CaptureRequest.LENS_FOCUS_DISTANCE,
+                settings.effectiveFocusDiopters(caps),
+            )
+        } else {
+            caps.autoAfMode()?.let { builder.set(CaptureRequest.CONTROL_AF_MODE, it) }
+        }
+
+        builder.set(CaptureRequest.CONTROL_AWB_MODE, settings.effectiveAwbMode(caps))
+
+        // Reported only when requested, and raw is uncorrected by definition.
+        builder.set(
+            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
+            android.hardware.camera2.CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON,
+        )
+
+        focusRegion?.let {
+            val rect = arrayOf(TouchFocus.meteringRectangle(it))
+            builder.set(CaptureRequest.CONTROL_AF_REGIONS, rect)
+            builder.set(CaptureRequest.CONTROL_AE_REGIONS, rect)
+        }
+
+        if (zoomRatio > 1.001f) {
+            val range = zoomRange
+            if (range != null) {
+                builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
+            } else {
+                // Older path: crop the sensor by hand. Kept because zoom ratio
+                // is optional in the spec and a device without it should still
+                // zoom rather than silently ignoring the gesture.
+                builder.set(
+                    CaptureRequest.SCALER_CROP_REGION,
+                    TouchFocus.cropForZoom(activeArray, zoomRatio, MAX_FALLBACK_ZOOM).toRect(),
+                )
+            }
+        }
+
+        return builder
+    }
+
+    private fun buildRequest(
+        settings: ManualSettings,
+        caps: CameraCapabilities,
+    ): CaptureRequest {
+        val builder = createBaseBuilder(settings, caps)
+
         if (locked) {
-            // Pinned rather than switched off: the values auto-exposure already
-            // converged on are the right ones for this scene, and the lock
-            // simply stops them moving. Turning AE off entirely would jump to
-            // whatever the manual settings happen to say.
-            template.set(CaptureRequest.CONTROL_AE_LOCK, true)
-            template.set(CaptureRequest.CONTROL_AWB_LOCK, true)
+            builder.set(CaptureRequest.CONTROL_AE_LOCK, true)
+            builder.set(CaptureRequest.CONTROL_AWB_LOCK, true)
         }
 
         if (settings.manualExposureActive(caps)) {
-            template.set(
+            builder.set(
                 CaptureRequest.CONTROL_AE_MODE,
                 android.hardware.camera2.CameraMetadata.CONTROL_AE_MODE_OFF,
             )
-            template.set(CaptureRequest.SENSOR_SENSITIVITY, settings.effectiveIso(caps))
+            builder.set(CaptureRequest.SENSOR_SENSITIVITY, settings.effectiveIso(caps))
             val exposure = settings.effectiveExposureTimeNs(caps)
-            template.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
+            builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
             // Frame duration must cover the exposure or the stream slows to it.
-            template.set(
+            builder.set(
                 CaptureRequest.SENSOR_FRAME_DURATION,
                 maxOf(exposure, config.minFrameDurationNs),
             )
         } else {
-            template.set(
+            builder.set(
                 CaptureRequest.CONTROL_AE_MODE,
                 android.hardware.camera2.CameraMetadata.CONTROL_AE_MODE_ON,
             )
@@ -497,56 +639,61 @@ class ZslRawStream private constructor(
                 // The guard's decision wins over the user's baseline
                 // compensation while it is engaged, because it is a measured
                 // response to this scene rather than a standing preference.
-                template.set(
+                builder.set(
                     CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
                     evOverride ?: settings.effectiveEvIndex(caps),
                 )
             }
         }
 
-        if (settings.manualFocus && caps.hasManualFocus) {
-            template.set(
-                CaptureRequest.CONTROL_AF_MODE,
-                android.hardware.camera2.CameraMetadata.CONTROL_AF_MODE_OFF,
-            )
-            template.set(
-                CaptureRequest.LENS_FOCUS_DISTANCE,
-                settings.effectiveFocusDiopters(caps),
-            )
+        if (dcg) builder.setTag(TAG_LOW)
+        return builder.build()
+    }
+
+    /**
+     * The high-ISO half of a DCG burst.
+     *
+     * Uses the converged exposure from the low-ISO request (or the user's
+     * manual values) and multiplies the ISO by [DCG_RATIO]. Returns null
+     * when the source values are not yet known -- which is only the first
+     * few frames after DCG is enabled in auto-exposure mode, because the
+     * stream needs at least one low-ISO result to know what to multiply.
+     */
+    private fun buildHighRequest(
+        settings: ManualSettings,
+        caps: CameraCapabilities,
+    ): CaptureRequest? {
+        val baseIso: Int
+        val baseExposureNs: Long
+
+        if (settings.manualExposureActive(caps)) {
+            baseIso = settings.effectiveIso(caps)
+            baseExposureNs = settings.effectiveExposureTimeNs(caps)
         } else {
-            caps.autoAfMode()?.let { template.set(CaptureRequest.CONTROL_AF_MODE, it) }
+            if (convergedIso <= 0 || convergedExposureNs <= 0) return null
+            baseIso = convergedIso
+            baseExposureNs = convergedExposureNs
         }
 
-        template.set(CaptureRequest.CONTROL_AWB_MODE, settings.effectiveAwbMode(caps))
+        val highIso = (baseIso * DCG_RATIO).coerceAtMost(caps.isoMax ?: Int.MAX_VALUE)
 
-        // Reported only when requested, and raw is uncorrected by definition.
-        template.set(
-            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
-            android.hardware.camera2.CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON,
+        val builder = createBaseBuilder(settings, caps)
+
+        if (locked) builder.set(CaptureRequest.CONTROL_AWB_LOCK, true)
+
+        builder.set(
+            CaptureRequest.CONTROL_AE_MODE,
+            android.hardware.camera2.CameraMetadata.CONTROL_AE_MODE_OFF,
+        )
+        builder.set(CaptureRequest.SENSOR_SENSITIVITY, highIso)
+        builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, baseExposureNs)
+        builder.set(
+            CaptureRequest.SENSOR_FRAME_DURATION,
+            maxOf(baseExposureNs, config.minFrameDurationNs),
         )
 
-        focusRegion?.let {
-            val rect = arrayOf(TouchFocus.meteringRectangle(it))
-            template.set(CaptureRequest.CONTROL_AF_REGIONS, rect)
-            template.set(CaptureRequest.CONTROL_AE_REGIONS, rect)
-        }
-
-        if (zoomRatio > 1.001f) {
-            val range = zoomRange
-            if (range != null) {
-                template.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
-            } else {
-                // Older path: crop the sensor by hand. Kept because zoom ratio
-                // is optional in the spec and a device without it should still
-                // zoom rather than silently ignoring the gesture.
-                template.set(
-                    CaptureRequest.SCALER_CROP_REGION,
-                    TouchFocus.cropForZoom(activeArray, zoomRatio, MAX_FALLBACK_ZOOM).toRect(),
-                )
-            }
-        }
-
-        return template.build()
+        builder.setTag(TAG_HIGH)
+        return builder.build()
     }
 
     /** Prefers a locked 30 fps range over one that is allowed to drop. */
@@ -606,6 +753,15 @@ class ZslRawStream private constructor(
 
         /** Used only when the device reports no zoom ratio range of its own. */
         private const val MAX_FALLBACK_ZOOM = 8f
+
+        /** High-ISO frame uses this multiple of the low-ISO value. */
+        const val DCG_RATIO = 4
+
+        private const val TAG_LOW = "low"
+        private const val TAG_HIGH = "high"
+
+        /** Rebuild the burst when the converged ISO changes by more than this. */
+        private const val ISO_REBUILD_THRESHOLD = 0.1f
 
         /**
          * Opens the camera, allocates the ring and starts streaming.
