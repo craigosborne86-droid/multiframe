@@ -115,6 +115,33 @@ class ZslRawStream private constructor(
         private set
 
     /**
+     * The sensitivity at which this sensor switches analog gain, once
+     * [DcgProfiler] has measured it.
+     *
+     * Null means either that the profiling has not run or that it ran and found
+     * the noise curve unbroken. Both are handled the same way here -- fall back
+     * to [DCG_RATIO] -- because the distinction matters to whether the
+     * measurement should be repeated, not to how to bracket.
+     */
+    @Volatile
+    var gainThresholdIso: Int? = null
+        private set
+
+    /**
+     * Records a measured gain threshold and rebuilds the repeating request so
+     * the next high-ISO frame uses it.
+     *
+     * Rebuilding matters: without it the stream would keep bracketing by the
+     * old ratio until something else happened to call [applySettings], which on
+     * a still scene with the guard off could be a long time.
+     */
+    fun setGainThreshold(iso: Int?, settings: ManualSettings, caps: CameraCapabilities) {
+        if (gainThresholdIso == iso) return
+        gainThresholdIso = iso
+        if (dcg) applySettings(settings, caps)
+    }
+
+    /**
      * Last ISO the low-ISO (AE-driven) request converged to.
      * Zero before the first low-ISO result arrives.
      */
@@ -694,7 +721,15 @@ class ZslRawStream private constructor(
             baseExposureNs = convergedExposureNs
         }
 
-        val highIso = (baseIso * DCG_RATIO).coerceAtMost(caps.isoMax ?: Int.MAX_VALUE)
+        // Straddle the measured gain switch where one was found, and fall back
+        // to the software ratio where none was. See `DcgCalibration`: the point
+        // of knowing the threshold is that the pair can sit either side of it,
+        // which is the largest real difference in conversion gain the sensor
+        // has to give. A fixed multiple lands wherever it lands.
+        val highIso = gainThresholdIso
+            ?.takeIf { it > baseIso }
+            ?.coerceAtMost(caps.isoMax ?: Int.MAX_VALUE)
+            ?: (baseIso * DCG_RATIO).coerceAtMost(caps.isoMax ?: Int.MAX_VALUE)
 
         // RAW-only: exclude the preview surface so the viewfinder never shows
         // high-ISO frames. Without this, the alternating brightness is visible

@@ -93,11 +93,15 @@ import dev.multiframe.camera.pipeline.CaptureReadout
 import dev.multiframe.camera.pipeline.CaptureModes
 import dev.multiframe.camera.pipeline.ColorProfile
 import dev.multiframe.camera.pipeline.ColorScience
+import dev.multiframe.camera.pipeline.DcgCalibrationStore
+import dev.multiframe.camera.pipeline.DcgProfiler
 import dev.multiframe.camera.pipeline.SceneAnalysis
 import dev.multiframe.camera.pipeline.FocusPeaking
 import dev.multiframe.camera.pipeline.Plane
 import dev.multiframe.camera.pipeline.Lens
 import dev.multiframe.camera.pipeline.LensCatalog
+import dev.multiframe.camera.pipeline.LensProfile
+import dev.multiframe.camera.pipeline.LensProfiles
 import dev.multiframe.camera.pipeline.MemoryPressure
 import dev.multiframe.camera.pipeline.NativeMerge
 import dev.multiframe.camera.pipeline.PressureResponse
@@ -222,6 +226,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // raw pipeline needs to know which sensor produced a frame, because black
     // level, colour filter arrangement and calibration are all per lens.
     var lenses by remember { mutableStateOf<List<Lens>>(emptyList()) }
+    // Optical characterisation per physical camera, keyed by camera id. Empty
+    // until the catalogue has been enumerated; a lens with no entry is one the
+    // device would not describe, which every consumer has to survive.
+    var lensProfiles by remember { mutableStateOf<Map<String, LensProfile>>(emptyMap()) }
     var lens by remember { mutableStateOf<Lens?>(null) }
 
     // Expose for the highlights and let the merge pay for the shadows. On by
@@ -652,6 +660,16 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     "${it.label}/${it.zoomLabel}"
                 })
 
+                // The optical characterisation, which is what the distortion
+                // correction and the mosaic stitching will need and what the
+                // DCG bracket asks about its sensitivity range. Probed off the
+                // catalogue so the same optic is not characterised three times,
+                // and cheap enough to do inline: it is metadata reads, no
+                // capture and no allocation of consequence.
+                lensProfiles = LensProfiles.probe(
+                    context.getSystemService(CameraManager::class.java), catalog,
+                )
+
                 val configs = ZslRawStream.rawConfigs(ch)
                 configs.forEach { Log.i(TAG, "RAW stream $it") }
                 val decision = ZslPolicy.evaluate(capabilities.supportsRaw, configs)
@@ -889,6 +907,56 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // Slower than the frame rate on purpose: auto-exposure needs time
             // to settle after a change, and chasing it faster oscillates.
             kotlinx.coroutines.delay(700)
+        }
+    }
+
+    // The read-noise profiling, which the user is never told about.
+    //
+    // Runs once per camera per install and takes a second or two of ISO steps
+    // on the repeating request. It is gated on the store rather than on a flag
+    // in memory so that a second launch does not repeat it, and gated on `busy`
+    // so it never overlaps a capture -- it drives the sensitivity, and a burst
+    // taken while it is stepping would be shot at whatever ISO the ladder
+    // happened to be on.
+    //
+    // A failure records nothing, which means the next launch tries again. That
+    // is deliberate: the usual reason to fail is that the phone was moving too
+    // much for the frame pair to cancel, and next time it may not be.
+    LaunchedEffect(zslStream, caps, busy) {
+        val stream = zslStream ?: return@LaunchedEffect
+        val c = caps ?: return@LaunchedEffect
+        if (busy) return@LaunchedEffect
+        if (!c.supportsBracketing) return@LaunchedEffect
+
+        val id = stream.lensId
+        if (DcgCalibrationStore.hasProfiled(context, id)) {
+            // Measured on an earlier launch. The stream is new even though the
+            // finding is not, so it has to be told.
+            stream.setGainThreshold(
+                DcgCalibrationStore.thresholdFor(context, id), settings, c,
+            )
+            return@LaunchedEffect
+        }
+
+        // Let the stream fill and auto-exposure settle before taking the
+        // sensor away from it. Profiling an empty ring measures nothing.
+        kotlinx.coroutines.delay(2500)
+        if (busy) return@LaunchedEffect
+
+        val result = withContext(Dispatchers.Default) {
+            runCatching {
+                DcgProfiler.profile(context, stream, c, settings, id)
+            }.onFailure { Log.w(TAG, "noise profiling failed", it) }.getOrNull()
+        }
+
+        // A measured threshold replaces the software default for this camera.
+        result?.thresholdIso?.let { threshold ->
+            lensProfiles = lensProfiles.mapValues { (cameraId, profile) ->
+                if (cameraId == id) profile.copy(dcgThresholdIso = threshold)
+                else profile
+            }
+            stream.setGainThreshold(threshold, settings, c)
+            Log.i(TAG, "$id brackets at the measured gain switch: ISO $threshold")
         }
     }
 
