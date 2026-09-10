@@ -63,6 +63,35 @@ class ExposureStrategyTest {
     }
 
     @Test
+    fun `DCG adds extra shadow recovery on top of the sqrt-N base`() {
+        val base8 = ExposureStrategy.shadowRecoveryStops(8)
+        val dcg8 = ExposureStrategy.shadowRecoveryStopsDcg(8, dcgRatio = 4)
+
+        // 4x ratio = 2 stops of extra sensitivity, halved = 1 extra stop.
+        assertThat(dcg8).isWithin(0.01f).of(base8 + 1f)
+        println("8 frames: base %.2f stops, with DCG×4 %.2f stops".format(base8, dcg8))
+    }
+
+    @Test
+    fun `DCG ratio of 1 is identical to the base`() {
+        for (n in listOf(1, 4, 8, 16)) {
+            assertThat(ExposureStrategy.shadowRecoveryStopsDcg(n, dcgRatio = 1))
+                .isEqualTo(ExposureStrategy.shadowRecoveryStops(n))
+        }
+    }
+
+    @Test
+    fun `DCG lets the highlight guard pull further`() {
+        val bright = ExposureStrategy.analyse(histogram(clippedFraction = 0.25f))
+
+        val noDcg = ExposureStrategy.recommendedPullStops(bright, frameCount = 8)
+        val withDcg = ExposureStrategy.recommendedPullStops(bright, frameCount = 8, dcgRatio = 4)
+
+        assertThat(withDcg).isLessThan(noDcg)
+        println("blown scene at 8 frames: no DCG %.2f, DCG×4 %.2f".format(noDcg, withDcg))
+    }
+
+    @Test
     fun `a single frame can afford no underexposure at all`() {
         // With nothing to merge, pulling exposure just makes a darker, noisier
         // picture. The strategy has to know that.

@@ -242,7 +242,10 @@ class ZslRawStream private constructor(
         if (!ring.histogramNewest(histogramBins, sensorProfile)) return null
 
         val analysis = ExposureStrategy.analyse(histogramBins)
-        val index = ExposureStrategy.recommendedEvIndex(analysis, frameCount, caps)
+        val index = ExposureStrategy.recommendedEvIndex(
+            analysis, frameCount, caps,
+            dcgRatio = if (dcg) DCG_RATIO else 1,
+        )
         if (index != evOverride) {
             evOverride = index
             pullStops = index * caps.evStep

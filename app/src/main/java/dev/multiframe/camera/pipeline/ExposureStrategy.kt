@@ -76,6 +76,21 @@ object ExposureStrategy {
     }
 
     /**
+     * Shadow recovery with dual conversion gain.
+     *
+     * The high-ISO frames read further into shadows — [dcgRatio] times more
+     * analog gain is `log2(dcgRatio)` stops of extra sensitivity — but only
+     * half that improvement survives averaging because the high-ISO frames
+     * also contribute more noise. The net extra budget is
+     * `0.5 * log2(dcgRatio)` stops on top of the sqrt(N) base.
+     */
+    fun shadowRecoveryStopsDcg(frameCount: Int, dcgRatio: Int): Float {
+        val base = shadowRecoveryStops(frameCount)
+        if (dcgRatio <= 1) return base
+        return base + (0.5 * ln(dcgRatio.toDouble()) / ln(2.0)).toFloat()
+    }
+
+    /**
      * Reads a luma histogram.
      *
      * [histogram] is any number of equal-width bins over the 0..1 range.
@@ -123,6 +138,7 @@ object ExposureStrategy {
         analysis: SceneAnalysis,
         frameCount: Int,
         maxPull: Float = MAX_UNDEREXPOSURE_STOPS,
+        dcgRatio: Int = 1,
     ): Float {
         // Nothing bright enough to be at risk.
         if (analysis.clippedFraction <= ALLOWED_CLIPPING &&
@@ -150,7 +166,7 @@ object ExposureStrategy {
         // Only spend what the burst can pay back. Pulling further than the
         // merge can recover trades a blown highlight for a noisy shadow, which
         // is not obviously a better picture.
-        val affordable = min(shadowRecoveryStops(frameCount), maxPull)
+        val affordable = min(shadowRecoveryStopsDcg(frameCount, dcgRatio), maxPull)
         // Returned explicitly rather than as negated zero, which is a distinct
         // float value and compares unequal to zero.
         if (affordable <= 0f || wanted <= 0f) return 0f
@@ -167,9 +183,10 @@ object ExposureStrategy {
         analysis: SceneAnalysis,
         frameCount: Int,
         caps: CameraCapabilities,
+        dcgRatio: Int = 1,
     ): Int {
         if (!caps.supportsExposureCompensation || caps.evStep <= 0f) return 0
-        val stops = recommendedPullStops(analysis, frameCount)
+        val stops = recommendedPullStops(analysis, frameCount, dcgRatio = dcgRatio)
         val index = (stops / caps.evStep).toInt()
         return index.coerceIn(caps.evMin, caps.evMax)
     }
