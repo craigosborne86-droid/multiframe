@@ -65,6 +65,9 @@ fun ControlsPanel(
     /** Null where there is no zero-shutter-lag stream to guard highlights for. */
     highlightGuard: Boolean? = null,
     onHighlightGuard: (Boolean) -> Unit = {},
+    /** Null where the camera cannot bracket ISO (no manual sensor, ISO range or raw). */
+    dcgEnabled: Boolean? = null,
+    onDcgEnabled: (Boolean) -> Unit = {},
     onReset: (() -> Unit)? = null,
 ) {
     if (caps == null) return
@@ -167,6 +170,9 @@ fun ControlsPanel(
             Toggle("A/B ${if (abMode) "ON" else "OFF"}", abMode) { onAbMode(!abMode) }
             highlightGuard?.let { on ->
                 Toggle("GUARD ${if (on) "ON" else "OFF"}", on) { onHighlightGuard(!on) }
+            }
+            dcgEnabled?.let { on ->
+                Toggle("DCG ${if (on) "ON" else "OFF"}", on) { onDcgEnabled(!on) }
             }
         }
 

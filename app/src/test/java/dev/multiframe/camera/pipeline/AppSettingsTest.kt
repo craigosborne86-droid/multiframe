@@ -201,6 +201,33 @@ class AppSettingsTest {
     }
 
     @Test
+    fun `dcg survives a round trip`() {
+        val on = AppSettings(dcgEnabled = true)
+        assertThat(AppSettings.decode(on.encode()).dcgEnabled).isTrue()
+        val off = AppSettings(dcgEnabled = false)
+        assertThat(AppSettings.decode(off.encode()).dcgEnabled).isFalse()
+    }
+
+    @Test
+    fun `dcg is off out of the box`() {
+        assertThat(AppSettings().dcgEnabled).isFalse()
+        assertThat(AppSettings.decode(emptyMap()).dcgEnabled).isFalse()
+    }
+
+    @Test
+    fun `dcg is forced off when the camera cannot bracket`() {
+        val noBracketing = caps.copy(hasManualSensor = false)
+        val wanted = AppSettings(dcgEnabled = true)
+        assertThat(wanted.reconcile(noBracketing, lenses).dcgEnabled).isFalse()
+    }
+
+    @Test
+    fun `dcg is kept when the camera can bracket`() {
+        assertThat(caps.supportsBracketing).isTrue()
+        assertThat(AppSettings(dcgEnabled = true).reconcile(caps, lenses).dcgEnabled).isTrue()
+    }
+
+    @Test
     fun `reconciling settings that are already valid changes nothing`() {
         val fine = AppSettings(
             manual = ManualSettings(

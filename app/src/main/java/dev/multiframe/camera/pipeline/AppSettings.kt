@@ -28,6 +28,7 @@ data class AppSettings(
     val timerSeconds: Int = 0,
     /** Which composition guides are drawn, by [dev.multiframe.camera.ui.GuideMode] name. */
     val guides: String = "OFF",
+    val dcgEnabled: Boolean = false,
 ) {
 
     /**
@@ -54,6 +55,7 @@ data class AppSettings(
         KEY_MODE to captureMode.name,
         KEY_TIMER to timerSeconds.toString(),
         KEY_GUIDES to guides,
+        KEY_DCG to dcgEnabled.toString(),
     ) + (lensId?.let { mapOf(KEY_LENS to it) } ?: emptyMap())
 
     companion object {
@@ -73,6 +75,7 @@ data class AppSettings(
         const val KEY_MODE = "mode"
         const val KEY_TIMER = "timer"
         const val KEY_GUIDES = "guides"
+        const val KEY_DCG = "dcg"
 
         private const val PREFERENCES = "multiframe.settings"
 
@@ -126,6 +129,7 @@ data class AppSettings(
                 timerSeconds = int(KEY_TIMER, defaults.timerSeconds)
                     .takeIf { it in TIMER_DELAYS } ?: defaults.timerSeconds,
                 guides = stored[KEY_GUIDES]?.takeIf { it.isNotBlank() } ?: defaults.guides,
+                dcgEnabled = bool(KEY_DCG, defaults.dcgEnabled),
             )
         }
 
@@ -148,6 +152,7 @@ data class AppSettings(
                     else CameraMetadata.CONTROL_AWB_MODE_AUTO,
                     evIndex = manual.effectiveEvIndex(caps),
                 ),
+                dcgEnabled = dcgEnabled && caps.supportsBracketing,
             )
         }
 

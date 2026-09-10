@@ -73,6 +73,9 @@ data class CameraCapabilities(
     val hasExposureRange: Boolean
         get() = exposureMinNs != null && exposureMaxNs != null && exposureMaxNs > exposureMinNs
 
+    val supportsBracketing: Boolean
+        get() = hasManualSensor && hasIsoRange && supportsRaw
+
     fun summary(): String = buildString {
         append(if (hasManualSensor) "Manual" else "Auto only")
         if (isoMin != null && isoMax != null) append("  \u00b7  ISO $isoMin\u2013$isoMax")

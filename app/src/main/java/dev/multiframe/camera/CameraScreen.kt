@@ -217,6 +217,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // nothing on a scene that does not need it.
     var highlightGuard by remember { mutableStateOf(restored.highlightGuard) }
     var guardPull by remember { mutableFloatStateOf(0f) }
+    var dcgEnabled by remember { mutableStateOf(restored.dcgEnabled) }
 
     // What the user is photographing. The right settings for a night scene and
     // a moving subject are opposites, and only the user knows which it is.
@@ -919,7 +920,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(
         settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, captureMode,
-        timerSeconds, guides,
+        timerSeconds, guides, dcgEnabled,
     ) {
         AppSettings.save(
             context,
@@ -933,6 +934,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 captureMode = captureMode,
                 timerSeconds = timerSeconds,
                 guides = guides.name,
+                dcgEnabled = dcgEnabled,
             ),
         )
     }
@@ -1378,6 +1380,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         onAbMode = { if (!busy) abMode = it },
                         highlightGuard = if (zslStream != null) highlightGuard else null,
                         onHighlightGuard = { if (!busy) highlightGuard = it },
+                        dcgEnabled = if (caps?.supportsBracketing == true) dcgEnabled else null,
+                        onDcgEnabled = { if (!busy) dcgEnabled = it },
                         onReset = {
                             // Back to what the app ships with. The save effect above
                             // is watching every one of these, so persisting it needs
@@ -1392,6 +1396,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             timerSeconds = fresh.timerSeconds
                             guides = GuideMode.OFF
                             abMode = false
+                            dcgEnabled = fresh.dcgEnabled
                             status = "settings reset"
                         },
                     )
