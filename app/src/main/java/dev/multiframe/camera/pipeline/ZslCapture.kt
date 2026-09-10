@@ -1,6 +1,7 @@
 package dev.multiframe.camera.pipeline
 
 import android.content.Context
+import android.hardware.camera2.CaptureResult
 import android.util.Log
 import kotlin.math.max
 
@@ -74,9 +75,27 @@ object ZslCapture {
             val tilesY = max(1, m.proxyHeight / TILE_TARGET)
             val stride = burst.frames.rowStride
 
-            // Newest frame is the reference: it is the one closest to the
-            // instant the user actually pressed the shutter.
-            val refBuffer = burst.frames.buffer(0) ?: error("reference slot unreadable")
+            // Pick the lowest-ISO frame as reference. With DCG the ring
+            // alternates between two sensitivities, and the low-ISO frame
+            // preserves highlights -- exactly the content the robustness
+            // weight would otherwise have to reject from a high-ISO
+            // reference. When all frames share the same ISO (DCG off) the
+            // newest frame wins, which is the one closest to the shutter.
+            var refIndex = 0
+            var refIso = Int.MAX_VALUE
+            for (i in 0 until burst.count) {
+                val iso = burst.results[i]
+                    ?.get(CaptureResult.SENSOR_SENSITIVITY) ?: continue
+                if (iso < refIso) {
+                    refIso = iso
+                    refIndex = i
+                }
+            }
+            val referenceIso = burst.results[refIndex]
+                ?.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0
+
+            val refBuffer = burst.frames.buffer(refIndex)
+                ?: error("reference slot unreadable")
             m.setReference(refBuffer, stride)
             val refProxy = m.lumaProxy(refBuffer, stride)
             // Only built when the native search is unavailable: it needs the
@@ -93,12 +112,18 @@ object ZslCapture {
             var alignNanos = 0L
             var accumulateNanos = 0L
 
-            for (i in 1 until burst.count) {
-                onProgress("merging ${i + 1}/${burst.count}")
+            for (i in 0 until burst.count) {
+                if (i == refIndex) continue
+                onProgress("merging ${captured + 1}/${burst.count}")
                 val buffer = burst.frames.buffer(i) ?: continue
 
+                val frameIso = burst.results[i]
+                    ?.get(CaptureResult.SENSOR_SENSITIVITY) ?: referenceIso
+                val gainScale = if (referenceIso > 0 && frameIso > 0)
+                    frameIso.toFloat() / referenceIso.toFloat() else 1f
+
                 var mark = System.nanoTime()
-                val proxy = m.lumaProxy(buffer, stride)
+                val proxy = m.lumaProxy(buffer, stride, gainScale)
                 proxyNanos += System.nanoTime() - mark
 
                 mark = System.nanoTime()
@@ -112,7 +137,7 @@ object ZslCapture {
                 alignNanos += System.nanoTime() - mark
 
                 mark = System.nanoTime()
-                m.addFrame(buffer, stride, field)
+                m.addFrame(buffer, stride, field, gainScale)
                 accumulateNanos += System.nanoTime() - mark
 
                 captured++
@@ -146,7 +171,7 @@ object ZslCapture {
                 height = m.height,
                 profile = profile,
                 characteristics = stream.characteristics,
-                captureResult = burst.referenceResult,
+                captureResult = burst.results[refIndex] ?: burst.referenceResult,
                 rotationDegrees = rotationDegrees,
                 frameCount = frameCount,
                 captured = captured,
