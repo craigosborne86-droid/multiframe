@@ -680,7 +680,12 @@ class ZslRawStream private constructor(
 
         val highIso = (baseIso * DCG_RATIO).coerceAtMost(caps.isoMax ?: Int.MAX_VALUE)
 
+        // RAW-only: exclude the preview surface so the viewfinder never shows
+        // high-ISO frames. Without this, the alternating brightness is visible
+        // as flicker. The preview runs at half the sensor rate (15 fps at 30),
+        // which is smoother than the alternative.
         val builder = createBaseBuilder(settings, caps)
+        builder.removeTarget(previewSurface)
 
         if (locked) builder.set(CaptureRequest.CONTROL_AWB_LOCK, true)
 
