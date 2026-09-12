@@ -255,6 +255,100 @@ class OpticsParityTest {
     }
 
     /**
+     * The same pass at two sizes, to separate what scales from what does not.
+     *
+     * The benchmark at 1024x768 read 40 ns/px and projected 530 ms for a full
+     * frame. Production, on the real 4032x3024 frame, measured 66-88 ms --
+     * about 6 ns/px, six times faster than the projection. A per-pixel cost
+     * cannot do that. A fixed cost per call can: something on the order of
+     * 20 ms that the small image cannot amortise and the large one can.
+     *
+     * Two candidates, both to do with the threads being created fresh on every
+     * call. Spawning them costs something. More than that, each lands on a
+     * core the governor has let idle down to 400 MHz, and a four-millisecond
+     * job finishes before the core has ramped -- so the small image runs
+     * almost entirely at idle clocks. The merge runs for three seconds before
+     * the optics in production, and every core is already up.
+     *
+     * Running both sizes back to back and dividing out the pixels gives the
+     * fixed cost as the intercept and the true per-pixel cost as the slope.
+     */
+    @Test
+    fun theFixedCostIsSeparatedFromThePerPixelCost() {
+        assertThat(NativeMerge.isAvailable()).isTrue()
+        val m = model()
+
+        fun timeAt(w: Int, h: Int): Long {
+            val px = IntArray(w * h) { i ->
+                val v = (i * 7 and 0xFF)
+                (0xFF shl 24) or (v shl 16) or ((v * 3 and 0xFF) shl 8) or (v * 5 and 0xFF)
+            }
+            val src = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+            val dst = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            // The model is stated for the small frame; rescale it so the
+            // geometry is the same fraction of the image at either size.
+            val scaled = m.scaledTo(width, height, w, h)
+            val warmUntil = System.nanoTime() + WARMUP_NS
+            while (System.nanoTime() < warmUntil) NativeOptics.correctInto(src, dst, scaled, aberration)
+            val t = LongArray(ROUNDS)
+            for (i in 0 until ROUNDS) {
+                val s = System.nanoTime()
+                NativeOptics.correctInto(src, dst, scaled, aberration)
+                t[i] = (System.nanoTime() - s) / 1000
+            }
+            src.recycle()
+            dst.recycle()
+            return median(t)
+        }
+
+        val smallPx = width.toLong() * height
+        val largeW = 4032
+        val largeH = 3024
+        val largePx = largeW.toLong() * largeH
+
+        // Which cores this process is actually allowed. The camera app during
+        // a capture sits in top-app, which on this device is every core
+        // including the 4.1 GHz one; an instrumentation process may not, and
+        // if it does not, every figure here is pessimistic against production
+        // by however much of the machine it was denied.
+        val allowed = runCatching {
+            java.io.File("/proc/self/status").readLines()
+                .firstOrNull { it.startsWith("Cpus_allowed_list") }
+                ?.substringAfter(":")?.trim()
+        }.getOrNull() ?: "unknown"
+        val cpuset = runCatching { java.io.File("/proc/self/cpuset").readText().trim() }
+            .getOrNull() ?: "unknown"
+        Log.i(TAG, "this process runs on cores $allowed (cpuset $cpuset)")
+
+        val small = timeAt(width, height)
+        val large = timeAt(largeW, largeH)
+
+        // Two points determine the line: cost = fixed + perPixel * pixels.
+        val perPixelNs = (large - small) * 1000.0 / (largePx - smallPx)
+        val fixedMs = (small * 1000.0 - perPixelNs * smallPx) / 1e6
+
+        Log.i(TAG, "%dx%d: %.1fms   %dx%d: %.1fms".format(width, height, small / 1000.0, largeW, largeH, large / 1000.0))
+        Log.i(TAG, "fixed cost per call: %.1fms; true per-pixel cost: %.2f ns/px".format(fixedMs, perPixelNs))
+        Log.i(TAG, "full 4080x3064 frame at the per-pixel rate alone: %.1fms".format(perPixelNs * 4080 * 3064 / 1e6))
+        DeviceKind.warnIfNotAPhone(TAG)
+
+        // Not held to the production budget, and the reason is the line logged
+        // above about cores. This process ran in cpuset /foreground on cores
+        // 0-5 -- six of seven, and not the 4.1 GHz one. The camera app during
+        // a capture sits in top-app and has all seven, with every core already
+        // hot from three seconds of merge. Measured there: 66-88 ms for this
+        // frame. Measured here, in two consecutive runs: 176 ms and 257 ms,
+        // per-pixel 12.3 and 19.4 ns. The environment is not the one the
+        // number is for, and a test cannot move itself into top-app.
+        //
+        // What is held is the floor under which the code is broken rather than
+        // the ceiling above which it is slow: a full frame in half a second
+        // would mean the threads are not running or the gather has fallen off
+        // the cache, either of which this should catch.
+        assertThat(large / 1000.0).isLessThan(500.0)
+    }
+
+    /**
      * Native against the Kotlin reference, paired, in one process.
      *
      * ### Why a ratio and not a time
