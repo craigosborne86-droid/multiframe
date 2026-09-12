@@ -87,6 +87,18 @@ class ZslRawStream private constructor(
     /** Which physical sensor this session's frames are coming from. */
     val lensId: String get() = lens.cameraId
 
+    /**
+     * Whether this lens will report its stabiliser's readings when asked.
+     *
+     * Read once from the characteristics. The request builder consults it so a
+     * lens without the mode is never sent a request it would reject.
+     */
+    val supportsOisData: Boolean = run {
+        val modes = characteristics.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES)
+        modes != null &&
+            modes.contains(android.hardware.camera2.CameraMetadata.STATISTICS_OIS_DATA_MODE_ON)
+    }
+
     /** Capture results held by sensor timestamp, in a preallocated ring. */
     private val resultSlots = arrayOfNulls<TotalCaptureResult>(RESULT_RING)
     private val resultStamps = LongArray(RESULT_RING)
@@ -627,6 +639,17 @@ class ZslRawStream private constructor(
             CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
             android.hardware.camera2.CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON,
         )
+
+        // The stabiliser's own record of where the lens was during the
+        // exposure, for seeding the alignment search. Also reported only when
+        // asked for, and only where the lens can: gated on the characteristics
+        // so a lens without the mode is not sent a request it will reject.
+        if (supportsOisData) {
+            builder.set(
+                CaptureRequest.STATISTICS_OIS_DATA_MODE,
+                android.hardware.camera2.CameraMetadata.STATISTICS_OIS_DATA_MODE_ON,
+            )
+        }
 
         focusRegion?.let {
             val rect = arrayOf(TouchFocus.meteringRectangle(it))
