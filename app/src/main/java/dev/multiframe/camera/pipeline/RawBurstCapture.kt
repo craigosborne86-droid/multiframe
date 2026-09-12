@@ -295,10 +295,13 @@ object RawBurstCapture {
         // Corrected in the orientation the model was written in, then turned.
         opticsFor(lensProfile, bitmap)?.let { params ->
             val tOptics = System.currentTimeMillis()
-            val pixels = IntArray(bitmap.width * bitmap.height)
-            bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-            Optics.apply(pixels, bitmap.width, bitmap.height, params)
-            bitmap.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+            // On the bitmap directly, so the native pass reads and writes the
+            // locked buffers and nothing is copied through the Java heap.
+            val (corrected, _) = Optics.apply(bitmap, params)
+            if (corrected !== bitmap) {
+                bitmap.recycle()
+                bitmap = corrected
+            }
             Log.i(TAG, "optics %dms".format(System.currentTimeMillis() - tOptics))
         }
 

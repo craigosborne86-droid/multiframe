@@ -153,39 +153,187 @@ object Optics {
         height: Int,
         params: Params,
     ): ChromaticAberration.Scale {
-        var scale = ChromaticAberration.NONE
+        val scale = resolveAberration(pixels, width, height, params)
+        val model = params.distortion?.takeIf { !it.isIdentity }
+        if (model == null && scale.isIdentity) return scale
 
-        if (params.correctAberration) {
-            val known = params.aberration
-            scale = known ?: ChromaticAberration.estimate(pixels, width, height)
+        // Fused: one gather, reading the untouched original. See
+        // `applyReference` for the arithmetic, which is what Optics.cpp does.
+        val source = pixels.copyOf(width * height)
+        applyReference(source, pixels, width, height, model, scale)
+        logApplied(params, model, width, height)
+        return scale
+    }
 
-            // Kept for the rest of the session, so the search runs once per
-            // lens rather than once per photograph. See `measured`.
-            if (known == null) {
-                params.lensId?.let { measured[it] = scale }
-                Log.i(TAG, "${params.lensLabel}: measured $scale")
-            }
+    /**
+     * Corrects a bitmap, returning a new one, on the native path where it is
+     * available and through [applyReference] where it is not.
+     *
+     * The source is not recycled. It is the caller's, and on the fallback path
+     * it is also the buffer the reference reads from.
+     */
+    fun apply(bitmap: android.graphics.Bitmap, params: Params): Pair<android.graphics.Bitmap, ChromaticAberration.Scale> {
+        val width = bitmap.width
+        val height = bitmap.height
 
-            if (!scale.isIdentity) {
-                ChromaticAberration.apply(pixels, width, height, scale)
-            }
+        // The aberration estimate needs the pixels as an IntArray, but only
+        // the first time a lens is seen. After that the cached scale is used
+        // and the native path never copies anything out.
+        val scale = params.aberration ?: run {
+            val pixels = IntArray(width * height)
+            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+            resolveAberration(pixels, width, height, params)
         }
 
-        val model = params.distortion
-        if (model != null && !model.isIdentity) {
-            // The resample cannot be done in place: a pixel already rewritten
-            // would become the source for its neighbour.
-            val source = pixels.copyOf(width * height)
-            LensDistortion.apply(source, pixels, width, height, model)
+        val model = params.distortion?.takeIf { !it.isIdentity }
+        if (model == null && scale.isIdentity) return bitmap to scale
+
+        NativeOptics.correct(bitmap, model, scale)?.let { corrected ->
+            logApplied(params, model, width, height)
+            return corrected to scale
+        }
+
+        // The Kotlin reference, on a copy.
+        val source = IntArray(width * height)
+        bitmap.getPixels(source, 0, width, 0, 0, width, height)
+        val out = IntArray(width * height)
+        applyReference(source, out, width, height, model, scale)
+        val corrected = android.graphics.Bitmap.createBitmap(
+            out, width, height, android.graphics.Bitmap.Config.ARGB_8888,
+        )
+        logApplied(params, model, width, height)
+        return corrected to scale
+    }
+
+    /** The aberration scale for this capture: cached for the lens, or measured now. */
+    private fun resolveAberration(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        params: Params,
+    ): ChromaticAberration.Scale {
+        if (!params.correctAberration) return ChromaticAberration.NONE
+        params.aberration?.let { return it }
+
+        val scale = ChromaticAberration.estimate(pixels, width, height)
+        // Kept for the rest of the session, so the search runs once per lens
+        // rather than once per photograph. See `measured`.
+        params.lensId?.let { measured[it] = scale }
+        Log.i(TAG, "${params.lensLabel}: measured $scale")
+        return scale
+    }
+
+    private fun logApplied(
+        params: Params,
+        model: LensDistortion.Model?,
+        width: Int,
+        height: Int,
+    ) {
+        if (model != null) {
             Log.i(
                 TAG,
-                "%s: undistorted %dx%d, peak %.1fpx".format(
+                "%s: corrected %dx%d, peak %.1fpx".format(
                     params.lensLabel, width, height,
                     LensDistortion.peakDisplacement(model, width, height),
                 ),
             )
+        } else {
+            Log.i(TAG, "${params.lensLabel}: corrected aberration only")
         }
+    }
 
-        return scale
+    /**
+     * The fused correction, in Kotlin, on packed ARGB.
+     *
+     * This is the reference Optics.cpp is held to. It composes the two
+     * gathers: for an output pixel, undistortion says where it came from in
+     * the distorted image, and the aberration correction says where red and
+     * blue at *that* position really are. Each channel is interpolated once,
+     * at its own source.
+     *
+     * [src] and [dst] must not alias -- this reads the whole of one and writes
+     * the whole of the other. A null [model] means no geometric correction and
+     * the source position is the output position.
+     */
+    fun applyReference(
+        src: IntArray,
+        dst: IntArray,
+        width: Int,
+        height: Int,
+        model: LensDistortion.Model?,
+        scale: ChromaticAberration.Scale,
+    ) {
+        require(src.size >= width * height) { "source is smaller than $width x $height" }
+        require(dst.size >= width * height) { "destination is smaller than $width x $height" }
+
+        val maxX = width - 1
+        val maxY = height - 1
+        // The aberration centre is the frame centre, which is what the
+        // estimator measured against. Not the distortion model's principal
+        // point: the two describe different things.
+        val acx = (width - 1) / 2f
+        val acy = (height - 1) / 2f
+
+        Bands.rows(height) { yStart, yEnd ->
+            val s = FloatArray(2)
+            for (y in yStart until yEnd) {
+                val row = y * width
+                val fy = y.toFloat()
+                for (x in 0 until width) {
+                    val sx: Float
+                    val sy: Float
+                    if (model != null) {
+                        LensDistortion.sourceFor(model, x.toFloat(), fy, s)
+                        sx = s[0]
+                        sy = s[1]
+                    } else {
+                        sx = x.toFloat()
+                        sy = fy
+                    }
+
+                    val g = sample(src, width, maxX, maxY, sx, sy, 8)
+
+                    val rx = acx + (sx - acx) * scale.red
+                    val ry = acy + (sy - acy) * scale.red
+                    val r = sample(src, width, maxX, maxY, rx, ry, 16)
+
+                    val bx = acx + (sx - acx) * scale.blue
+                    val by = acy + (sy - acy) * scale.blue
+                    val b = sample(src, width, maxX, maxY, bx, by, 0)
+
+                    dst[row + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
+            }
+        }
+    }
+
+    /** One channel, bilinear, clamped at the border, rounded to nearest even. */
+    private fun sample(
+        src: IntArray,
+        width: Int,
+        maxX: Int,
+        maxY: Int,
+        fx: Float,
+        fy: Float,
+        shift: Int,
+    ): Int {
+        val cx = fx.coerceIn(0f, maxX.toFloat())
+        val cy = fy.coerceIn(0f, maxY.toFloat())
+        val x0 = cx.toInt()
+        val y0 = cy.toInt()
+        val x1 = if (x0 < maxX) x0 + 1 else x0
+        val y1 = if (y0 < maxY) y0 + 1 else y0
+        val tx = cx - x0
+        val ty = cy - y0
+
+        val v00 = ((src[y0 * width + x0] ushr shift) and 0xFF).toFloat()
+        val v10 = ((src[y0 * width + x1] ushr shift) and 0xFF).toFloat()
+        val v01 = ((src[y1 * width + x0] ushr shift) and 0xFF).toFloat()
+        val v11 = ((src[y1 * width + x1] ushr shift) and 0xFF).toFloat()
+
+        val top = v00 + (v10 - v00) * tx
+        val bottom = v01 + (v11 - v01) * tx
+        val v = top + (bottom - top) * ty
+        return kotlin.math.round(v).toInt().coerceIn(0, 255)
     }
 }

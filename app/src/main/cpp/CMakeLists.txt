@@ -172,6 +172,7 @@ add_library(multiframe SHARED
     Mosaic.cpp
     Align.cpp
     Rotate.cpp
+    Optics.cpp
     Jpeg.cpp
     GpuCrossing.cpp
 )
