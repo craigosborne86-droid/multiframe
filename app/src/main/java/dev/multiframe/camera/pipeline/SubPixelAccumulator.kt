@@ -349,14 +349,25 @@ class SubPixelAccumulator(
             }
         }
 
-        // Fill. NaN marks a hole; the nearest resolved cell of the same channel
-        // within the search radius supplies the value.
+        // Fill, from a snapshot. NaN marks a hole; the nearest *measured* cell
+        // of the same channel within the search radius supplies the value.
+        //
+        // From a snapshot and not in place, on purpose. Filling in place lets
+        // a later hole borrow an earlier hole's fill as though it were a
+        // measurement, and the borrowed value is then a fill of a fill -- an
+        // estimate compounded, and one whose result depends on which hole the
+        // loop reached first. Reading from a copy means every fill is taken
+        // from a cell the burst actually sampled, and the answer does not
+        // depend on iteration order. The native pass, which resolves in strips
+        // and cannot fill in place across them, does the same thing, and the
+        // two agree because of it.
+        val measured = rgb.copyOf()
         for (c in 0 until 3) {
             for (j in 0 until height) {
                 for (i in 0 until width) {
                     val cell = j * width + i
                     if (!rgb[cell * 3 + c].isNaN()) continue
-                    rgb[cell * 3 + c] = nearestResolved(rgb, c, i, j)
+                    rgb[cell * 3 + c] = nearestResolved(measured, c, i, j)
                 }
             }
         }
