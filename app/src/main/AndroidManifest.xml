@@ -2,6 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Normal permission, granted at install without a prompt. The tripod
+         detector reads the IMU at the rate a phone delivers it; without this
+         the platform caps sensors at 200 Hz, which is enough for detection but
+         not for measuring the vibration motor's ring-down to the millisecond. -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <uses-feature
         android:name="android.hardware.camera.any"
