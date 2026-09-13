@@ -84,6 +84,8 @@ class AlignerParityTest {
 
         var worst = 0
         var differing = 0
+        var fracWorst = 0f
+        var fracDiffering = 0
         for (i in kotlinField.dx.indices) {
             val ddx = kotlinField.dx[i] - nativeField!!.dx[i]
             val ddy = kotlinField.dy[i] - nativeField.dy[i]
@@ -91,12 +93,24 @@ class AlignerParityTest {
                 differing++
                 worst = maxOf(worst, maxOf(kotlin.math.abs(ddx), kotlin.math.abs(ddy)))
             }
+            // The sub-pixel refinement, held to the same reference. The costs it
+            // is fitted through are exact integer sums on both sides, so the
+            // only room for disagreement is the double arithmetic of the fit,
+            // and 1e-6 is a generous bound on that.
+            val fdx = kotlin.math.abs(kotlinField.fracDx[i] - nativeField.fracDx[i])
+            val fdy = kotlin.math.abs(kotlinField.fracDy[i] - nativeField.fracDy[i])
+            if (fdx > 1e-6f || fdy > 1e-6f) {
+                fracDiffering++
+                fracWorst = maxOf(fracWorst, fdx, fdy)
+            }
         }
         Log.i(
             TAG,
-            "$what: ${kotlinField.dx.size} tiles, $differing differing, worst $worst",
+            "$what: ${kotlinField.dx.size} tiles, $differing differing, worst $worst; " +
+                "sub-pixel $fracDiffering differing, worst %.2e".format(fracWorst),
         )
         assertThat(differing).isEqualTo(0)
+        assertThat(fracDiffering).isEqualTo(0)
     }
 
     @Test

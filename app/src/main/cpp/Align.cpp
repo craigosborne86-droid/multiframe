@@ -199,8 +199,29 @@ int64_t tileCost(const Plane& ref, const Plane& alt, int x0, int y0,
     return cost;
 }
 
+/**
+ * The fractional offset of a minimum, from three costs a pixel apart.
+ *
+ * Matches `Aligner.subPixelOffset` exactly, including the three cases that
+ * return zero: a flat or inverted curvature, a vertex outside +-0.5, and the
+ * INT64_MAX sentinel an early-exit cost reads as. Computed in double for the
+ * same reason -- the costs run to millions and their difference is the number
+ * that matters.
+ */
+inline float subPixelOffset(int64_t before, int64_t at, int64_t after) {
+    if (before == INT64_MAX || at == INT64_MAX || after == INT64_MAX) return 0.0f;
+    const double denom = static_cast<double>(before) - 2.0 * static_cast<double>(at) +
+                         static_cast<double>(after);
+    if (denom <= 0.0) return 0.0f;
+    const double vertex = (static_cast<double>(before) - static_cast<double>(after)) /
+                          (2.0 * denom);
+    if (vertex < -0.5 || vertex > 0.5) return 0.0f;
+    return static_cast<float>(vertex);
+}
+
 void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& altPyr,
-                   int tilesX, int tilesY, int* dx, int* dy) {
+                   int tilesX, int tilesY, int* dx, int* dy,
+                   float* fracDx, float* fracDy) {
     const int count = tilesX * tilesY;
     const int levels = static_cast<int>(std::min(refPyr.size(), altPyr.size()));
 
@@ -265,6 +286,24 @@ void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& a
                 }
                 dx[idx] = bestDx;
                 dy[idx] = bestDy;
+
+                // Sub-pixel refinement at the finest level only. Higher up it
+                // would be doubled into the next level's integer search and
+                // lost. Four extra evaluations per tile, without an early-exit
+                // ceiling, because a cost that bailed out is not a measurement
+                // and the fit would read it as one.
+                if (level == 0) {
+                    const int64_t left = tileCost(ref, alt, x0, y0, tileW, tileH,
+                                                  bestDx - 1, bestDy, step, INT64_MAX);
+                    const int64_t right = tileCost(ref, alt, x0, y0, tileW, tileH,
+                                                   bestDx + 1, bestDy, step, INT64_MAX);
+                    const int64_t up = tileCost(ref, alt, x0, y0, tileW, tileH,
+                                                bestDx, bestDy - 1, step, INT64_MAX);
+                    const int64_t down = tileCost(ref, alt, x0, y0, tileW, tileH,
+                                                  bestDx, bestDy + 1, step, INT64_MAX);
+                    fracDx[idx] = subPixelOffset(left, bestCost, right);
+                    fracDy[idx] = subPixelOffset(up, bestCost, down);
+                }
             }
         }
     }
@@ -278,7 +317,8 @@ JNIEXPORT jboolean JNICALL
 Java_dev_multiframe_camera_pipeline_Aligner_nAlign(
         JNIEnv* env, jobject, jbyteArray jref, jbyteArray jalt,
         jint width, jint height, jint tilesX, jint tilesY,
-        jintArray joutDx, jintArray joutDy) {
+        jintArray joutDx, jintArray joutDy,
+        jfloatArray joutFracDx, jfloatArray joutFracDy) {
     if (width <= 0 || height <= 0 || tilesX <= 0 || tilesY <= 0) return JNI_FALSE;
 
     const size_t pixels = static_cast<size_t>(width) * height;
@@ -301,11 +341,16 @@ Java_dev_multiframe_camera_pipeline_Aligner_nAlign(
     const int count = tilesX * tilesY;
     std::vector<int> dx(static_cast<size_t>(count), 0);
     std::vector<int> dy(static_cast<size_t>(count), 0);
+    std::vector<float> fracDx(static_cast<size_t>(count), 0.0f);
+    std::vector<float> fracDy(static_cast<size_t>(count), 0.0f);
 
-    alignPyramids(refPyr, altPyr, tilesX, tilesY, dx.data(), dy.data());
+    alignPyramids(refPyr, altPyr, tilesX, tilesY, dx.data(), dy.data(),
+                  fracDx.data(), fracDy.data());
 
     env->SetIntArrayRegion(joutDx, 0, count, dx.data());
     env->SetIntArrayRegion(joutDy, 0, count, dy.data());
+    env->SetFloatArrayRegion(joutFracDx, 0, count, fracDx.data());
+    env->SetFloatArrayRegion(joutFracDy, 0, count, fracDy.data());
     return JNI_TRUE;
 }
 

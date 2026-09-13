@@ -5,16 +5,38 @@ import android.util.Log
 private const val TAG = "Multiframe"
 
 /**
- * Per-tile translation offsets for one alternate frame, expressed at full
- * resolution. Tiles are a fixed grid so offsets propagate trivially between
- * pyramid levels.
+ * Per-tile translation offsets for one alternate frame, in proxy pixels.
+ * Tiles are a fixed grid so offsets propagate trivially between pyramid levels.
+ *
+ * ### Two resolutions of the same answer
+ *
+ * [dx] and [dy] are the integer winners of the search. The Bayer-domain merge
+ * doubles them and uses nothing else: an offset in the CFA domain must be even
+ * or a red sample lands on a green one, so a fractional part is not something
+ * that merge can spend.
+ *
+ * [fracDx] and [fracDy] are the sub-pixel refinement of those winners -- where
+ * the true minimum sits between the integer candidates, from a parabola fitted
+ * through the cost at the winner and its two neighbours on each axis. Bounded
+ * to half a pixel either way. The full sub-pixel displacement of a tile is
+ * `dx + fracDx`, in proxy pixels; the merge never reads it, and the sub-pixel
+ * accumulation in `docs/REFERENCE.md` §3.6 exists to.
+ *
+ * Both arrays default to zero, so a field built without refinement -- by the
+ * mosaic path, or by a test -- describes exactly what it did before.
  */
 class AlignmentField(
     val tilesX: Int,
     val tilesY: Int,
     val dx: IntArray,
     val dy: IntArray,
-)
+    val fracDx: FloatArray = FloatArray(dx.size),
+    val fracDy: FloatArray = FloatArray(dy.size),
+) {
+    /** Whether any tile carries a refinement. False for a field built the old way. */
+    val hasSubPixel: Boolean
+        get() = fracDx.any { it != 0f } || fracDy.any { it != 0f }
+}
 
 /**
  * Hierarchical tile-based alignment on the luma plane, following the coarse-to-fine
@@ -98,6 +120,8 @@ object Aligner {
         val count = tilesX * tilesY
         val dx = IntArray(count)
         val dy = IntArray(count)
+        val fracDx = FloatArray(count)
+        val fracDy = FloatArray(count)
 
         val levels = minOf(refPyramid.size, altPyramid.size)
 
@@ -169,11 +193,57 @@ object Aligner {
                     }
                     dx[idx] = bestDx
                     dy[idx] = bestDy
+
+                    // Where between the integer candidates the minimum really
+                    // sits. Only at the finest level: a refinement made higher
+                    // up would be doubled into the next level's integer search
+                    // and lost. See [subPixelOffset] for the fit.
+                    if (level == 0) {
+                        val left = tileCost(ref, alt, x0, y0, tileW, tileH, bestDx - 1, bestDy, step, Long.MAX_VALUE)
+                        val right = tileCost(ref, alt, x0, y0, tileW, tileH, bestDx + 1, bestDy, step, Long.MAX_VALUE)
+                        val up = tileCost(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy - 1, step, Long.MAX_VALUE)
+                        val down = tileCost(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy + 1, step, Long.MAX_VALUE)
+                        fracDx[idx] = subPixelOffset(left, bestCost, right)
+                        fracDy[idx] = subPixelOffset(up, bestCost, down)
+                    }
                 }
             }
         }
 
-        return AlignmentField(tilesX, tilesY, dx, dy)
+        return AlignmentField(tilesX, tilesY, dx, dy, fracDx, fracDy)
+    }
+
+    /**
+     * The fractional offset of a minimum, from three costs a pixel apart.
+     *
+     * A parabola through (-1, [before]), (0, [at]) and (+1, [after]) has its
+     * vertex at `(before - after) / (2 * (before - 2*at + after))`. The cost
+     * surface is not a parabola, but close to a minimum it is well described by
+     * one, and this is the standard refinement -- it recovers most of the
+     * sub-pixel truth for one extra evaluation per axis.
+     *
+     * Three cases return zero rather than a number:
+     *
+     *  * a flat or inverted curvature, where the three points do not describe
+     *    a minimum at all -- a tile with no texture, or one where the search
+     *    landed on a plateau;
+     *  * a vertex outside ±0.5, which means the integer search was wrong by at
+     *    least a pixel and no parabola through these three points can fix
+     *    that -- clamping to the edge would assert a precision the fit does not
+     *    have;
+     *  * the sentinel [Long.MAX_VALUE], which is what an early-exit cost reads
+     *    as and is not a measurement.
+     *
+     * Computed in double: the costs are sums over a tile and run to millions,
+     * and their difference is the small number that matters.
+     */
+    fun subPixelOffset(before: Long, at: Long, after: Long): Float {
+        if (before == Long.MAX_VALUE || at == Long.MAX_VALUE || after == Long.MAX_VALUE) return 0f
+        val denom = before.toDouble() - 2.0 * at.toDouble() + after.toDouble()
+        if (denom <= 0.0) return 0f
+        val vertex = (before.toDouble() - after.toDouble()) / (2.0 * denom)
+        if (vertex < -0.5 || vertex > 0.5) return 0f
+        return vertex.toFloat()
     }
 
     /**
@@ -202,16 +272,18 @@ object Aligner {
         val count = tilesX * tilesY
         val dx = IntArray(count)
         val dy = IntArray(count)
+        val fracDx = FloatArray(count)
+        val fracDy = FloatArray(count)
         val ok = try {
             nAlign(
                 refProxy.data, altProxy.data, refProxy.width, refProxy.height,
-                tilesX, tilesY, dx, dy,
+                tilesX, tilesY, dx, dy, fracDx, fracDy,
             )
         } catch (e: Throwable) {
             Log.w(TAG, "native align failed, using Kotlin", e)
             false
         }
-        return if (ok) AlignmentField(tilesX, tilesY, dx, dy) else null
+        return if (ok) AlignmentField(tilesX, tilesY, dx, dy, fracDx, fracDy) else null
     }
 
     private external fun nAlign(
@@ -223,6 +295,8 @@ object Aligner {
         tilesY: Int,
         outDx: IntArray,
         outDy: IntArray,
+        outFracDx: FloatArray,
+        outFracDy: FloatArray,
     ): Boolean
 
     /** Sum of absolute differences, abandoning early once [ceiling] is exceeded. */
