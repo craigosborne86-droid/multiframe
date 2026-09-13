@@ -385,6 +385,31 @@ actuator cannot settle in time, the fallbacks in order of preference are:
    that detail enhancement is unavailable. A merge with honest noise reduction
    beats a smeared frame.
 
+**Measured on the Pixel 11 Pro — the dither is not feasible.** Accelerometer at
+371 Hz, phone resting on a surface, five traces per amplitude
+(`DitherTimingDeviceTest`, commit `38bf712`):
+
+| | Measured |
+|---|---|
+| Onset latency, `vibrate()` to first motion | **30.3 ms** median (27.9–47.2) |
+| Active (pulse + ring-down), amplitude 10 of 255 | **64.9 ms**, peak 0.20 m/s² |
+| Active, amplitude 25 | 72.4 ms, peak 0.27 m/s² |
+| Active, amplitude 255 | 134.9 ms, peak 2.88 m/s² |
+| Needed at 30 fps / 8 ms exposure | **115 ms of 33 ms available** |
+
+The onset alone is longer than the entire dead-time window. With the ring-down
+the pulse needs three and a half times the frame period. And at 0.2 m/s² over
+65 ms the displacement is tens of microns against a photosite pitch of 1.4–2.4
+µm — fifty to a hundred photosites, not the fraction of one a dither wants. The
+motor is built to be felt, and its gentlest is far past that.
+
+Of the three fallbacks: the OIS actuator is not exposed by Camera2 on this
+device (see `REFERENCE.md` §3.3.2); lengthening the period would mean a burst
+at **9 fps** (109 ms needed); so the third stands. The `TripodDetector` ships
+and works; the `DitherController` ships with the measured figures and declines
+every frame at 30 fps, which is the correct answer and the reason the
+measurement was made first. An unmeasured device inherits the same caution.
+
 **Failure mode to avoid.** If dither is applied and the device turns out not to
 be mounted — the user picks the phone up mid-burst — the pulse adds motion to a
 handheld capture. The IMU is therefore re-evaluated every frame, and the first
@@ -537,7 +562,7 @@ described is not yet built. This is what those numbers mean.
 |---|---|---|
 | 1 | Foundation & Hardware Truth | **Delivered.** Design tokens, haptic vocabulary, decoupled viewfinder HUD, `LensProfile` discovery, non-invasive DCG noise profiling, gallery and review surface. |
 | 2 | Lens Corrections & Develop Quality | Geometric distortion correction from `LensProfile`, lateral chromatic aberration correction, dual-illuminant colour matrix, HEIF output. |
-| 3 | Merge & Alignment Optimisation | OIS-seeded alignment, sub-pixel kernel accumulation onto a 2x canvas, IMU tripod detection with haptic micro-dither, local motion and ghost rejection. |
+| 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel parabolic alignment refinement; sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native strips, parity-verified); IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. Not yet integrated into the capture path — see §5.2. |
 | 4 | GPU Develop & Local Tone Mapping | Vulkan compute develop, bilateral-grid local tone mapping. |
 | 5 | Super-Res UX & Responsive UI | Sweep mode with reticle guidance, configurable tile matrices, responsive layout, accessibility pass. |
 | 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
@@ -555,6 +580,37 @@ demosaic step entirely for that path. Building a GPU develop against the current
 pipeline shape and then changing that shape underneath it would mean writing the
 compute kernels twice. Settling the merge output first costs nothing and saves
 that.
+
+### 5.2 What Phase 3 delivered, and what it did not
+
+Three of five items were built and verified; two were measured and found
+infeasible on the primary device. Both measurements were made *before*
+building, as this document requires, and the probes stay in the suite so a
+device that differs is recognised.
+
+**Built:**
+
+- Sub-pixel alignment refinement (`fracDx`/`fracDy`), native and Kotlin, parity
+  at zero differing tiles. The prerequisite §3.6 was missing.
+- Sub-pixel kernel accumulation: Kotlin reference, native strip-major
+  implementation, parity within one 16-bit count across strip boundaries. The
+  algorithm is validated against synthetic ground truth — sub-1% RMS on a full
+  lattice, detail at sensor Nyquist resolved at >75% contrast.
+- `TripodDetector`: IMU-based mount detection at the PRD thresholds.
+
+**Hardware-blocked:**
+
+- OIS seeding — no lens reports OIS data. `REFERENCE.md` §3.3.2.
+- Haptic micro-dither — 30 ms onset against a 25 ms window. §2.3.6 above.
+
+**Not yet done — the integration.** The accumulator produces a 2× linear RGB16
+canvas (300 MB for a 12.5 MP sensor). Reaching a saved photograph from it needs
+a develop path that takes linear RGB rather than CFA — colour matrix, tone
+curve, gamma, sharpen on a 50 MP buffer that cannot become a `Bitmap` on a
+256 MB heap and must be encoded from native memory as the mosaic is. It also
+needs the capture path to choose this route only when the burst's hole fraction
+says it earned it, and the readout to say a 2× output is a different claim
+about the photograph. That is the next block of Phase 3 work.
 
 ---
 

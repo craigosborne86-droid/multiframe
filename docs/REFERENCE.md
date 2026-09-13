@@ -517,37 +517,87 @@ Mean contribution: sum(w_i) / (N - 1)
 
 #### 3.3.1 Tile Search
 
-Tile-based alignment with sub-pixel refinement:
+Hierarchical tile-based alignment, coarse to fine. **An earlier draft of this
+section described a flat ±16 search; that was never what the code did.**
 
 ```
-The image is divided into tiles (typically 32x32 pixels in the 2x-downsampled
-luma proxy).
+The luma proxy (2x-downsampled from the sensor) is built into a 4-level
+pyramid, each level a 2x2 box downsample of the one below. Level 0 is the
+proxy itself; level 3 is 1/8 of it, 1/16 of the sensor.
 
-For each tile:
-  1. Extract the tile from the reference proxy.
-  2. Search a +-16 pixel window in the alt proxy for the minimum SAD
-     (Sum of Absolute Differences).
-  3. Record (dx, dy) for the minimum.
-  4. Sub-pixel refinement: fit a parabola to the 3x3 SAD neighborhood
-     around the minimum and find the analytic minimum.
+The proxy is divided into tiles of ~32x32 proxy pixels. The tile grid is
+derived by truncating division, exactly as the merge derives it, so the two
+agree about where a tile is to the right-hand edge.
 
-Output: AlignmentField(tilesX, tilesY, dx[], dy[])
+For each level, coarsest first:
+  1. Offsets inherited from the coarser level are doubled.
+  2. For each tile, the search is seeded from the best of: the inherited
+     offset, the left neighbour's solved offset, the upper neighbour's, and
+     zero. This lets a tile recover when the coarse level misled it.
+  3. A ±4 window around the seed is searched for the minimum SAD.
+     81 evaluations per tile per level. At level 3 this covers ±32 proxy
+     pixels, ±64 sensor pixels -- far beyond burst hand tremor.
+  4. At level 0 only: sub-pixel refinement. Four more evaluations at the
+     winner's cardinal neighbours, and a parabola through each axis's three
+     costs gives the fractional offset of the minimum. Bounded to ±0.5; a
+     vertex outside that means the integer search was wrong by a pixel and
+     no parabola fixes it, so zero is returned rather than a clamp.
 
-Per-pixel displacement is bilinearly interpolated from the tile grid.
+Output: AlignmentField(tilesX, tilesY, dx[], dy[], fracDx[], fracDy[])
+  dx, dy      integer winners, proxy pixels
+  fracDx, dy  refinement, proxy pixels, zero where not refined
 ```
+
+The two merges spend the field differently. The Bayer-domain merge (§3.2)
+doubles `dx`, `dy` and uses nothing else: an offset in the CFA domain must be
+even or a red sample lands on a green site, so a fraction is not something that
+merge can spend. The sub-pixel accumulation (§3.6) is the one consumer of
+`fracDx`, `fracDy`, and exists to spend them.
 
 The luma proxy is computed with `gainScale` normalization: `proxy_value = (raw /
 gainScale)`, so brightness differences from ISO bracketing don't confuse the SAD
 metric.
 
-#### 3.3.2 OIS-Seeded Search (Phase 3)
+Native (`Align.cpp`) and Kotlin (`Aligner.kt`) make every decision identically,
+including tie-breaking order, and `AlignerParityTest` holds them to zero
+differing tiles and a sub-pixel difference under 1e-6.
 
-**What the search currently does not know.** Every tile starts its search at
-zero displacement and hunts outward over a ±16 pixel window: 33 × 33 = 1089 SAD
-evaluations per tile, per frame, with no prior on where the answer is. Yet the
-camera already knows roughly where the scene moved — the optical stabiliser
-spent the exposure measuring and counteracting exactly that motion, and Camera2
-will hand over its record of it.
+#### 3.3.2 OIS-Seeded Search — not available on the Pixel 11 Pro
+
+**Status: hardware-blocked on the primary target. Not built.**
+
+Probed on device before anything was built on it (`OisProbeDeviceTest`,
+commit `608b381`):
+
+| Lens | OIS hardware | `STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES` |
+|---|---|---|
+| 12mm | no | `[OFF]` |
+| 24mm | yes | `[OFF]` |
+| 105mm | yes | `[OFF]` |
+
+Two of the three lenses have a stabiliser; neither reports through Camera2.
+`STATISTICS_OIS_SAMPLES` will never arrive on this device. The stream requests
+the mode where a lens's characteristics offer it, so a device that does report
+is recognised; on this phone that gate is closed on every lens.
+
+**Two corrections to the earlier draft of this section.** It described the
+search as a flat ±16 window and promised a 1089→81 saving from seeding. The
+search is the pyramid in §3.3.1 and is already 81 evaluations per tile per
+level; the saving does not exist. And the coarsest level's ±4 covers ±64 sensor
+pixels, well beyond burst hand tremor, so the pyramid does not need a prior to
+find the answer. What a seed would have bought is robustness on repeating
+texture at the coarse level, not speed.
+
+**Gyro-seeded search was considered and declined** for the same reason: the
+pyramid's reach already exceeds what the IMU would tell it, and the engineering
+would buy nothing the search does not have.
+
+The remainder of this section is retained as the design a device that does
+report OIS would use.
+
+**The design, for a device that reports.** The optical stabiliser spends the
+exposure measuring and counteracting the scene's motion, and Camera2 can hand
+over its record of it.
 
 **The data.** Gated on `STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES` containing
 `STATISTICS_OIS_DATA_MODE_ON`. Set `STATISTICS_OIS_DATA_MODE` on the request;
@@ -740,6 +790,49 @@ accumulates on one scale; robustness weighting, so a sample that disagrees with
 the reference contributes little; and the reference frame's guaranteed
 contribution, so a cell is never composed entirely of rejected samples.
 
+**The robustness comparison had to change, and the tests found it.** §3.2
+compares an alternate sample to the reference at the *integer* alignment, which
+it can do because it only ever places at the integer. This places at the
+fraction, and two things follow:
+
+1. **Compare at the fraction.** A half-pixel shift at an edge means the
+   alternate legitimately saw the edge where the reference's integer-aligned
+   site did not. Comparing them rejects precisely the sample carrying the
+   sub-pixel information. So the reference is interpolated bilinearly on the
+   sample's *own colour lattice* — same-colour sites form a lattice of period
+   two in each axis — at the fractional position, and asked what it expects
+   there.
+
+2. **Widen the tolerance by what the reference cannot know.** Even at the
+   fraction, a bilinear ramp between two reference sites four canvas cells
+   apart cannot represent a step, and mid-edge it is wrong by half the step.
+   On a noiseless synthetic scene this rejected 26% of samples and left 7% of
+   interior cells with nothing but rejected weight. The tolerance is therefore:
+
+   ```
+   tolerance² = noise²(level) + uncertainty²
+   uncertainty = ½ × max total variation across the lattice cell
+   ```
+
+   Where the reference is flat the second term vanishes and this is §3.2's
+   test. Where it has an edge, the sample that reads the edge is kept — which
+   is the whole point. The noise estimate itself is taken only from cells
+   whose uncertainty is below a flatness threshold (20 counts on a 10-bit
+   range), so interpolation error does not loosen it for the whole frame.
+
+   Measured: acceptance went from 74% to 99%, interior holes from 7% to zero,
+   on the same scene.
+
+**Detail finer than the reference's per-colour Nyquist is attenuated, not
+resolved.** Bars at 1.5 sensor pixels are below what any single frame's red or
+blue lattice can represent, so the reference cannot witness them and the
+robustness weight reads the alternates' true detail as disagreement. It
+survives — tested at >50% contrast — but at reduced contrast and with fill
+where every sample was rejected. That is a limit of comparing against a
+bandwidth-limited reference, is documented as such, and is tested separately
+from placement. Detail *at* the sensor's Nyquist — two sensor pixels, the
+canonical super-resolution target — resolves at >75% of true contrast.
+
 #### 3.6.2 The Kernel
 
 Baseline is a radially symmetric Gaussian, σ ≈ 0.5 canvas cells, truncated at
@@ -760,14 +853,33 @@ A cell can end a burst with no samples of some channel — insufficient sub-pixe
 diversity, or every candidate sample rejected as an outlier. `wsum[c]` below
 threshold marks it.
 
-Holes are filled from the nearest cells that do have that channel. This is
-interpolation, and it is the one place in this path where a value is inferred
-rather than measured — so it is confined to cells the burst genuinely did not
-reach, and the hole fraction is recorded. **A high hole fraction means the burst
-lacked sub-pixel diversity**, which is precisely the tripod case §2.3.6 of the
-PRD detects and dithers for. The two features are the same problem seen from
-either end, and the hole fraction is the honest measurement of whether the
-dither worked.
+Holes are filled from the nearest *measured* cell of that channel, searched in
+rings out to three cells, reading from a snapshot so a fill never borrows
+another fill. This is interpolation, and it is the one place in this path where
+a value is inferred rather than measured — so it is confined to cells the burst
+genuinely did not reach, and the hole fraction is recorded, separately for the
+whole canvas and for its interior (a border of four cells excluded, since a
+shifted frame's samples fall off the edge and that is geometry, not diversity).
+
+**What the geometry guarantees, measured.** Green is sampled every sensor
+pixel — every two canvas cells — and half-pixel shifts reach both, so green
+covers. Red and blue are sampled every *two* sensor pixels — every four canvas
+cells — and half-pixel shifts reach only two of the four:
+
+| Burst | Interior holes | R / G / B RMS vs kernel-blurred truth |
+|---|---|---|
+| Quad shift (0, ½ in each axis; 4 frames) | 16.7% = ¼ of R + 0 of G + ¼ of B, over 3 | 42 / 22 / 43 |
+| Full lattice (0, ½, 1, 1½; 16 frames) | 0.0% | 6.2 / 2.2 / 1.2 |
+
+A real burst has eight to thirty frames at whatever offsets a hand produces and
+covers red and blue statistically rather than by construction. The hole
+fraction is what says how well it did.
+
+**A high hole fraction means the burst lacked sub-pixel diversity**, which is
+the tripod case §2.3.6 of the PRD detects. On the Pixel 11 Pro the dither that
+would have supplied diversity is infeasible (see §2.3.6's measured actuator
+timing), so the hole fraction is the signal to decline this path and shoot the
+ordinary merge.
 
 #### 3.6.4 Memory
 
@@ -837,7 +949,7 @@ different claim about the photograph and should say so.
 | Subsystem | Files |
 |---|---|
 | **Capture & ZSL** | `ZslRawStream.kt`, `ZslCapture.kt`, `ZslPolicy.kt`, `RawRing.kt`, `BurstBuffer.kt`, `RawCapture.kt`, `RawBurstCapture.kt` |
-| **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt` |
+| **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt`, `SubPixelAccumulator.kt`, `NativeSubPixel.kt` |
 | **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
 | **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` |
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt` |
@@ -848,14 +960,15 @@ different claim about the photograph and should say so.
 | **Settings** | `AppSettings.kt`, `CaptureReadout.kt`, `RecentCapture.kt`, `CaptureLog.kt` |
 | **GPU** | `GpuCrossing.kt` (benchmark only) |
 | **Geometry** | `Homography.kt`, `FeatureMatcher.kt` |
-| **Sensor** | `LevelGauge.kt`, `YuvFrame.kt` |
+| **Sensor** | `LevelGauge.kt`, `YuvFrame.kt`, `TripodDetector.kt`, `DitherController.kt`, `DitherPulse.kt` |
 
 ### Native C++ (app/src/main/cpp/)
 
 | File | Purpose |
 |---|---|
-| `bayer_merge.cpp` | NEON-vectorized merge accumulation, noise estimation, shading correction, prepass. **Phase 3** adds sub-pixel kernel accumulation onto a 2x canvas (§3.6). |
-| `Align.cpp` | Native tile alignment (SAD-based matching in luma proxy). **Phase 3** adds OIS-seeded search windows (§3.3.2). |
+| `bayer_merge.cpp` | NEON-vectorized merge accumulation, noise estimation, shading correction, prepass. |
+| `SubPixel.cpp` | Sub-pixel kernel accumulation onto a 2x canvas, strip-major over an mmap output (§3.6). Held to `SubPixelAccumulator.kt` within one 16-bit count. |
+| `Align.cpp` | Native 4-level pyramid tile alignment with parabolic sub-pixel refinement at the finest level (§3.3.1). Held to `Aligner.kt` at zero differing tiles. |
 | `RingBuffer.cpp` / `.h` | mmap-backed AHardwareBuffer ring buffer |
 | `Mosaic.cpp` / `.h` | Native mosaic tile compositing |
 | `Rotate.cpp` | NEON-accelerated image rotation |
