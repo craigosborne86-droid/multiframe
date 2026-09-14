@@ -168,13 +168,29 @@ class Homography(val m: DoubleArray) {
             var bestInliers: List<Match> = emptyList()
             var best: Homography? = null
 
-            repeat(iterations) {
-                val sample = pickFour(matches, rnd) ?: return@repeat
-                val candidate = fit(sample) ?: return@repeat
-                val inliers = matches.filter { candidate.reprojectionError(it) <= threshold }
-                if (inliers.size > bestInliers.size) {
-                    bestInliers = inliers
+            // Adaptive: once a model has explained a fraction w of the
+            // matches, the number of samples needed to have drawn one
+            // all-inlier four with probability 0.99 is log(0.01) / log(1 - w^4),
+            // and iterating past it is spending time on a question already
+            // answered. At sixty percent inliers that is 34 samples, not 600;
+            // the cap stays for the case where nothing fits. Counting first and
+            // collecting only for a new best keeps the loop free of allocation.
+            var needed = iterations
+            var done = 0
+            while (done < iterations && done < needed) {
+                done++
+                val sample = pickFour(matches, rnd) ?: continue
+                val candidate = fit(sample) ?: continue
+                var count = 0
+                for (m in matches) if (candidate.reprojectionError(m) <= threshold) count++
+                if (count > bestInliers.size) {
+                    bestInliers = matches.filter { candidate.reprojectionError(it) <= threshold }
                     best = candidate
+                    val w = count.toDouble() / matches.size
+                    val p4 = w * w * w * w
+                    needed = if (p4 >= 1.0) done else if (p4 <= 1e-9) iterations
+                    else kotlin.math.ceil(kotlin.math.ln(0.01) / kotlin.math.ln(1.0 - p4)).toInt()
+                        .coerceIn(done, iterations)
                 }
             }
 

@@ -64,6 +64,9 @@ object FeatureMatcher {
     /** Cells the frame is divided into when spreading corners out. */
     private const val GRID = 8
 
+    /** A corner has to be at least this fraction of the frame's strongest to be one. */
+    private const val RELATIVE_FLOOR = 0.02f
+
     /**
      * A match must beat the runner-up by this much to be believed. Lowe's
      * original threshold for this test was 0.8, and the value transfers.
@@ -102,6 +105,90 @@ object FeatureMatcher {
     }
 
     /**
+     * The corner response at every pixel, in linear time.
+     *
+     * [cornerStrength] sums the gradient tensor over a 5x5 window afresh for
+     * each pixel, twenty-five gradient pairs a pixel, four reads each. Called
+     * at every pixel of a 320x240 tracking frame that is eight million reads
+     * for the response alone, and the guidance registered every frame that
+     * way ten times a second. The response is separable: the three tensor
+     * terms are computed once per pixel and box-summed in two passes, so each
+     * pixel costs a handful of operations however wide the window. The sum is
+     * the same sum in a different order, which floating point makes a
+     * last-place matter and nothing more.
+     */
+    internal fun strengthMap(p: Plane, window: Int = 2): FloatArray {
+        val w = p.width
+        val h = p.height
+        val n = w * h
+        val ixx = FloatArray(n)
+        val iyy = FloatArray(n)
+        val ixy = FloatArray(n)
+        val d = p.data
+        for (y in 0 until h) {
+            val yu = if (y > 0) y - 1 else 0
+            val yd = if (y < h - 1) y + 1 else h - 1
+            val row = y * w
+            val rowU = yu * w
+            val rowD = yd * w
+            for (x in 0 until w) {
+                val xl = if (x > 0) x - 1 else 0
+                val xr = if (x < w - 1) x + 1 else w - 1
+                val gx = ((d[row + xr].toInt() and 0xFF) - (d[row + xl].toInt() and 0xFF)) * 0.5f
+                val gy = ((d[rowD + x].toInt() and 0xFF) - (d[rowU + x].toInt() and 0xFF)) * 0.5f
+                ixx[row + x] = gx * gx
+                iyy[row + x] = gy * gy
+                ixy[row + x] = gx * gy
+            }
+        }
+        // Box sums over the window, horizontally then vertically, as sliding
+        // sums: one add and one subtract per pixel whatever the window. The
+        // edges are clamped as cornerStrength clamps its reads, so the sum at
+        // the border counts the border pixel for every tap past it.
+        boxSumInPlace(ixx, w, h, window)
+        boxSumInPlace(iyy, w, h, window)
+        boxSumInPlace(ixy, w, h, window)
+        val out = ixx  // reused: the response replaces the summed xx term
+        for (i in 0 until n) {
+            val sxx = ixx[i]
+            val syy = iyy[i]
+            val sxy = ixy[i]
+            val trace = sxx + syy
+            val det = sxx * syy - sxy * sxy
+            val disc = max(0f, trace * trace * 0.25f - det)
+            out[i] = trace * 0.5f - sqrt(disc)
+        }
+        return out
+    }
+
+    /** Separable sliding box sum of radius [window], clamped at the edges, in place. */
+    private fun boxSumInPlace(a: FloatArray, w: Int, h: Int, window: Int) {
+        val span = maxOf(w, h)
+        val line = FloatArray(span)
+        // Rows.
+        for (y in 0 until h) {
+            val row = y * w
+            System.arraycopy(a, row, line, 0, w)
+            var sum = 0f
+            for (dx in -window..window) sum += line[dx.coerceIn(0, w - 1)]
+            for (x in 0 until w) {
+                a[row + x] = sum
+                sum += line[(x + window + 1).coerceIn(0, w - 1)] - line[(x - window).coerceIn(0, w - 1)]
+            }
+        }
+        // Columns.
+        for (x in 0 until w) {
+            for (y in 0 until h) line[y] = a[y * w + x]
+            var sum = 0f
+            for (dy in -window..window) sum += line[dy.coerceIn(0, h - 1)]
+            for (y in 0 until h) {
+                a[y * w + x] = sum
+                sum += line[(y + window + 1).coerceIn(0, h - 1)] - line[(y - window).coerceIn(0, h - 1)]
+            }
+        }
+    }
+
+    /**
      * Strong corners spread across the frame, strongest first within each cell.
      */
     fun detect(p: Plane, perCell: Int = 4, minSeparation: Int = 6): List<Corner> {
@@ -111,6 +198,21 @@ object FeatureMatcher {
         val cellW = max(1, (p.width - margin * 2) / GRID)
         val cellH = max(1, (p.height - margin * 2) / GRID)
         val found = ArrayList<Corner>(GRID * GRID * perCell)
+        val strength = strengthMap(p)
+
+        // A floor relative to the frame's strongest response, as well as the
+        // absolute one. On a frame with real corners the strongest response
+        // is in the thousands and a response of a few tens is the noise on a
+        // flat wall -- a "corner" that is in a different place in the next
+        // frame, matches something by chance, and hands RANSAC a wrong pair.
+        // A static phone on a plain desk registered against its own anchor
+        // one poll in three until this: two hundred and fifty corners, seventy
+        // matches, a dozen inliers. On a frame with no real corners the
+        // strongest response is itself noise and the floor stays at one, so
+        // a flat scene still offers what it has rather than nothing.
+        var strongest = 0f
+        for (v in strength) if (v > strongest) strongest = v
+        val floor = max(1f, strongest * RELATIVE_FLOOR)
 
         for (cy in 0 until GRID) {
             for (cx in 0 until GRID) {
@@ -130,11 +232,28 @@ object FeatureMatcher {
                 // ten-by-five pixel shift matched 145 points of which 8 agreed;
                 // scanning every pixel fixed it. Real displacements are
                 // arbitrary, so this was never going to show up only in tests.
+                //
+                // But only the local maxima are candidates. The first version
+                // made a Corner of every pixel whose response cleared one and
+                // sorted them: on a textured frame that is most of the cell,
+                // tens of thousands of objects a frame, and it was 44 ms of the
+                // 73 the guidance spent per poll. A corner is a peak of the
+                // response; a pixel on the shoulder of a peak is the same
+                // corner a pixel off, and minSeparation was discarding it
+                // anyway after it had been allocated and sorted.
+                val w = p.width
                 val cell = ArrayList<Corner>(64)
                 for (y in y0 until y1) {
+                    val row = y * w
                     for (x in x0 until x1) {
-                        val s = cornerStrength(p, x, y)
-                        if (s > 1f) cell.add(Corner(x, y, s))
+                        val s = strength[row + x]
+                        if (s <= floor) continue
+                        if (s < strength[row + x - 1] || s < strength[row + x + 1] ||
+                            s < strength[row - w + x] || s < strength[row + w + x] ||
+                            s < strength[row - w + x - 1] || s < strength[row - w + x + 1] ||
+                            s < strength[row + w + x - 1] || s < strength[row + w + x + 1]
+                        ) continue
+                        cell.add(Corner(x, y, s))
                     }
                 }
                 cell.sortByDescending { it.strength }
@@ -196,6 +315,61 @@ object FeatureMatcher {
     }
 
     /**
+     * A frame's corners and their descriptors, extracted once.
+     *
+     * Registration used to detect and describe both frames on every call.
+     * For a tile that has been placed that is the same answer every time,
+     * and for the frame the guidance is tracking it is the same answer for
+     * every tile it is registered against. Extract once, match many.
+     */
+    class Features internal constructor(
+        val width: Int,
+        val height: Int,
+        internal val corners: List<Corner>,
+        internal val descriptors: List<FloatArray>,
+        /** Each descriptor's [COARSE] x [COARSE] block means, unit-norm, for the shortlist. */
+        internal val coarse: List<FloatArray>,
+    ) {
+        val size: Int get() = corners.size
+    }
+
+    fun extract(p: Plane): Features {
+        val corners = ArrayList<Corner>()
+        val descriptors = ArrayList<FloatArray>()
+        val coarse = ArrayList<FloatArray>()
+        for (c in detect(p)) {
+            val d = describe(p, c) ?: continue
+            corners.add(c)
+            descriptors.add(d)
+            coarse.add(coarsen(d))
+        }
+        return Features(p.width, p.height, corners, descriptors, coarse)
+    }
+
+    /** Side of the coarse summary; the 15x15 patch in 3x3 blocks of 5x5. */
+    private const val COARSE = 3
+
+    /** Candidates per corner that get the full correlation. */
+    private const val SHORTLIST = 12
+
+    private fun coarsen(d: FloatArray): FloatArray {
+        val block = PATCH_SPAN / COARSE
+        val out = FloatArray(COARSE * COARSE)
+        for (by in 0 until COARSE) for (bx in 0 until COARSE) {
+            var sum = 0f
+            for (dy in 0 until block) for (dx in 0 until block) {
+                sum += d[(by * block + dy) * PATCH_SPAN + bx * block + dx]
+            }
+            out[by * COARSE + bx] = sum
+        }
+        var norm = 0f
+        for (v in out) norm += v * v
+        norm = sqrt(norm)
+        if (norm > 1e-6f) for (i in out.indices) out[i] /= norm
+        return out
+    }
+
+    /**
      * Correspondences from [a] into [b].
      *
      * [searchRadius] bounds how far a feature may have moved. Leaving it
@@ -207,29 +381,66 @@ object FeatureMatcher {
         b: Plane,
         searchRadius: Int = Int.MAX_VALUE,
         minCorrelation: Float = 0.75f,
+    ): List<Match> = match(extract(a), extract(b), searchRadius, minCorrelation)
+
+    /** [match] on features already extracted. */
+    fun match(
+        a: Features,
+        b: Features,
+        searchRadius: Int = Int.MAX_VALUE,
+        minCorrelation: Float = 0.75f,
     ): List<Match> {
-        val cornersA = detect(a)
-        val cornersB = detect(b)
-        if (cornersA.isEmpty() || cornersB.isEmpty()) return emptyList()
+        if (a.size == 0 || b.size == 0) return emptyList()
 
-        val describedB = cornersB.mapNotNull { c -> describe(b, c)?.let { c to it } }
-        if (describedB.isEmpty()) return emptyList()
+        // Two stages. Correlating every pair of 225-value descriptors was
+        // 15 million multiply-adds a frame and 20 ms of the guidance's poll;
+        // the coarse summaries -- nine values, the patch in 3x3 blocks -- pick
+        // a shortlist for each corner at a twenty-fifth of the cost, and the
+        // full correlation runs on the shortlist alone. A candidate whose
+        // blocks do not resemble the corner's is not one the full patch would
+        // have matched either; what the shortlist can miss is the runner-up
+        // the ratio test wants, when the runner-up is a look-alike at fine
+        // scale only, and a look-alike at fine scale is coarse-alike too.
+        val matches = ArrayList<Match>(a.size)
+        val shortlistIdx = IntArray(SHORTLIST)
+        val shortlistScore = FloatArray(SHORTLIST)
+        for (ia in a.corners.indices) {
+            val corner = a.corners[ia]
+            val descriptor = a.descriptors[ia]
+            val coarseA = a.coarse[ia]
 
-        val matches = ArrayList<Match>(cornersA.size)
-        for (corner in cornersA) {
-            val descriptor = describe(a, corner) ?: continue
-
-            var best = -2f
-            var second = -2f
-            var bestCorner: Corner? = null
-
-            for ((candidate, candidateDescriptor) in describedB) {
+            // The shortlist: the SHORTLIST best coarse scores, unordered.
+            var listed = 0
+            for (ib in b.corners.indices) {
+                val candidate = b.corners[ib]
                 if (searchRadius != Int.MAX_VALUE) {
                     if (abs(candidate.x - corner.x) > searchRadius ||
                         abs(candidate.y - corner.y) > searchRadius
                     ) continue
                 }
-                val score = correlation(descriptor, candidateDescriptor)
+                val c = correlation(coarseA, b.coarse[ib])
+                if (listed < SHORTLIST) {
+                    shortlistIdx[listed] = ib
+                    shortlistScore[listed] = c
+                    listed++
+                } else {
+                    var worst = 0
+                    for (k in 1 until SHORTLIST) if (shortlistScore[k] < shortlistScore[worst]) worst = k
+                    if (c > shortlistScore[worst]) {
+                        shortlistIdx[worst] = ib
+                        shortlistScore[worst] = c
+                    }
+                }
+            }
+
+            var best = -2f
+            var second = -2f
+            var bestCorner: Corner? = null
+
+            for (k in 0 until listed) {
+                val ib = shortlistIdx[k]
+                val candidate = b.corners[ib]
+                val score = correlation(descriptor, b.descriptors[ib])
                 if (score > best) {
                     second = best
                     best = score
@@ -274,7 +485,11 @@ object FeatureMatcher {
      * between them, and inventing one produces a torn mosaic rather than a
      * failed one.
      */
-    fun register(a: Plane, b: Plane, threshold: Float = 2.5f): HomographyFit? {
+    fun register(a: Plane, b: Plane, threshold: Float = 2.5f): HomographyFit? =
+        register(extract(a), extract(b), threshold)
+
+    /** [register] on features already extracted. */
+    fun register(a: Features, b: Features, threshold: Float = 2.5f): HomographyFit? {
         val matches = match(a, b)
         if (matches.size < 12) return null
         return Homography.ransac(matches, threshold = threshold, iterations = 600)

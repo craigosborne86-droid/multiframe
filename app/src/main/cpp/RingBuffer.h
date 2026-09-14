@@ -144,6 +144,20 @@ public:
      * produced. It also needs it small: peaking a twelve-megapixel frame several
      * times a second would cost more than the rest of the viewfinder together.
      */
+    /**
+     * A box-averaged luma view of the newest frame, for tracking.
+     *
+     * Unlike LumaNewest, which takes one CFA cell per output pixel and is for
+     * a display, every output pixel here is the mean of the cells in its block
+     * of the sensor -- sampled at every second cell when the block is large,
+     * which bounds the read to a quarter of the frame -- so the result is a
+     * proper downsample a corner detector can work on. Writes the frame's
+     * timestamp to [timestampNs] so a caller can tell a new frame from the one
+     * it already looked at. False when the ring holds nothing.
+     */
+    bool TrackingLumaNewest(uint8_t* out, int outWidth, int outHeight,
+                            const int* black, int white, int64_t* timestampNs) const;
+
     bool LumaNewest(uint8_t* out, int outWidth, int outHeight,
                     const int* black, int white) const;
 

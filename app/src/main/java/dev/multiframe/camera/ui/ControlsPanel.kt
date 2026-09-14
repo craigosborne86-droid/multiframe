@@ -38,7 +38,7 @@ import androidx.compose.ui.unit.dp
 import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.OutputFormat
-import dev.multiframe.camera.pipeline.SweepPreset
+import dev.multiframe.camera.pipeline.MosaicPreset
 import kotlin.math.ln
 import kotlin.math.exp
 
@@ -75,9 +75,9 @@ fun ControlsPanel(
     /** Null where the device cannot hold a 2x canvas of this sensor, or has no native library. */
     superRes: Boolean? = null,
     onSuperRes: (Boolean) -> Unit = {},
-    /** Null where no longer lens exists to sweep with. */
-    sweepPreset: SweepPreset? = null,
-    onSweepPreset: (SweepPreset) -> Unit = {},
+    /** Null where no telephoto exists to shoot a mosaic with. */
+    mosaicPreset: MosaicPreset? = null,
+    onMosaicPreset: (MosaicPreset) -> Unit = {},
     localTone: Boolean = false,
     onLocalTone: (Boolean) -> Unit = {},
     /** Null where the device cannot write HEIF, in which case there is no choice. */
@@ -198,12 +198,12 @@ fun ControlsPanel(
             superRes?.let { on ->
                 Toggle("2X ${if (on) "ON" else "OFF"}", on) { onSuperRes(!on) }
             }
-            // How much of the framing a sweep covers: 2x2, 3x3, or a box the
-            // user draws. Shown as a pill because it is a setting; the sweep
+            // How much of the framing a mosaic covers: 2x2, 3x3, or a box the
+            // user draws. Shown as a pill because it is a setting; the mosaic
             // itself is the SUPER RES action on the bar.
-            sweepPreset?.let { preset ->
-                Toggle("SWEEP ${preset.label}", preset != SweepPreset.DETAIL_BOOST) {
-                    onSweepPreset(preset.next())
+            mosaicPreset?.let { preset ->
+                Toggle("MOSAIC ${preset.label}", preset != MosaicPreset.DETAIL_BOOST) {
+                    onMosaicPreset(preset.next())
                 }
             }
             // The bilateral-grid local tone operator. A rendering decision

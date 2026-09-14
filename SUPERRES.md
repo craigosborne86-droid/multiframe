@@ -100,7 +100,7 @@ to tell the user this in the interface rather than let them discover it.
 | Match verification | Done | Brown-Lowe criterion; refuses noise and repeated patterns |
 | Capture planning and geometry | Done | 12 unit tests; presets 2x2, 3x3 and a drawn region, 7 more |
 | Native compositing canvas, three-band blending | Done | One tile is identical to the byte in one band and three; two tiles a quarter-stop and a pixel apart keep their texture and lose their step (`MosaicBlendDeviceTest`) |
-| Reticle and dot guidance | Done | 10 unit tests on the lock rule against scripted pans; the overlay draws each node where the frame's registration puts it |
+| Reticle and dot guidance, with a stability gate | Done, revised after the first field test | 16 unit tests on the lock rule against scripted pans, including a hand still settling and a gyroscope veto; the overlay draws the canvas outline and each node where the frame's registration puts it |
 | Burst per node, merged and lens-corrected | Done | The same merge as a shutter press, the Phase 2 optics before the homography |
 | Exposure, white balance, colour and develop gain locking | Done | `lockForSweep`; colour and gain fixed by the anchor, tiles normalised by ISO × exposure |
 | Writing the result out | Done | 3 device tests; compresses from the canvas's own pages |
@@ -112,34 +112,37 @@ algorithm and no substitute for pointing it at a building.
 
 ## How the capture works
 
-1. The user frames the shot on the target lens, chooses how much of it the
-   sweep covers -- a 2x2, a 3x3, or a box drawn on the frame -- and presses
-   SUPER RES.
-2. The app switches to the capture lens and **locks exposure, focus and white
-   balance**. The first frame is the anchor: wherever the user is pointing
-   becomes the centre of the canvas, the develop gain and colour are measured
-   from it and held, and the plan's nodes -- one per tile -- are laid out
-   around it.
+1. The user presses MOSAIC, on whatever lens they are on. The app switches to
+   the longest raw lens and says so; the outline of the whole picture and its
+   tile nodes are drawn on the viewfinder, and the 2x2/3x3 choice is on the
+   HUD under the count. Nothing has been taken: the user is composing.
+2. The shutter anchors it. The app waits for the camera's exposure and white
+   balance to converge, **locks exposure, focus and white balance**, and takes
+   the anchor: wherever the reticle points becomes the centre of the canvas,
+   the develop gain and colour are measured from that frame and held, and the
+   nodes are laid out around it.
 3. A reticle sits at the centre of the viewfinder and a dot is drawn at each
    node, where the frame's own registration says that part of the scene is.
-   The user pans the reticle onto a dot and holds. A quarter of a second
-   inside 5% of the frame, without drifting, locks it: a haptic, and the
-   burst fires itself from the ring. Pan too fast and the phone says so.
+   The user pans the reticle onto a dot and holds *still*: the ring around the
+   dot fills over the hold and empties the moment the gyroscope or the
+   registration reads movement. Still for the settle time -- longer than the
+   burst, so the burst is the hold -- locks it: the burst is taken from the
+   ring, then a haptic. Pan too fast and the phone says so.
 4. Each burst is merged like any other photograph, developed with the anchor's
-   gain scaled by its own ISO and exposure, corrected for the lens's geometry,
-   and composited where its reference frame registered -- against the anchor
-   and every tile so far, not chained.
+   colour and gain (the gain scaled by its own ISO and exposure), corrected
+   for the lens's geometry, and composited where its reference frame
+   registered -- against the anchor and every tile so far, not chained.
 5. Compositing is in three frequency bands: the fine detail is handed from
    one tile to the next along the line where they are equally deep, the broad
    differences between them are spread over six hundred pixels, so the texture
    is kept and the step is hidden.
-6. The count reads "3 of 9 nodes". Every node captured is the sweep complete;
+6. The count reads "3 of 9 nodes". Every node captured is the mosaic complete;
    stopping early keeps what was taken, cropped to what was shot.
 
 Bundle adjustment -- jointly refining every tile's transform against every
 overlap -- stays where it was: not built, because a 3x3 registered against all
 its neighbours does not drift enough to need it, and it would be machinery in
-service of a sweep nobody should be taking.
+service of a grid nobody should be taking.
 
 ## Why this fits the app
 

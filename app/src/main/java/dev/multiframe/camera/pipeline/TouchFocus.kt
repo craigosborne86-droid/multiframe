@@ -86,7 +86,7 @@ object TouchFocus {
     /**
      * The inverse of [toSensorPoint] for a full-frame crop: where a point in
      * the sensor's own frame, as fractions of its width and height, lands on
-     * the displayed image. The sweep guidance draws its dots with this.
+     * the displayed image. The mosaic guidance draws its dots with this.
      */
     fun toDisplayPoint(
         sensorX: Float,

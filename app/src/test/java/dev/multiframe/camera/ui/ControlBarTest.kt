@@ -25,7 +25,7 @@ class ControlBarTest {
         captureModeLabel = "AUTO",
         highlightGuardOffered = true,
         zslOffered = true,
-        sweepOffered = true,
+        mosaicOffered = true,
         rawBurstOffered = true,
         dngOffered = true,
     )
@@ -41,7 +41,7 @@ class ControlBarTest {
                 for (dng in listOf(false, true)) {
                     for (busy in listOf(false, true)) {
                         val state = fullyCapable.copy(
-                            sweepOffered = sweep, rawBurstOffered = raw,
+                            mosaicOffered = sweep, rawBurstOffered = raw,
                             dngOffered = dng, busy = busy,
                         )
                         assertThat(ControlBar.modes(state).map { it.kind })
@@ -90,8 +90,8 @@ class ControlBarTest {
 
     @Test
     fun aPhoneWithNoLongerLensIsOfferedNoSweep() {
-        assertThat(ids(ControlBar.actions(fullyCapable.copy(sweepOffered = false))))
-            .doesNotContain(ControlBar.SWEEP)
+        assertThat(ids(ControlBar.actions(fullyCapable.copy(mosaicOffered = false))))
+            .doesNotContain(ControlBar.MOSAIC)
     }
 
     /**
@@ -100,10 +100,10 @@ class ControlBarTest {
      */
     @Test
     fun aRunningSweepCanStillBeStopped() {
-        val sweeping = fullyCapable.copy(busy = true, sweepRunning = true)
-        val stop = ControlBar.actions(sweeping).single { it.id == ControlBar.SWEEP }
+        val sweeping = fullyCapable.copy(busy = true, mosaicRunning = true)
+        val stop = ControlBar.actions(sweeping).single { it.id == ControlBar.MOSAIC }
         assertThat(stop.enabled).isTrue()
-        assertThat(stop.label).isEqualTo("STOP SWEEP")
+        assertThat(stop.label).isEqualTo("STOP MOSAIC")
     }
 
     @Test

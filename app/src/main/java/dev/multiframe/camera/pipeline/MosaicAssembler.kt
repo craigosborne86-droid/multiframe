@@ -30,7 +30,7 @@ sealed interface OfferResult {
 }
 
 /**
- * Decides where each frame of a sweep belongs.
+ * Decides where each frame of a mosaic belongs.
  *
  * Registration runs on small luma proxies rather than full frames -- matching
  * twelve-megapixel images would be pointlessly slow, and a homography estimated
@@ -41,7 +41,7 @@ sealed interface OfferResult {
  *
  * Each frame registers against the previously accepted one and its transform is
  * composed onto that one's placement. This is the natural thing to do during a
- * sweep, where consecutive frames overlap heavily and distant ones may not
+ * mosaic, where consecutive frames overlap heavily and distant ones may not
  * overlap at all.
  *
  * It also accumulates error: every pairwise fit contributes its own small
@@ -50,7 +50,7 @@ sealed interface OfferResult {
  * invisible. At 28x28 it would not be, and the answer there is bundle
  * adjustment -- optimising every transform jointly against every overlap rather
  * than chaining -- which is deliberately not built yet, because it would be
- * machinery in service of a sweep nobody should be taking.
+ * machinery in service of a mosaic nobody should be taking.
  */
 class MosaicAssembler(
     val canvasWidth: Int,
@@ -61,7 +61,7 @@ class MosaicAssembler(
      * How far the camera must move, as a fraction of the frame, before another
      * frame is worth keeping.
      *
-     * A sweep produces far more frames than the mosaic needs, so most are
+     * A mosaic produces far more frames than the mosaic needs, so most are
      * refused. Measured as distance between tile centres rather than as newly
      * covered area: on a coarse coverage grid a two-pixel shift can push the
      * tile's bounding box across a cell boundary and appear to cover a whole
@@ -79,7 +79,7 @@ class MosaicAssembler(
      * Scale applied to every tile as it is placed.
      *
      * Less than one when the canvas has been capped for memory: the canvas is
-     * then smaller than the sweep's true extent, and a tile placed at native
+     * then smaller than the mosaic's true extent, and a tile placed at native
      * size would claim a larger share of it than it saw.
      */
     private val tileScale: Float = 1f,
@@ -93,10 +93,18 @@ class MosaicAssembler(
      * Proxies of placed tiles, kept so a new frame can be registered against
      * every neighbour rather than only against the one before it.
      *
-     * They are small -- a few hundred pixels square -- so a whole sweep's worth
+     * They are small -- a few hundred pixels square -- so a whole mosaic's worth
      * is a few megabytes, which is nothing beside the canvas.
      */
     private val placedProxies = ArrayList<Plane>()
+
+    /**
+     * Each placed frame's corners and descriptors, extracted when it was
+     * placed. Registration against a placed frame re-detected its corners on
+     * every call -- the same corners, every time -- and the guidance registers
+     * against several placed frames ten times a second.
+     */
+    private val placedFeatures = ArrayList<FeatureMatcher.Features>()
 
     /**
      * Coverage tracked on a coarse grid rather than per pixel. The question
@@ -170,24 +178,31 @@ class MosaicAssembler(
      * Where a frame belongs on the canvas, without placing it.
      *
      * Registered against every placed tile that overlaps, not only the one
-     * before it. A sweep gives each frame several independent measurements --
+     * before it. A mosaic gives each frame several independent measurements --
      * the tile beside it and the tile above both saw it -- and chaining uses
      * one and discards the rest, which is how a long sweep drifts while every
      * individual join looks perfect. Null when nothing placed can see it.
      *
-     * Pure: the guided sweep asks this of every frame the preview produces to
+     * Pure: the guided mosaic asks this of every frame the preview produces to
      * know where the reticle is pointing, and places only the bursts it takes.
      */
-    fun locate(proxy: Plane, proxyScale: Float): Located? {
+    fun locate(proxy: Plane, proxyScale: Float, maxCandidates: Int = Int.MAX_VALUE): Located? {
         if (placements.isEmpty()) return null
         val proxyToTile = scaleTransform(proxyScale)
         val tileToProxy = proxyToTile.invert() ?: return null
 
+        // Extracted once and matched against every candidate.
+        val features = FeatureMatcher.extract(proxy)
         val predictions = ArrayList<Homography>()
         var bestInliers = 0
         var bestRatio = 0f
-        for (candidate in registrationCandidates()) {
-            val fit = FeatureMatcher.register(placedProxies[candidate], proxy) ?: continue
+        for (candidate in registrationCandidates().take(maxCandidates.coerceAtLeast(1))) {
+            val fit = FeatureMatcher.register(placedFeatures[candidate], features)
+            if (fit == null) {
+                lastFailure = "candidate $candidate: ${placedFeatures[candidate].size} vs ${features.size} corners, " +
+                    "${FeatureMatcher.match(placedFeatures[candidate], features).size} matches, no reliable fit"
+                continue
+            }
             val inverse = fit.homography.invert() ?: continue
             predictions.add(
                 placements[candidate].transform
@@ -199,19 +214,24 @@ class MosaicAssembler(
             }
         }
         if (predictions.isEmpty()) return null
-        val transform = consensus(predictions) ?: return null
-        if (!landsOnCanvas(transform)) return null
+        val transform = consensus(predictions) ?: run { lastFailure = "no consensus"; return null }
+        if (!landsOnCanvas(transform)) { lastFailure = "off the canvas"; return null }
+        lastFailure = null
         return Located(transform, bestInliers, bestRatio)
     }
+
+    /** Why the last [locate] returned null, for the log; null when it did not. */
+    var lastFailure: String? = null
+        private set
 
     /**
      * Makes a frame the origin without compositing it.
      *
-     * The guided sweep's anchor: wherever the user is pointing when the sweep
+     * The guided mosaic's anchor: wherever the user is pointing when the mosaic
      * begins is the centre of the canvas, and the nodes are laid out around it.
      * The anchor is registered against like any placed tile -- it is the one
      * every early frame overlaps -- but it contributes no pixels and no
-     * coverage, so a sweep abandoned at once has produced nothing rather than
+     * coverage, so a mosaic abandoned at once has produced nothing rather than
      * one tile in the middle of an empty canvas.
      */
     fun anchor(proxy: Plane): Placement {
@@ -219,6 +239,7 @@ class MosaicAssembler(
         val placement = Placement(placements.size, transform, 0, 1f)
         placements.add(placement)
         placedProxies.add(proxy)
+        placedFeatures.add(FeatureMatcher.extract(proxy))
         previousProxy = proxy
         previousTransform = transform
         anchorIndex = placement.index
@@ -226,7 +247,7 @@ class MosaicAssembler(
     }
 
     /**
-     * Records a frame the guided sweep captured at a located [transform], and
+     * Records a frame the guided mosaic captured at a located [transform], and
      * marks the ground under it covered. The composite is the session's.
      */
     fun place(proxy: Plane, transform: Homography, inliers: Int, inlierRatio: Float): Placement? {
@@ -242,6 +263,7 @@ class MosaicAssembler(
         previousProxy = proxy
         previousTransform = transform
         placedProxies.add(proxy)
+        placedFeatures.add(FeatureMatcher.extract(proxy))
         return placement
     }
 
@@ -255,7 +277,7 @@ class MosaicAssembler(
         ).times(scaleTransform(tileScale))
     }
 
-    /** Index of the anchor among the placements, or -1 where the sweep had none. */
+    /** Index of the anchor among the placements, or -1 where the mosaic had none. */
     var anchorIndex: Int = -1
         private set
 
@@ -381,7 +403,7 @@ class MosaicAssembler(
         return out
     }
 
-    /** Coverage as a grid, for drawing the sweep guide. */
+    /** Coverage as a grid, for drawing the mosaic guide. */
     fun coverageGrid(): Array<BooleanArray> = Array(gridRows) { r ->
         BooleanArray(gridColumns) { c -> covered[r * gridColumns + c] }
     }
@@ -389,6 +411,7 @@ class MosaicAssembler(
     fun reset() {
         placements.clear()
         placedProxies.clear()
+        placedFeatures.clear()
         previousProxy = null
         previousTransform = null
         anchorIndex = -1

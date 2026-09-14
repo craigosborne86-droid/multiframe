@@ -8,6 +8,7 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
@@ -343,7 +344,7 @@ class ZslRawStream private constructor(
     }
 
     /**
-     * Pins exposure, white balance and focus for the duration of a sweep.
+     * Pins exposure, white balance and focus for the duration of a mosaic.
      *
      * Focus too: a mosaic of a distant scene should stay at one focus distance,
      * and refocusing between tiles changes magnification slightly as well as
@@ -352,7 +353,7 @@ class ZslRawStream private constructor(
     fun lockForSweep(settings: ManualSettings, caps: CameraCapabilities) {
         if (closed || locked) return
         locked = true
-        Log.i(TAG, "locking exposure, white balance and focus for a sweep")
+        Log.i(TAG, "locking exposure, white balance and focus for a mosaic")
         applySettings(settings, caps)
     }
 
@@ -397,6 +398,59 @@ class ZslRawStream private constructor(
     fun luma(out: ByteArray, width: Int, height: Int): Boolean {
         if (closed) return false
         return ring.lumaNewest(out, width, height, sensorProfile)
+    }
+
+    /**
+     * A tracking view of the newest frame, box-averaged into [out], and its
+     * timestamp; -1 with nothing written when the ring holds nothing.
+     *
+     * The mosaic's guidance registers the newest frame ten times a second to
+     * know where the reticle points. It used to lock a slot, build the merge's
+     * three-megapixel luma proxy and halve it three times on the JVM for that
+     * -- a fresh 3 MB array a poll -- and the preview stuttered under it. This
+     * reads the frame in place at the size the tracker wants and touches
+     * nothing on the heap but the array it is handed.
+     */
+    fun trackingLuma(out: ByteArray, width: Int, height: Int): Long {
+        if (closed) return -1L
+        return ring.trackingLumaNewest(out, width, height, sensorProfile)
+    }
+
+    /** The newest capture result, or null before one has arrived. */
+    fun latestResult(): TotalCaptureResult? = synchronized(resultLock) {
+        if (dcg) lastLowResult else newestLocked()
+    }
+
+    /**
+     * Whether the camera's own controls have settled: auto-exposure and
+     * auto-white-balance converged, or locked, or not automatic at all. Null
+     * before any result has arrived.
+     *
+     * A mosaic locks both and then develops every tile with the white balance
+     * the lock reported. Locked before they had converged -- a fresh stream on
+     * a lens the user just switched to -- they froze wherever they were, which
+     * on the phone was unity gains, and the whole mosaic came out the green of
+     * unbalanced raw. This is what the mosaic waits on before it locks.
+     */
+    fun controlsConverged(): Boolean? {
+        val result = latestResult() ?: return null
+        val aeMode = result.get(CaptureResult.CONTROL_AE_MODE)
+        val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+        val awbMode = result.get(CaptureResult.CONTROL_AWB_MODE)
+        val awbState = result.get(CaptureResult.CONTROL_AWB_STATE)
+        val aeOk = aeMode == CameraMetadata.CONTROL_AE_MODE_OFF ||
+            aeState == null ||
+            aeState == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
+            aeState == CameraMetadata.CONTROL_AE_STATE_LOCKED ||
+            aeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
+        val awbOk = awbMode != CameraMetadata.CONTROL_AWB_MODE_AUTO ||
+            awbState == null ||
+            awbState == CameraMetadata.CONTROL_AWB_STATE_CONVERGED ||
+            awbState == CameraMetadata.CONTROL_AWB_STATE_LOCKED
+        // And the gains themselves have to be there to lock: a result without
+        // them develops as unity, which is the green frame.
+        val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+        return aeOk && awbOk && gains != null
     }
 
     /** Releases the guard's hold on exposure, back to what the user asked for. */

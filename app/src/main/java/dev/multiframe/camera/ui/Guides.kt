@@ -1,8 +1,19 @@
 package dev.multiframe.camera.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -215,88 +226,41 @@ fun Peaking(
 }
 
 /**
- * Where the sweep has been, and where it has not.
+ * The outline, the reticle and the dots: the picture being composed, where to
+ * point, and what has been captured.
  *
- * A sweep tells the photographer how much is covered and, until now, nothing
- * about *where* -- which is the one thing a guided capture has to answer. The
- * assembler has tracked this on a 32x32 grid all along, with a comment saying
- * it was for drawing the sweep guide; nothing ever drew it.
+ * Drawn over the viewfinder, which during a mosaic shows the telephoto. The
+ * outline is the canvas -- the whole photograph -- projected into the current
+ * frame by the frame's registration, so the user sees how much of the scene
+ * the mosaic will cover and where the frame they are looking at sits in it;
+ * before the anchor it is drawn as the anchor would place it, centred. Each
+ * dot is a node of the plan, projected the same way, so it sits on the part
+ * of the scene the tile will be and moves with the scene as the phone pans,
+ * which is what makes it a target rather than a diagram. A node beyond the
+ * edge of the frame is drawn at the edge, pointing the way. The reticle is
+ * fixed at the centre.
  *
- * It is a map rather than an overlay on the viewfinder, and that distinction is
- * the whole design. During a sweep the preview shows the *telephoto*, which
- * sees a small fraction of the canvas being built -- so cells drawn across the
- * frame would appear to say "this part of what you are looking at is covered",
- * which is not what they mean. Drawn small, at the canvas's own shape, they say
- * what they actually are: the finished picture, filling in.
- */
-@Composable
-fun SweepMap(
-    grid: Array<BooleanArray>,
-    aspect: Float,
-    modifier: Modifier = Modifier,
-) {
-    val rows = grid.size
-    if (rows == 0) return
-    val columns = grid[0].size
-    if (columns == 0) return
-    // A canvas with no shape to speak of would divide by zero below.
-    val shape = if (aspect.isFinite() && aspect > 0.01f) aspect else 1f
-
-    Canvas(modifier = modifier.aspectRatio(shape)) {
-        val cellW = size.width / columns
-        val cellH = size.height / rows
-
-        for (r in 0 until rows) {
-            val row = grid[r]
-            for (c in 0 until minOf(columns, row.size)) {
-                val topLeft = Offset(c * cellW, r * cellH)
-                val cell = Size(cellW, cellH)
-                if (row[c]) {
-                    drawRect(color = Ink.Bone, topLeft = topLeft, size = cell)
-                } else {
-                    drawRect(
-                        color = Ink.GuideFaint,
-                        topLeft = topLeft,
-                        size = cell,
-                    )
-                }
-            }
-        }
-
-        // An outline, so an empty map still reads as a frame waiting to be
-        // filled rather than as nothing at all.
-        drawRect(
-            color = Ink.Hairline,
-            topLeft = Offset.Zero,
-            size = size,
-            style = Stroke(width = 1.dp.toPx()),
-        )
-    }
-}
-
-/**
- * The reticle and the dots: where to point, and what has been captured.
+ * ### The locking ring
  *
- * Drawn over the viewfinder, which during a sweep shows the telephoto. Each
- * dot is a node of the plan, projected into the current frame by the sweep's
- * registration of that frame, so it sits on the part of the scene the tile
- * will be -- and moves with the scene as the phone pans, which is what makes
- * it a target rather than a diagram. A node beyond the edge of the frame is
- * drawn at the edge, pointing the way. The reticle is fixed at the centre.
+ * The stability gate wants a hold: still, inside the radius, for the settle
+ * time. The ring around the locking dot is that hold made visible -- an arc
+ * that fills as the time runs and empties the moment the gate reads a drift
+ * or a turn, so the user sees what steady means before the burst is taken
+ * rather than after. Fires green when it closes.
  *
  * ### Colour, and the rule it bends
  *
  * The palette rule is that nothing coloured sits on the photograph, with two
  * documented exceptions for transient states of the photograph itself. This
- * is the third, and `Ink.Confirm`'s own comment names it: sweep tile guidance.
- * A dot reads muted while it is only a place, amber as the reticle closes on
- * it -- a live reading of distance, which is what amber is for -- solid green
- * once its tile is on the canvas, and red for a beat when a capture there
- * failed. Nothing here persists past the sweep.
+ * is the third, and `Ink.Confirm`'s own comment names it: mosaic tile
+ * guidance. A dot reads muted while it is only a place, amber as the reticle
+ * closes on it -- a live reading of distance, which is what amber is for --
+ * solid green once its tile is on the canvas, and red for a beat when a
+ * capture there failed. Nothing here persists past the mosaic.
  */
 @Composable
-fun SweepGuidance(
-    view: dev.multiframe.camera.pipeline.GuidedSweepView,
+fun MosaicGuidance(
+    view: dev.multiframe.camera.pipeline.MosaicGuideView,
     sensorOrientation: Int,
     modifier: Modifier = Modifier,
 ) {
@@ -305,8 +269,43 @@ fun SweepGuidance(
         val h = size.height
         val dot = 9.dp.toPx()
         val ring = 14.dp.toPx()
+        val lockRing = 22.dp.toPx()
         val stroke = 2.dp.toPx()
+        val hair = 1.dp.toPx()
         val margin = 18.dp.toPx()
+
+        fun display(fx: Float, fy: Float): Offset {
+            val (dx, dy) = dev.multiframe.camera.pipeline.TouchFocus.toDisplayPoint(fx, fy, sensorOrientation)
+            return Offset(dx * w, dy * h)
+        }
+
+        // The outline of the photograph. A quadrilateral, since the frame's
+        // registration is a homography; drawn in the guide's faint ink, and
+        // the canvas clips whatever lies beyond the view -- which for a 2x2
+        // is most of it, and that is the point: the picture is bigger than
+        // the frame.
+        view.canvasCorners?.let { corners ->
+            val pts = corners.map { (fx, fy) -> display(fx, fy) }
+            for (i in pts.indices) {
+                drawLine(Ink.GuideBright, pts[i], pts[(i + 1) % pts.size], hair * 1.5f)
+            }
+            // The grid between the nodes, fainter: which tile is which.
+            if (view.nodes.size > 1) {
+                val columns = view.nodes.maxOf { it.node.column } + 1
+                val rows = view.nodes.maxOf { it.node.row } + 1
+                fun at(c: Int, r: Int): Offset? {
+                    val n = view.nodes.firstOrNull { it.node.column == c && it.node.row == r } ?: return null
+                    val fx = n.frameX ?: return null
+                    val fy = n.frameY ?: return null
+                    return display(fx, fy)
+                }
+                for (r in 0 until rows) for (c in 0 until columns) {
+                    val here = at(c, r) ?: continue
+                    at(c + 1, r)?.let { drawLine(Ink.GuideMid, here, it, hair) }
+                    at(c, r + 1)?.let { drawLine(Ink.GuideMid, here, it, hair) }
+                }
+            }
+        }
 
         // The reticle: a fine cross with a gap at the centre, so the thing
         // being aimed at is not hidden by the aim.
@@ -324,36 +323,96 @@ fun SweepGuidance(
             val fx = node.frameX
             val fy = node.frameY
             if (fx == null || fy == null) continue
-            val (dx, dy) = dev.multiframe.camera.pipeline.TouchFocus.toDisplayPoint(fx, fy, sensorOrientation)
+            val raw = display(fx, fy)
             // Clamped to the frame, with a margin so a dot at the edge is whole.
-            val x = (dx * w).coerceIn(margin, w - margin)
-            val y = (dy * h).coerceIn(margin, h - margin)
-            val offFrame = dx * w != x || dy * h != y
+            val x = raw.x.coerceIn(margin, w - margin)
+            val y = raw.y.coerceIn(margin, h - margin)
+            val offFrame = raw.x != x || raw.y != y
             val centre = Offset(x, y)
 
             when (node.state) {
-                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.DONE -> {
+                dev.multiframe.camera.pipeline.MosaicGuide.NodeState.DONE -> {
                     drawCircle(Ink.Confirm, radius = dot, center = centre)
                 }
-                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.LOCKING,
-                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.CAPTURING -> {
-                    drawCircle(Ink.Confirm, radius = ring, center = centre, style = Stroke(stroke))
+                dev.multiframe.camera.pipeline.MosaicGuide.NodeState.LOCKING -> {
+                    // The hold: an arc that fills, in amber while the gate is
+                    // being satisfied and empty the moment it is not.
+                    drawCircle(Ink.Amber, radius = dot * 0.5f, center = centre)
+                    drawCircle(Ink.AmberDim, radius = lockRing, center = centre, style = Stroke(stroke))
+                    if (view.holdProgress > 0f) {
+                        drawArc(
+                            color = Ink.Amber,
+                            startAngle = -90f,
+                            sweepAngle = 360f * view.holdProgress,
+                            useCenter = false,
+                            topLeft = Offset(centre.x - lockRing, centre.y - lockRing),
+                            size = Size(lockRing * 2, lockRing * 2),
+                            style = Stroke(stroke * 1.5f),
+                        )
+                    }
+                }
+                dev.multiframe.camera.pipeline.MosaicGuide.NodeState.CAPTURING -> {
+                    drawCircle(Ink.Confirm, radius = lockRing, center = centre, style = Stroke(stroke * 1.5f))
                     drawCircle(Ink.Confirm, radius = dot * 0.5f, center = centre)
                 }
-                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.NEAR -> {
+                dev.multiframe.camera.pipeline.MosaicGuide.NodeState.NEAR -> {
                     drawCircle(Ink.Amber, radius = ring, center = centre, style = Stroke(stroke))
                     drawCircle(Ink.Amber, radius = dot * 0.5f, center = centre)
                 }
-                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.REJECTED -> {
+                dev.multiframe.camera.pipeline.MosaicGuide.NodeState.REJECTED -> {
                     drawCircle(Ink.Danger, radius = ring, center = centre, style = Stroke(stroke))
                 }
-                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.PENDING -> {
+                dev.multiframe.camera.pipeline.MosaicGuide.NodeState.PENDING -> {
                     drawCircle(
                         if (offFrame) Ink.GuideMid else Ink.GuideBright,
                         radius = dot * 0.6f, center = centre,
                     )
                     drawCircle(Ink.GuideMid, radius = ring, center = centre, style = Stroke(stroke * 0.5f))
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The grid, chosen on the HUD: 2x2, 3x3, and a drawn region where a wider
+ * lens is there to draw it on. A pill, since it is a setting; selection by
+ * weight, as every other setting here.
+ */
+@Composable
+fun MosaicPresetPill(
+    preset: dev.multiframe.camera.pipeline.MosaicPreset,
+    customOffered: Boolean,
+    onPreset: (dev.multiframe.camera.pipeline.MosaicPreset) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val options = buildList {
+        add(dev.multiframe.camera.pipeline.MosaicPreset.DETAIL_BOOST)
+        add(dev.multiframe.camera.pipeline.MosaicPreset.LARGE_FORMAT)
+        if (customOffered) add(dev.multiframe.camera.pipeline.MosaicPreset.CUSTOM)
+    }
+    Row(
+        modifier = modifier
+            .background(Ink.Pane, RoundedCornerShape(24.dp))
+            .border(1.dp, Ink.Hairline, RoundedCornerShape(24.dp))
+            .padding(3.dp),
+    ) {
+        for (option in options) {
+            val selected = option == preset
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
+                    .background(if (selected) Ink.Bone else Color.Transparent, RoundedCornerShape(21.dp))
+                    .clickable { onPreset(option) }
+                    .semantics { contentDescription = "mosaic ${option.label}" }
+                    .padding(horizontal = 14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = option.label,
+                    style = Type.Control,
+                    color = if (selected) Ink.Ground else Ink.Bone,
+                )
             }
         }
     }

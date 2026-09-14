@@ -8,6 +8,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import com.google.common.truth.Truth.assertThat
 import dev.multiframe.camera.pipeline.Attitude
@@ -55,49 +57,54 @@ class GuidesTest {
         }
     }
 
+    /**
+     * The mosaic guidance, in every state a node can be in, with the outline
+     * and a hold in progress. A Canvas that throws on an edge case renders
+     * nothing and passes silently; the render guard above is why this is here.
+     */
     @Test
-    fun theSweepMapDrawsAsItFillsIn() {
-        // A sweep's map is the one overlay whose content changes on every
-        // frame, so it is drawn empty, part-covered and full.
-        var grid by mutableStateOf(Array(32) { BooleanArray(32) })
-        render { SweepMap(grid = grid, aspect = 1.33f, modifier = Modifier.size(120.dp)) }
+    fun theMosaicGuidanceDrawsEveryNodeStateAndTheOutline() {
+        val lens = dev.multiframe.camera.pipeline.Lens("4", true, 1f, 110, 1f, true, 1.7f, 50f)
+        val plan = dev.multiframe.camera.pipeline.MosaicPlanner.planGrid(null, lens, 4080, 3072, 3, 3)!!
+        val guide = dev.multiframe.camera.pipeline.MosaicGuide(plan)
+        // Armed: outline centred, everything pending.
+        var view by mutableStateOf(dev.multiframe.camera.pipeline.MosaicCapture.armedView(plan, "110mm"))
+        render { MosaicGuidance(view = view, sensorOrientation = 90, modifier = Modifier.fillMaxSize()) }
+        assertThat(view.canvasCorners).hasSize(4)
 
-        grid = Array(32) { r -> BooleanArray(32) { c -> (r + c) % 3 == 0 } }
-        compose.waitForIdle()
-
-        grid = Array(32) { BooleanArray(32) { true } }
-        compose.waitForIdle()
-    }
-
-    @Test
-    fun theSweepMapSurvivesAGridWithNoCells() {
-        // The session can be asked for its coverage before a single frame has
-        // been placed, and a Canvas that divides by a zero column count takes
-        // the viewfinder down rather than merely looking wrong.
-        var grid by mutableStateOf(emptyArray<BooleanArray>())
-        render { SweepMap(grid = grid, aspect = 1.5f, modifier = Modifier.size(120.dp)) }
-
-        grid = arrayOf(BooleanArray(0))
-        compose.waitForIdle()
-
-        // And a canvas with no shape at all, which would otherwise be an
-        // aspectRatio of zero.
-        grid = Array(4) { BooleanArray(4) { true } }
-        compose.waitForIdle()
-    }
-
-    @Test
-    fun theSweepMapToleratesARaggedGrid() {
-        // Rows of differing length are not something the assembler produces,
-        // but drawing indexes row by row and an assumption like that is worth
-        // one line of guarding rather than a crash in the viewfinder.
-        val ragged = arrayOf(
-            BooleanArray(8) { true },
-            BooleanArray(3) { true },
-            BooleanArray(8),
+        // Running: a hold on the centre node, a done node, a rejected one.
+        val centre = plan.nodes[4]
+        guide.captured(plan.nodes[0])
+        guide.rejected(plan.nodes[1], nowMillis = 0)
+        guide.observe(centre.canvasX, centre.canvasY, 0, 0.01f)
+        guide.observe(centre.canvasX + 2f, centre.canvasY, 100, 0.01f)
+        val t = dev.multiframe.camera.pipeline.Homography.translation(
+            (centre.canvasX - plan.placedTileWidth / 2f).toDouble(),
+            (centre.canvasY - plan.placedTileHeight / 2f).toDouble(),
         )
-        render { SweepMap(grid = ragged, aspect = 1f, modifier = Modifier.size(80.dp)) }
+        view = dev.multiframe.camera.pipeline.MosaicCapture.viewOf(guide, plan, t, "110mm", 200, anchored = true)
         compose.waitForIdle()
+        assertThat(view.holdProgress).isGreaterThan(0f)
+        assertThat(view.nodes.map { it.state }).contains(dev.multiframe.camera.pipeline.MosaicGuide.NodeState.LOCKING)
+        assertThat(view.nodes.map { it.state }).contains(dev.multiframe.camera.pipeline.MosaicGuide.NodeState.DONE)
+
+        // Lost: no outline, no dots, and it still draws.
+        view = dev.multiframe.camera.pipeline.MosaicCapture.viewOf(guide, plan, null, "110mm", 300, anchored = true)
+        compose.waitForIdle()
+        assertThat(view.canvasCorners).isNull()
+    }
+
+    @Test
+    fun theMosaicPresetPillOffersTheGridsAndReportsATap() {
+        var chosen by mutableStateOf(dev.multiframe.camera.pipeline.MosaicPreset.DETAIL_BOOST)
+        render {
+            MosaicPresetPill(preset = chosen, customOffered = false, onPreset = { chosen = it })
+        }
+        compose.onNodeWithContentDescription("mosaic 3×3").performClick()
+        compose.waitForIdle()
+        assertThat(chosen).isEqualTo(dev.multiframe.camera.pipeline.MosaicPreset.LARGE_FORMAT)
+        // No wider lens, no custom.
+        compose.onNodeWithContentDescription("mosaic CUSTOM").assertDoesNotExist()
     }
 
     @Test

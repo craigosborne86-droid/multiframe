@@ -2,13 +2,14 @@ package dev.multiframe.camera.pipeline
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Locale
 
 private const val TAG = "Multiframe"
 
-/** How a sweep ended. */
+/** How a mosaic ended. */
 data class MosaicResult(
     val tiles: Int,
     val rejected: Int,
@@ -21,8 +22,8 @@ data class MosaicResult(
 
 /** One node as the screen should draw it. */
 data class NodeView(
-    val node: SweepNode,
-    val state: GuidedSweep.NodeState,
+    val node: MosaicNode,
+    val state: MosaicGuide.NodeState,
     /**
      * Where the node's centre falls in the current frame, as fractions of the
      * sensor frame's width and height, or null when the frame could not be
@@ -34,47 +35,65 @@ data class NodeView(
 )
 
 /** Everything the screen needs to draw the guidance, once per poll. */
-data class GuidedSweepView(
+data class MosaicGuideView(
     val nodes: List<NodeView>,
     val captured: Int,
     val total: Int,
-    /** Whether the current frame registered against the sweep so far. */
+    /** Whether the current frame registered against the mosaic so far. */
     val located: Boolean,
     /** Fraction of the canvas covered, as the assembler counts it. */
     val coverage: Float,
+    /**
+     * The canvas's four corners in the current frame, as fractions of the
+     * frame's width and height, top-left, top-right, bottom-right,
+     * bottom-left -- the outline of the photograph being composed. Under a
+     * homography it is a quadrilateral, not a rectangle. Null when the frame
+     * could not be registered.
+     */
+    val canvasCorners: List<Pair<Float, Float>>?,
+    /** How far the hold on the locking node has progressed, 0 to 1. */
+    val holdProgress: Float = 0f,
+    /** Whether the last poll read as still, on both of the gate's measures. */
+    val steady: Boolean = false,
+    /** Why it did not, for the hint; null when it did or when nothing is locking. */
+    val unsteady: MosaicGuide.Unsteady? = null,
+    /** The lens taking the tiles, for the screen to say so. */
+    val captureLensLabel: String = "",
+    /** Whether the mosaic has anchored; before it, the outline is where the anchor would put it. */
+    val anchored: Boolean = true,
 )
 
 /** Moments the screen answers with a haptic or a flash. */
-sealed interface SweepEvent {
+sealed interface MosaicEvent {
     /** The anchor frame was taken; the nodes are laid out. */
-    data object Anchored : SweepEvent
+    data object Anchored : MosaicEvent
 
     /** The reticle has held on [node]; its burst is being taken. */
-    data class Locked(val node: SweepNode) : SweepEvent
+    data class Locked(val node: MosaicNode) : MosaicEvent
 
     /** [node]'s burst is composited. */
-    data class Captured(val node: SweepNode) : SweepEvent
+    data class Captured(val node: MosaicNode) : MosaicEvent
 
     /** [node]'s burst could not be used and it is pending again. */
-    data class Rejected(val node: SweepNode, val reason: String) : SweepEvent
+    data class Rejected(val node: MosaicNode, val reason: String) : MosaicEvent
 
     /** The pan was too fast for a sharp frame. */
-    data object TooFast : SweepEvent
+    data object TooFast : MosaicEvent
 
     /** Every node is captured. */
-    data object Complete : SweepEvent
+    data object Complete : MosaicEvent
 }
 
 /**
- * Drives a guided telephoto sweep.
+ * Drives a guided telephoto guide.
  *
  * ### The shape of it
  *
- * The first frame after the sweep starts is the anchor: wherever the user is
+ * The first frame after the mosaic starts is the anchor: wherever the user is
  * pointing becomes the centre of the canvas, and the plan's nodes -- one per
  * tile -- are laid out around it. Then, ten times a second, the newest preview
  * frame is registered against the anchor and every tile placed so far, which
- * says where the reticle is pointing on the canvas; [GuidedSweep] turns that
+ * says where the reticle is pointing on the canvas; [MosaicGuide] turns that
  * into node states and, when the reticle has held on a node, the decision to
  * capture. A capture is a burst from the ring, merged and developed like any
  * other photograph, corrected for the lens, and composited at the place its
@@ -95,19 +114,50 @@ sealed interface SweepEvent {
  *
  * Developing a full-resolution tile costs around half a second. Ten frames a
  * second are registered and only the ones a node asks for are developed, so
- * a sweep of nine tiles develops nine bursts and not the hundreds of frames
+ * a mosaic of nine tiles develops nine bursts and not the hundreds of frames
  * the user panned through.
  */
 object MosaicCapture {
 
-    /** Halvings below the half-resolution luma proxy the merge already builds. */
-    private const val PROXY_HALVINGS = 3
+    /**
+     * The thread the mosaic runs on: one of its own, a step below the
+     * default priority.
+     *
+     * The guidance polls ten times a second and a node's burst is merged,
+     * developed and composited across every core; both were running on the
+     * shared default dispatcher at the same priority as the threads that draw
+     * the viewfinder. Native threads inherit the nice value of the thread that
+     * spawns them, so a runner one step less favourable puts every merge and
+     * develop thread a step behind the preview and the camera's own threads,
+     * and a tile takes a little longer while the viewfinder keeps its frames.
+     * Not the background group -- that is confined to the little cores and a
+     * merge there would take seconds.
+     */
+    val dispatcher: kotlinx.coroutines.CoroutineDispatcher by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread({
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE)
+                r.run()
+            }, "mosaic").apply { isDaemon = true }
+        }.asCoroutineDispatcher()
+    }
+
+    /**
+     * The tracking view's size. Registration at this size costs about 25 ms a
+     * poll on the phone (see `ZslStreamDeviceTest.trackingIsPricedAgainstAnIdleStream`),
+     * against a quarter of a second for the 3 MP proxy it replaced.
+     */
+    const val TRACK_WIDTH = 320
+    const val TRACK_HEIGHT = 240
 
     /** How often to look for a new frame. Faster than a person can pan. */
     private const val POLL_MILLIS = 90L
 
+    /** How long to wait for the camera's controls to settle before locking them. */
+    private const val CONVERGENCE_TIMEOUT_MILLIS = 3_000L
+
     /**
-     * Runs a guided sweep until every node is captured, the user stops, or
+     * Runs a guided mosaic until every node is captured, the user stops, or
      * nothing can be registered.
      *
      * [frames] is the burst length per node. [shouldContinue] is polled so the
@@ -117,125 +167,203 @@ object MosaicCapture {
         context: Context,
         stream: ZslRawStream,
         session: MosaicSession,
-        sweep: GuidedSweep,
+        guide: MosaicGuide,
         settings: ManualSettings,
         caps: CameraCapabilities,
         frames: Int,
         lensProfile: LensProfile?,
-        onView: (GuidedSweepView) -> Unit,
-        onEvent: (SweepEvent) -> Unit,
+        onView: (MosaicGuideView) -> Unit,
+        onEvent: (MosaicEvent) -> Unit,
         shouldContinue: () -> Boolean,
+        /** The gyroscope, for the stability gate; null where there is none, and the registration is the gate. */
+        motion: MotionSensor? = null,
     ): MosaicResult {
         val started = System.currentTimeMillis()
         val profile = SensorProfile.from(stream.characteristics)
+        val captureLabel = stream.lens.label
+
+        // The camera's controls have to have settled before they are pinned.
+        // Locked on a fresh stream -- a lens the user just switched to -- they
+        // froze wherever they were, which on the phone was unity white balance,
+        // and the whole mosaic came out the green of unbalanced raw. Waiting is
+        // a second or so; the alternative was the field test's result.
+        val converged = awaitConvergence(stream, shouldContinue)
+        if (!converged) Log.w(TAG, "camera controls did not converge; locking anyway")
 
         // Everything pinned for the duration. Auto-exposure drifting between
         // tiles leaves each a different brightness, and feathering turns a hard
         // seam into a soft gradient rather than removing it.
         stream.lockForSweep(settings, caps)
 
+        // The stability gate's ceiling, from the exposure the lock holds and
+        // the lens's focal length in pixels. Logged, because it is the number
+        // that decides how still a hand has to be.
+        val exposureNs = stream.latestExposure()?.second ?: 0L
+        val pixelsPerRadian = pixelsPerRadian(stream)
+        val maxSpeed = StabilityGate.maxAngularSpeed(exposureNs, pixelsPerRadian)
+        Log.i(
+            TAG,
+            "stability gate: exposure %.1f ms, %.0f px/rad, ceiling %.3f rad/s (%.1f deg/s), gyro %s".format(
+                exposureNs / 1e6, pixelsPerRadian, maxSpeed, Math.toDegrees(maxSpeed.toDouble()),
+                if (motion?.isAvailable == true) "present" else "absent",
+            ),
+        )
+        guide.configureGate(maxAngularSpeed = maxSpeed, settleMillis = MosaicGuide.settleFor(frames, stream.config.minFrameDurationNs))
+        motion?.start()
+
         var lastTimestamp = -1L
         var anchored = false
         var lastLocated: MosaicAssembler.Located? = null
+        var lastPollNs = motion?.nowNs() ?: 0L
+        var anchorAttempts = 0
+        var lastGateLog = 0L
+        var heldPolls = 0
+        var heldValid = false
 
-        // One merger for the whole poll loop, for its luma proxy alone. Its
-        // accumulator is never fed; creating one per poll was a hundred
-        // megabytes faulted in and freed ten times a second.
-        val prober = NativeMerge.create(stream.config.width, stream.config.height, profile)
-            ?: return MosaicResult(0, 0, 0f, session.plan.megapixels, null, 0, "no memory for the sweep")
+        // The tracking view, read in place from the ring into one array for
+        // the whole guide. See ZslRawStream.trackingLuma for what it replaced.
+        val track = ByteArray(TRACK_WIDTH * TRACK_HEIGHT)
+        val scale = stream.config.width.toFloat() / TRACK_WIDTH
 
         try {
-            while (shouldContinue() && !sweep.complete) {
-                val burst = stream.snapshot(1)
-                if (burst.count == 0) {
-                    burst.close()
-                    delay(POLL_MILLIS)
-                    continue
-                }
-                val timestamp = burst.frames.timestampsNs.firstOrNull() ?: -1L
-                if (timestamp == lastTimestamp) {
-                    burst.close()
+            while (shouldContinue() && !guide.complete) {
+                val timestamp = stream.trackingLuma(track, TRACK_WIDTH, TRACK_HEIGHT)
+                if (timestamp < 0 || timestamp == lastTimestamp) {
                     delay(POLL_MILLIS)
                     continue
                 }
                 lastTimestamp = timestamp
-
-                val buffer = burst.frames.buffer(0)
-                if (buffer == null) {
-                    burst.close()
-                    delay(POLL_MILLIS)
-                    continue
-                }
-                val stride = burst.frames.rowStride
-
-                // The proxy, and with it the scale from proxy to tile.
-                val proxy = proxyFor(prober, buffer, stride)
-                val scale = prober.width.toFloat() / maxOf(1, proxy.width)
-                if (proxy.width == 0) {
-                    burst.close()
-                    delay(POLL_MILLIS)
-                    continue
-                }
+                val proxy = Plane(TRACK_WIDTH, TRACK_HEIGHT, track.copyOf())
 
                 if (!anchored) {
                     // The colour and the exposure every tile will be developed
                     // with, and the origin. The gain is measured from the anchor
                     // frame the way a single capture would measure it, and then
                     // held: each tile developed with its own automatic gain is
-                    // a mosaic of nine exposures.
-                    val color = ColorProfile.calibrated(stream.characteristics, burst.referenceResult)
-                    session.lockColour(color, ShadingMap.from(burst.referenceResult))
+                    // a mosaic of nine exposures. The frame's own result has to
+                    // carry the white balance gains, or there is nothing to
+                    // develop with; a frame without them is waited past.
+                    val burst = stream.snapshot(1)
+                    val result = burst.referenceResult
+                    val color = ColorProfile.calibrated(stream.characteristics, result)
+                    val buffer = burst.frames.buffer(0)
+                    if (burst.count == 0 || buffer == null || result == null ||
+                        (color.isNeutralGains && anchorAttempts++ < MAX_ANCHOR_WAIT_POLLS)
+                    ) {
+                        burst.close()
+                        delay(POLL_MILLIS)
+                        continue
+                    }
+                    if (color.isNeutralGains) Log.w(TAG, "anchoring with unity white balance: the result carried no gains")
+                    val stride = burst.frames.rowStride
+                    session.lockColour(color, ShadingMap.from(result))
                     NativeMerge.create(stream.config.width, stream.config.height, profile)?.use { m ->
                         m.setReference(buffer, stride)
                         val (merged, _) = m.finish()
-                        session.lockExposure(m.autoExposure(merged, color), exposureProduct(burst.referenceResult))
+                        session.lockExposure(m.autoExposure(merged, color), exposureProduct(result))
                     }
-                    session.anchor(proxy)
-                    anchored = true
+                    // The anchor's proxy is the frame the result describes,
+                    // read through the same sampling as the tracking view.
+                    val anchorTrack = ByteArray(TRACK_WIDTH * TRACK_HEIGHT)
+                    RawRing.trackingLumaOf(buffer, stream.config.width, stream.config.height, stride,
+                        anchorTrack, TRACK_WIDTH, TRACK_HEIGHT, profile)
                     burst.close()
-                    onEvent(SweepEvent.Anchored)
-                    onView(viewOf(sweep, session, null))
+                    session.anchor(Plane(TRACK_WIDTH, TRACK_HEIGHT, anchorTrack))
+                    anchored = true
+                    Log.i(TAG, "anchored: gains %s, develop gain %.2f".format(
+                        color.gains.joinToString(",") { "%.2f".format(it) }, session.developGain))
+                    onEvent(MosaicEvent.Anchored)
+                    onView(viewOf(guide, session, null, captureLabel, System.currentTimeMillis()))
+                    lastPollNs = motion?.nowNs() ?: 0L
                     delay(POLL_MILLIS)
                     continue
                 }
 
-                val located = session.locate(proxy, scale)
-                lastLocated = located ?: lastLocated
-                burst.close()
+                // Registered against the newest tile and its nearest neighbour
+                // only: enough to know where the reticle is, and a third of the
+                // cost of every neighbour.
+                val registered = session.locate(proxy, scale, maxCandidates = TRACK_CANDIDATES)
+
+                // The gyroscope's peak since the last poll: the fastest the
+                // phone turned while these frames were exposed.
+                val nowNs = motion?.nowNs() ?: 0L
+                val peak = motion?.peakSpeedSince(lastPollNs) ?: Float.NaN
+                lastPollNs = nowNs
+
+                // A frame the registration could not place, on a phone the
+                // gyroscope says has not moved since the last frame it did
+                // place, is where that frame was. Registration fails on a plain
+                // wall or a patch of sky, and a hold on a node needs the dots
+                // to stay put through it; the held transform is only ever used
+                // to draw and to judge the hold. The burst's own reference
+                // frame is registered afresh when it is taken, and a burst that
+                // cannot be placed is rejected, so a held transform can never
+                // place a tile. Any movement since the last registration ends
+                // the hold: a transform from before a move says nothing about
+                // where the phone points now -- the first version held one
+                // across a move and drew the dots on the wrong scene.
+                val stillByGyro = !peak.isNaN() && peak < guide.maxAngularSpeed * HELD_STILL_FRACTION
+                if (!stillByGyro) heldValid = false
+                if (registered != null) heldValid = true
+                val located = registered ?: lastLocated?.takeIf { heldValid && stillByGyro && heldPolls < MAX_HELD_POLLS }
+                heldPolls = if (registered == null && located != null) heldPolls + 1 else 0
+                lastLocated = registered ?: lastLocated
 
                 val now = System.currentTimeMillis()
                 val decision = if (located != null) {
                     val centre = located.transform.apply(stream.config.width / 2f, stream.config.height / 2f)
-                    sweep.observe(centre[0], centre[1], now)
+                    guide.observe(centre[0], centre[1], now, peak)
                 } else {
-                    sweep.observe(null, null, now)
+                    guide.observe(null, null, now, peak)
                 }
-                onView(viewOf(sweep, session, located?.transform))
+                onView(viewOf(guide, session, located?.transform, captureLabel, now))
+                // The gate's readings, once a second: what the hold is waiting on.
+                if (now - lastGateLog > 1000L) {
+                    lastGateLog = now
+                    Log.i(
+                        TAG,
+                        "gate: %s, gyro peak %.4f rad/s of %.4f, %s%s, hold %.2f".format(
+                            when {
+                                registered != null -> "registered (%d inliers)".format(registered.inliers)
+                                located != null -> "held by gyro (%d polls)".format(heldPolls)
+                                else -> "not registered: ${session.lastLocateFailure}"
+                            },
+                            peak, guide.maxAngularSpeed,
+                            if (guide.steady) "steady" else "unsteady",
+                            guide.unsteadyReason?.let { " ($it)" } ?: "",
+                            guide.holdProgress(now),
+                        ),
+                    )
+                }
 
                 when (decision) {
-                    is GuidedSweep.Decision.TooFast -> onEvent(SweepEvent.TooFast)
-                    is GuidedSweep.Decision.Capture -> {
-                        onEvent(SweepEvent.Locked(decision.node))
+                    is MosaicGuide.Decision.TooFast -> onEvent(MosaicEvent.TooFast)
+                    is MosaicGuide.Decision.Capture -> {
                         val outcome = runCatching {
-                            captureNode(stream, session, profile, frames, lensProfile, scale)
+                            captureNode(stream, session, profile, frames, lensProfile, scale) {
+                                // The burst is in hand: the haptic can fire.
+                                onEvent(MosaicEvent.Locked(decision.node))
+                            }
                         }.onFailure { Log.w(TAG, "node ${decision.node.index} failed", it) }
                             .getOrDefault("capture failed")
                         if (outcome == null) {
-                            sweep.captured(decision.node)
-                            onEvent(SweepEvent.Captured(decision.node))
-                            if (sweep.complete) onEvent(SweepEvent.Complete)
+                            guide.captured(decision.node)
+                            onEvent(MosaicEvent.Captured(decision.node))
+                            if (guide.complete) onEvent(MosaicEvent.Complete)
                         } else {
-                            sweep.rejected(decision.node, System.currentTimeMillis())
-                            onEvent(SweepEvent.Rejected(decision.node, outcome))
+                            guide.rejected(decision.node, System.currentTimeMillis())
+                            onEvent(MosaicEvent.Rejected(decision.node, outcome))
                         }
-                        onView(viewOf(sweep, session, lastLocated?.transform))
+                        onView(viewOf(guide, session, lastLocated?.transform, captureLabel, System.currentTimeMillis()))
+                        // The capture took time; the gyroscope's window restarts.
+                        lastPollNs = motion?.nowNs() ?: 0L
                     }
-                    GuidedSweep.Decision.Idle -> Unit
+                    MosaicGuide.Decision.Idle -> Unit
                 }
                 delay(POLL_MILLIS)
             }
         } finally {
-            prober.close()
+            motion?.close()
             stream.unlock(settings, caps)
         }
 
@@ -255,42 +383,122 @@ object MosaicCapture {
             message = when {
                 progress.placed == 0 -> "no tiles were captured"
                 name == null -> "captured ${progress.placed} tiles but could not save"
-                sweep.complete -> "sweep complete: ${progress.placed} of ${sweep.total} tiles"
-                else -> "partial sweep: ${progress.placed} of ${sweep.total} tiles"
+                guide.complete -> "mosaic complete: ${progress.placed} of ${guide.total} tiles"
+                else -> "partial mosaic: ${progress.placed} of ${guide.total} tiles"
             },
         )
     }
 
     /**
-     * The screen's view of the sweep: every node's state and, when the frame
+     * The screen's view of the mosaic: every node's state and, when the frame
      * registered, where each falls in it.
      */
-    private fun viewOf(sweep: GuidedSweep, session: MosaicSession, transform: Homography?): GuidedSweepView {
+    private fun viewOf(
+        guide: MosaicGuide,
+        session: MosaicSession,
+        transform: Homography?,
+        captureLabel: String,
+        nowMillis: Long,
+    ): MosaicGuideView = viewOf(guide, session.plan, transform, captureLabel, nowMillis, session.progress.coverage, anchored = true)
+
+    /**
+     * The screen's view of the mosaic: every node's state and, when the frame
+     * registered, where each falls in it, and the canvas's outline.
+     */
+    fun viewOf(
+        guide: MosaicGuide,
+        plan: MosaicPlan,
+        transform: Homography?,
+        captureLabel: String,
+        nowMillis: Long,
+        coverage: Float = 0f,
+        anchored: Boolean,
+    ): MosaicGuideView {
         val inverse = transform?.invert()
-        val w = session.plan.tileWidthPx.toFloat()
-        val h = session.plan.tileHeightPx.toFloat()
-        val nodes = sweep.nodes.map { node ->
-            val p = inverse?.apply(node.canvasX, node.canvasY)
-            val ok = p != null && !p[0].isNaN() && !p[1].isNaN() && w > 0f && h > 0f
-            NodeView(
-                node = node,
-                state = sweep.stateOf(node),
-                frameX = if (ok) p!![0] / w else null,
-                frameY = if (ok) p!![1] / h else null,
-            )
+        val w = plan.tileWidthPx.toFloat()
+        val h = plan.tileHeightPx.toFloat()
+        // Canvas to frame fractions: through the frame's registration when
+        // there is one, else as the anchor would place the frame -- centred.
+        fun toFrame(cx: Float, cy: Float): Pair<Float, Float>? {
+            if (w <= 0f || h <= 0f) return null
+            if (inverse != null) {
+                val p = inverse.apply(cx, cy)
+                if (p[0].isNaN() || p[1].isNaN()) return null
+                return p[0] / w to p[1] / h
+            }
+            if (anchored) return null
+            val originX = (plan.canvasWidth - plan.placedTileWidth) / 2f
+            val originY = (plan.canvasHeight - plan.placedTileHeight) / 2f
+            return (cx - originX) / plan.placedTileWidth to (cy - originY) / plan.placedTileHeight
         }
-        return GuidedSweepView(
+        val nodes = guide.nodes.map { node ->
+            val p = toFrame(node.canvasX, node.canvasY)
+            NodeView(node = node, state = guide.stateOf(node), frameX = p?.first, frameY = p?.second)
+        }
+        val cw = plan.canvasWidth.toFloat()
+        val ch = plan.canvasHeight.toFloat()
+        val corners = listOf(0f to 0f, cw to 0f, cw to ch, 0f to ch).map { (x, y) -> toFrame(x, y) }
+        return MosaicGuideView(
             nodes = nodes,
-            captured = sweep.captured,
-            total = sweep.total,
+            captured = guide.captured,
+            total = guide.total,
             located = transform != null,
-            coverage = session.progress.coverage,
+            coverage = coverage,
+            canvasCorners = if (corners.all { it != null }) corners.map { it!! } else null,
+            holdProgress = guide.holdProgress(nowMillis),
+            steady = guide.steady,
+            unsteady = if (guide.lockingNodeOrNull != null) guide.unsteadyReason else null,
+            captureLensLabel = captureLabel,
+            anchored = anchored,
         )
     }
 
+    /** The view before the mosaic begins: the outline and the nodes as the anchor would place them. */
+    fun armedView(plan: MosaicPlan, captureLabel: String): MosaicGuideView =
+        viewOf(MosaicGuide(plan), plan, null, captureLabel, System.currentTimeMillis(), anchored = false)
+
+    /**
+     * Waits for the camera's controls to converge, up to a bound. True when
+     * they did; false when the wait ran out or the user stopped.
+     */
+    private suspend fun awaitConvergence(stream: ZslRawStream, shouldContinue: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + CONVERGENCE_TIMEOUT_MILLIS
+        while (shouldContinue() && System.currentTimeMillis() < deadline) {
+            if (stream.controlsConverged() == true) return true
+            delay(50)
+        }
+        return stream.controlsConverged() == true
+    }
+
+    /** The lens's focal length in pixels, from what the camera publishes about itself. */
+    private fun pixelsPerRadian(stream: ZslRawStream): Float {
+        val c = stream.characteristics
+        val focal = c.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
+        val physical = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val array = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        // The physical size is of the whole sensor and the frame is the active
+        // array; the ratio scales the width the frame actually spans.
+        val fullPx = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)?.width ?: array?.width() ?: 0
+        val frameMm = if (physical != null && fullPx > 0 && array != null) physical.width * (array.width().toFloat() / fullPx) else 0f
+        val fromPhysical = StabilityGate.pixelsPerRadian(focal, frameMm, stream.config.width)
+        return if (fromPhysical > 0f) fromPhysical
+        else StabilityGate.pixelsPerRadianFromEquivalent(stream.lens.equivalent35mm, stream.config.width)
+    }
+
+    private const val TRACK_CANDIDATES = 2
+
+    /** A held transform needs the gyroscope well under the gate's ceiling, not merely under it. */
+    private const val HELD_STILL_FRACTION = 0.5f
+
+    /** And it is not held forever: after this many polls the frame is lost, whatever the gyroscope says. */
+    private const val MAX_HELD_POLLS = 30
+
+    /** Polls to wait for a frame whose result carries white balance gains before anchoring without. */
+    private const val MAX_ANCHOR_WAIT_POLLS = 30
+
     /**
      * Takes the burst for a node: the ring's newest [frames], merged, developed
-     * with the sweep's locked colour, corrected for the lens, and composited at
+     * with the mosaic's locked colour, corrected for the lens, and composited at
      * the place the burst's reference frame registered to.
      *
      * Returns null on success, or the reason it could not be used.
@@ -302,12 +510,15 @@ object MosaicCapture {
         frames: Int,
         lensProfile: LensProfile?,
         proxyScale: Float,
+        onSnapshotted: () -> Unit,
     ): String? {
         val burst = stream.snapshot(frames)
         if (burst.count == 0) {
             burst.close()
             return "ring empty"
         }
+        // The frames a haptic could have blurred are locked in the ring now.
+        onSnapshotted()
         val merger = NativeMerge.create(stream.config.width, stream.config.height, profile)
             ?: run { burst.close(); return "no memory for the merge" }
 
@@ -331,17 +542,23 @@ object MosaicCapture {
                 m.addFrame(buffer, stride, field)
             }
 
-            // Where this burst is, from its own reference frame. The node said
-            // where to point; the frame says where the tile is.
-            val small = proxyFor(m, refBuffer, stride)
-            val located = session.locate(small, proxyScale)
+            // Where this burst is, from its own reference frame, read through
+            // the same sampling as the tracking view so it registers at the
+            // tracking view's scale. The node said where to point; the frame
+            // says where the tile is. The slots go back to the ring before
+            // the registration, which needs nothing from them.
+            val smallData = ByteArray(TRACK_WIDTH * TRACK_HEIGHT)
+            RawRing.trackingLumaOf(refBuffer, stream.config.width, stream.config.height, stride,
+                smallData, TRACK_WIDTH, TRACK_HEIGHT, profile)
+            val small = Plane(TRACK_WIDTH, TRACK_HEIGHT, smallData)
             burst.close()
+            val located = session.locate(small, proxyScale)
             if (located == null) return@use "could not register the burst"
 
             val (merged, _) = m.finish()
             val color = session.color ?: ColorProfile.NEUTRAL
             // The anchor's gain, scaled by how this burst's exposure differed
-            // from the anchor's -- which under the sweep's lock should be not
+            // from the anchor's -- which under the mosaic's lock should be not
             // at all, and this is what holds if it was.
             val gain = session.gainFor(exposureProduct(referenceResult))
             var tile = m.develop(
@@ -372,17 +589,6 @@ object MosaicCapture {
         val iso = result?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY) ?: return 0.0
         val ns = result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME) ?: return 0.0
         return iso.toDouble() * ns.toDouble()
-    }
-
-    /** Successively halved luma, small enough for corner detection to be quick. */
-    private fun proxyFor(m: NativeMerge, buffer: java.nio.ByteBuffer, stride: Int): Plane {
-        var plane = m.lumaProxy(buffer, stride)
-        repeat(PROXY_HALVINGS) {
-            if (plane.width > 64 && plane.height > 64) {
-                plane = Aligner.downsampleByTwo(plane)
-            }
-        }
-        return plane
     }
 
     private fun stamp(): String =

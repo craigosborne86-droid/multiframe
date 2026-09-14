@@ -83,7 +83,7 @@ Formalized type scale:
 | Token | Size | Weight | Family | Color | Use |
 |---|---|---|---|---|---|
 | `Gauge` | 13sp | Normal | Monospace | `Amber` | Live readings: ISO, shutter, EV, coverage %, zoom |
-| `GaugeLarge` | 26sp | Normal | Monospace | `Amber` | Prominent readings: tile count during sweep |
+| `GaugeLarge` | 26sp | Normal | Monospace | `Amber` | Prominent readings: tile count during a mosaic |
 | `Label` | 11sp | Medium | Default | `Muted` | Static labels next to readings: "ISO", "SHUTTER", "EV" |
 | `Control` | 12sp | Medium | Default | `Bone` | Chip/button text: "MERGE ON", "FRAMES", "GUIDES" |
 | `Section` | 10sp | Medium | Default | `Muted` | Panel section headers, uppercase, 1.2sp tracking |
@@ -117,8 +117,8 @@ user's eyes are on the subject, not the screen.
 | Self-timer tick (each second) | Light tick | `HapticFeedbackConstants.CLOCK_TICK` |
 | Mode/toggle change (MERGE, DCG, ZSL) | Segment tick | `HapticFeedbackConstants.SEGMENT_FREQUENT_TICK` |
 | Slider value at detent (ISO round number, EV zero) | Tick | `HapticFeedbackConstants.CLOCK_TICK` |
-| Sweep tile accepted | Confirmation | `HapticFeedbackConstants.CONFIRM` |
-| Sweep tile rejected | Rejection | `HapticFeedbackConstants.REJECT` |
+| Mosaic tile locked | Confirmation | `HapticFeedbackConstants.CONFIRM` |
+| Mosaic tile rejected | Rejection | `HapticFeedbackConstants.REJECT` |
 | Error / invalid action | Rejection | `HapticFeedbackConstants.REJECT` |
 | Lens switch | Segment tick | `HapticFeedbackConstants.SEGMENT_FREQUENT_TICK` |
 
@@ -237,20 +237,33 @@ output is 263 MP. Practically, overlap reduces this; the default cap is 80 MP /
 
 #### 2.3.2 User-Selectable Matrices
 
-**Built (Phase 4).** `SweepPreset`, remembered in `AppSettings.sweepPreset`;
-`MosaicPlanner.planGrid`, `planRegion` and `planPreset`; the `SWEEP 2×2 /
-3×3 / CUSTOM` pill in the PRO panel.
+**Built (Phase 4), revised after the first field test.** `MosaicPreset`,
+remembered in `AppSettings.mosaicPreset`; `MosaicPlanner.planGrid`,
+`planRegion` and `planPreset`; the `2×2 / 3×3 (/ CUSTOM)` pill on the HUD
+while the mosaic is armed, and the `MOSAIC` pill in the PRO panel.
+
+**The mode is called MOSAIC, not sweep.** A sweep is a pan, and a pan is the
+blurred frame this mode exists to avoid; the word was encouraging the motion
+the stability gate then has to refuse. The picture is tiles, each held still.
 
 Three presets replace the fixed 7x7 grid:
 
 | Preset | Grid | Tiles | Use Case | Approx. Output |
 |---|---|---|---|---|
 | **Detail Boost** | 2x2 | 4 | Quick detail enhancement, handheld-friendly | ~20 MP |
-| **Large Format** | 3x3 | 9 | Medium-format equivalent, manageable sweep | ~45 MP |
+| **Large Format** | 3x3 | 9 | Medium-format equivalent, manageable | ~45 MP |
 | **Custom Bounding Box** | User-drawn | Variable | Full control over coverage area | Variable |
 
-The user selects the preset before starting the sweep. The viewfinder shows the
-resulting grid overlaid on the wide-angle framing.
+**The mode is offered on every lens** and shoots with the longest lens that
+delivers raw. Pressing MOSAIC *arms* it: the viewfinder switches to that lens
+and says so, the outline of the whole picture -- 1.65 frames across for a
+2x2, 2.3 for a 3x3 -- is drawn on the viewfinder with its tile nodes inside
+it, and the 2x2/3x3 pill sits under the count so the grid can be chosen with
+its outline in view. Nothing has been taken. The shutter anchors the mosaic
+wherever the reticle points and the guidance begins; MOSAIC again disarms and
+returns to the lens the user came from. The first version offered the mode
+only from a wider lens and hid it on the telephoto -- the lens it uses -- and
+started taking on the chip press, four floating dots and no picture.
 
 Custom Bounding Box: the user draws a rectangle on the wide-angle preview. The
 planner computes the minimum tile grid that covers the rectangle at the
@@ -258,33 +271,51 @@ telephoto's resolution, with the required overlap.
 
 #### 2.3.3 Reticle/Dot Guidance System
 
-**Built (Phase 4).** `GuidedSweep` is the lock rule as a pure state machine,
-`MosaicCapture.run` drives it against the live ring, `SweepGuidance` draws it.
-Two refinements to the list below, both from building it: a lock needs a
-*hold*, not just a position -- a quarter of a second inside the radius without
-drifting more than the radius, because a pan that sweeps through the dot is
-exactly the blurred frame -- and the dots are placed by registering each
-preview frame against the tiles so far, which cannot drift, rather than by the
-gyroscope, which would. A frame that cannot be registered reads FINDING and
-locks nothing.
+**Built (Phase 4), revised after the first field test.** `MosaicGuide` is the
+lock rule as a pure state machine, `MosaicCapture.run` drives it against the
+live ring, `MosaicGuidance` draws it, `StabilityGate` says what still means.
+
+**The stability gate.** The first version measured a hold as "inside the
+radius for a quarter second" and fired on every approach: a hand decelerating
+onto a target is inside 5% of the frame for that long while still turning a
+degree a second, and every tile was smeared. A lock now needs a hold that is
+*still* on two independent measures for the settle time: the registration's
+own reading -- the frame's centre moving less than 0.75% of a tile per poll --
+and the gyroscope's, whose ceiling `StabilityGate` derives from the exposure
+and the lens's focal length in pixels so that the blur it permits is two
+pixels (2.5°/s at 1/250 s on the 110mm; floored at 2°/s, the tremor of a hand
+holding still, so a long exposure never asks for what a hand cannot do and
+still refuses a pan; capped at 5°/s so a short exposure cannot make a wobble
+acceptable). A poll that fails either measure resets the hold, and the hold
+needs three steady polls as well as the time. The locking dot carries a ring
+that fills as the hold runs and empties when it breaks, and the HUD says HOLD
+STILL or HOLD STEADY ON THE DOT while it waits. The settle time is stretched
+to cover the burst, so every frame the ring hands over was taken during the
+verified hold -- the burst *is* the hold. The dots are placed by registering
+each preview frame against the tiles so far, which cannot drift; a frame that
+cannot be registered on a phone the gyroscope says is still is drawn where the
+last one was, and a frame that cannot be registered on a moving phone reads
+FINDING and locks nothing. `REFERENCE.md` §3.4.4.
 
 **This replaces the free-roam panning arrow concept.**
 
-When the sweep begins:
+When the mosaic begins:
 
 1. The viewfinder switches to the telephoto lens.
 2. Target dots appear overlaid on the viewfinder, one per tile position. Each dot
    represents the center of a tile the user needs to capture.
 3. A crosshair reticle is fixed at the center of the viewfinder.
 4. The user pans the phone to align the reticle with each target dot.
-5. When the reticle is within the lock radius of a target dot (configurable,
-   default 5% of frame width):
-   - The dot changes color (muted -> amber -> green on lock).
-   - A haptic confirmation fires (`CONFIRM`).
-   - The system automatically captures a burst at that position.
+5. When the reticle is within the lock radius of a target dot (default 5% of
+   frame width) *and the phone is still* (§ above):
+   - The dot changes color (muted -> amber, with a ring filling over the hold).
+   - After the hold, the burst is taken from the ring and a haptic
+     confirmation fires (`CONFIRM`) -- after the frames are in hand, never
+     before.
    - The dot fills solid green to indicate completion.
-6. If the user moves too quickly (alignment residual exceeds threshold), the dot
-   flashes red and fires `REJECT` haptic. The user must re-align.
+6. If the user moves too quickly (a tile's width between polls), `REJECT`
+   fires; a burst that cannot be registered or developed flashes its dot red
+   for a beat and fires `REJECT`. The user re-aligns.
 
 **Advantages over free-roam panning:**
 
@@ -446,7 +477,7 @@ After every capture, the developed JPEG appears in a review overlay:
   resolution).
 - Merge readout: "12 frames · 89% kept · DCG" overlaid at the bottom.
 - Swipe up to dismiss and return to viewfinder. Swipe down or tap to save.
-- For sweep captures: the stitched result with a coverage map toggle.
+- For mosaic captures: the stitched result.
 
 #### 2.4.2 Gallery Screen
 
@@ -499,7 +530,11 @@ A dedicated screen accessible from the last-shot thumbnail in the viewfinder.
 
 - Viewfinder: zero dropped frames during normal operation (30 fps).
 - During DCG: 15 fps is acceptable (half the frames go to RAW only).
-- During sweep: viewfinder may drop to 15 fps during tile compositing.
+- During a mosaic: the tracking costs about 25 ms of one core per poll at ten
+  polls a second (measured, `ZslStreamDeviceTest.trackingIsPricedAgainstAnIdleStream`);
+  the ring reports no frames dropped or delayed beside an idle stream. The
+  viewfinder may still stutter for the second or two a tile is merged,
+  developed and composited across every core.
 - UI thread: no operation > 16ms on the main thread. All pipeline work is
   dispatched to `Dispatchers.Default`.
 
@@ -565,7 +600,7 @@ A dedicated screen accessible from the last-shot thumbnail in the viewfinder.
 | Category | Current | Minimum for v1.0 |
 |---|---|---|
 | Unit tests | 356 | 400 (new: gallery, settings, lens profile, DCG calibration) |
-| Device tests | 104 | 140 (new: lens profile probing, sweep guidance, gallery CRUD) |
+| Device tests | 104 | 140 (new: lens profile probing, mosaic guidance, gallery CRUD) |
 | Parity tests | Present for merge, shading, JPEG | Must also cover: distortion correction, CA correction |
 
 *Phase 1 delivered 467 unit and 133 device tests, both past the v1.0 minimum.*
@@ -582,7 +617,7 @@ described is not yet built. This is what those numbers mean.
 | 1 | Foundation & Hardware Truth | **Delivered.** Design tokens, haptic vocabulary, decoupled viewfinder HUD, `LensProfile` discovery, non-invasive DCG noise profiling, gallery and review surface. |
 | 2 | Lens Corrections & Develop Quality | Geometric distortion correction from `LensProfile`, lateral chromatic aberration correction, dual-illuminant colour matrix, HEIF output. |
 | 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel alignment refinement (equiangular, after the parabola was measured biased); sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native tiled strips, parity-verified); coverage prediction from the alignment; the linear develop of the canvas to a JPEG from native memory; the `2X` control, readout and gallery badge; IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. See §5.2. |
-| 4 | Guided Brenizer Engine & Local Tone | **Delivered.** Sweep presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
+| 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after its first field test (§5.4).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
 | 5 | Responsive UI & GPU Develop | Responsive layout, accessibility pass; Vulkan compute develop if the CPU budget is ever exceeded. |
 | 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
 
@@ -663,14 +698,14 @@ tiled to fit a cache; `REFERENCE.md` §3.6.4 has the measurements.
 
 ### 5.3 What Phase 4 delivered
 
-**The guided sweep.** `SUPERRES.md` has the flow. Two things it found. A
+**The guided mosaic.** `SUPERRES.md` has the flow. Two things it found. A
 mosaic developed one tile at a time with each tile's own automatic gain was a
 mosaic of nine exposures, so the develop gain and colour are now fixed by the
 anchor and each tile is normalised by its own ISO × exposure -- which under the
-sweep's exposure lock should be no correction at all, and holds if it is. And
+mosaic's exposure lock should be no correction at all, and holds if it is. And
 registering each preview frame ten times a second, which the dots need, was
 allocating a hundred megabytes of merge accumulator per frame for a luma proxy
-that needs none; one prober now lives for the sweep.
+that needs none; one prober now lives for the mosaic.
 
 **The blend.** A single feather could hide a step or keep detail, never both;
 three bands do both, in the running-mean form the canvas already had, for an
@@ -694,9 +729,60 @@ scene that needs it, and whether it should be the default is a decision to
 make on real photographs rather than here.
 
 **Not done.** Bundle adjustment (§2.3.4), deliberately. The local operator is
-not applied to sweep tiles, because a base computed per tile differs at every
+not applied to mosaic tiles, because a base computed per tile differs at every
 seam and the right grid is one over the whole canvas, which the canvas does
 not yet build. And nobody has swept a real scene with it.
+
+### 5.4 What the first field test of the mosaic found
+
+Six things, all fixed before Phase 5 and each with a test that would have
+caught it.
+
+1. **The mosaic was green.** `MosaicCapture.run` locked exposure and white
+   balance the instant the stream came up on the telephoto the user had just
+   switched to, before either had converged; the lock froze the white balance
+   at unity and every tile was developed at unity gains -- raw's green. The
+   runner now waits for `CONTROL_AE_STATE` and `CONTROL_AWB_STATE` to read
+   converged (`ZslRawStream.controlsConverged`) before locking, and will not
+   anchor on a frame whose result carries no `COLOR_CORRECTION_GAINS`. The
+   live device test decodes the saved mosaic and holds its green channel to
+   within a sixth of red and blue. The file was also on its side: the canvas
+   is composited in sensor orientation and now carries the orientation tag,
+   like the 2x path. The 2x linear develop, which the report suspected, was
+   not involved -- the field file was `_mosaic_`, and `LinearDevelopParityTest`
+   holds that path to the Kotlin reference within two codes with a real colour
+   matrix.
+
+2. **The viewfinder stuttered.** Measured rather than guessed: the guidance's
+   tracking loop cost 219 ms per poll -- a slot locked from the ring, the
+   merge's 3 MP luma proxy built and halved three times on the JVM, corner
+   detection at every pixel with a 25-tap window and a `Corner` object for
+   each, 600 RANSAC iterations against every placed frame -- so one big core
+   ran flat out and 30 MB/s of garbage was allocated. It is now 25 ms: an
+   in-place box-averaged read from the ring into one reusable array
+   (`ZslRawStream.trackingLuma`), a linear-time response map with
+   non-maximum suppression and a floor relative to the frame's strongest
+   corner, features extracted once per frame and cached per placed tile, a
+   coarse-then-fine match, adaptive RANSAC, and two candidates rather than
+   every neighbour. The ring's own counters show no frames dropped or delayed
+   beside an idle stream. The IMU is not in the tracking loop and never was;
+   it is in the stability gate.
+
+3. **The burst fired while the hand was still moving.** §2.3.3's stability
+   gate. The old rule's clock was satisfied by the second observation of a
+   300 ms tracker.
+
+4. **Four floating dots.** The outline of the whole canvas and the grid
+   between the nodes are drawn, before the anchor as the anchor would place
+   them and after it where each frame's registration puts them; the HUD
+   carries the lens taking the tiles, the count, and the 2x2/3x3 pill.
+
+5. **The mode was hidden on the lens it uses.** It is offered on every lens
+   and arms by switching to the longest raw lens (§2.3.2).
+
+6. **"Sweep."** Renamed: `MosaicPreset`, `MosaicGuide`, `MosaicGuidance`,
+   the `MOSAIC` chip, `mosaicPreset` in settings (the old key is read), and
+   this document.
 
 **Still open from Phase 3.** The chroma channels of an eight-frame handheld burst leave
 about a fifth of their cells to the fill; a longer burst closes them and the

@@ -246,11 +246,11 @@ class AppSettingsTest {
 
     @Test
     fun `the sweep preset survives a round trip and an unknown name falls back`() {
-        assertThat(AppSettings().sweepPreset).isEqualTo(SweepPreset.DETAIL_BOOST)
-        val large = AppSettings(sweepPreset = SweepPreset.LARGE_FORMAT)
-        assertThat(AppSettings.decode(large.encode()).sweepPreset).isEqualTo(SweepPreset.LARGE_FORMAT)
-        assertThat(AppSettings.decode(mapOf(AppSettings.KEY_SWEEP_PRESET to "7x7")).sweepPreset)
-            .isEqualTo(SweepPreset.DETAIL_BOOST)
+        assertThat(AppSettings().mosaicPreset).isEqualTo(MosaicPreset.DETAIL_BOOST)
+        val large = AppSettings(mosaicPreset = MosaicPreset.LARGE_FORMAT)
+        assertThat(AppSettings.decode(large.encode()).mosaicPreset).isEqualTo(MosaicPreset.LARGE_FORMAT)
+        assertThat(AppSettings.decode(mapOf(AppSettings.KEY_MOSAIC_PRESET to "7x7")).mosaicPreset)
+            .isEqualTo(MosaicPreset.DETAIL_BOOST)
     }
 
     @Test

@@ -253,6 +253,13 @@ data class ColorProfile(
         }
     }
 
+    /**
+     * Whether the white balance is unity on every channel -- what a result
+     * without gains falls back to, and what a lock taken before the camera
+     * had converged reports. Raw developed at unity is green.
+     */
+    val isNeutralGains: Boolean get() = gains.all { kotlin.math.abs(it - 1f) < 1e-3f }
+
     /** Gain for the CFA colour index (0 red, 1 green, 2 blue) at a pixel position. */
     fun gainFor(colour: Int, y: Int): Float = when (colour) {
         0 -> gains[0]

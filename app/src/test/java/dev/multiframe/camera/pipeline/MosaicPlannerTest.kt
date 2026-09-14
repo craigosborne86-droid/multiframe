@@ -217,13 +217,13 @@ class MosaicPlannerTest {
 
     @Test
     fun `the presets plan their grids`() {
-        val boost = MosaicPlanner.planPreset(SweepPreset.DETAIL_BOOST, main, tele, tileW, tileH)!!
+        val boost = MosaicPlanner.planPreset(MosaicPreset.DETAIL_BOOST, main, tele, tileW, tileH)!!
         assertThat(boost.tileCount).isEqualTo(4)
-        val large = MosaicPlanner.planPreset(SweepPreset.LARGE_FORMAT, main, tele, tileW, tileH)!!
+        val large = MosaicPlanner.planPreset(MosaicPreset.LARGE_FORMAT, main, tele, tileW, tileH)!!
         assertThat(large.tileCount).isEqualTo(9)
         assertThat(large.megapixels).isGreaterThan(boost.megapixels)
         // Custom with no region drawn yet is not a plan.
-        assertThat(MosaicPlanner.planPreset(SweepPreset.CUSTOM, main, tele, tileW, tileH)).isNull()
+        assertThat(MosaicPlanner.planPreset(MosaicPreset.CUSTOM, main, tele, tileW, tileH)).isNull()
     }
 
     @Test
@@ -256,21 +256,51 @@ class MosaicPlannerTest {
         assertThat(MosaicPlanner.planRegion(main, tele, tileW, tileH, 0.5f, -1f)).isNull()
     }
 
+    /**
+     * A grid needs no wider lens. Planned from the capture lens itself, or
+     * from a longer one, it records the framing it covers -- the capture
+     * lens's focal length over the tiles the canvas spans -- rather than the
+     * lens it was asked from.
+     */
     @Test
-    fun `a grid over a pointless pairing is refused too`() {
-        assertThat(MosaicPlanner.planGrid(tele, main, tileW, tileH, 2, 2)).isNull()
-        assertThat(MosaicPlanner.planGrid(main, main, tileW, tileH, 2, 2)).isNull()
+    fun `a grid is planned from any lens and records the framing it covers`() {
+        val fromItself = MosaicPlanner.planGrid(tele, tele, tileW, tileH, 2, 2)!!
+        assertThat(fromItself.captureLens).isEqualTo(tele)
+        // 1.65 tiles across at 110mm is a 66mm framing.
+        assertThat(fromItself.targetLens.equivalent35mm).isEqualTo((110 / 1.65).toInt())
+        val fromLonger = MosaicPlanner.planGrid(superTele, tele, tileW, tileH, 2, 2)!!
+        assertThat(fromLonger.targetLens.equivalent35mm).isEqualTo(fromItself.targetLens.equivalent35mm)
+        // From a wider lens, that lens is the framing.
+        val fromWider = MosaicPlanner.planGrid(main, tele, tileW, tileH, 2, 2)!!
+        assertThat(fromWider.targetLens).isEqualTo(main)
+        // And with no lens at all.
+        assertThat(MosaicPlanner.planGrid(null, tele, tileW, tileH, 2, 2)!!.targetLens.equivalent35mm)
+            .isEqualTo(fromItself.targetLens.equivalent35mm)
+    }
+
+    @Test
+    fun `the capture lens is the longest that delivers raw`() {
+        val noRawTele = superTele.copy(supportsRaw = false)
+        assertThat(MosaicPlanner.captureLens(listOf(ultraWide, main, tele, noRawTele))).isEqualTo(tele)
+        assertThat(MosaicPlanner.captureLens(listOf(ultraWide, main, tele, superTele))).isEqualTo(superTele)
+        assertThat(MosaicPlanner.captureLens(emptyList())).isNull()
+    }
+
+    @Test
+    fun `a custom region needs a wider lens to have been drawn on`() {
+        assertThat(MosaicPlanner.planPreset(MosaicPreset.CUSTOM, null, tele, tileW, tileH, customRegion = 0.5f to 0.5f)).isNull()
+        assertThat(MosaicPlanner.planPreset(MosaicPreset.CUSTOM, main, tele, tileW, tileH, customRegion = 0.5f to 0.5f)).isNotNull()
     }
 
     @Test
     fun `the preset cycles and reads back by name`() {
-        assertThat(SweepPreset.DETAIL_BOOST.next()).isEqualTo(SweepPreset.LARGE_FORMAT)
-        assertThat(SweepPreset.CUSTOM.next()).isEqualTo(SweepPreset.DETAIL_BOOST)
-        assertThat(SweepPreset.named("LARGE_FORMAT")).isEqualTo(SweepPreset.LARGE_FORMAT)
-        assertThat(SweepPreset.named("nonsense")).isEqualTo(SweepPreset.DETAIL_BOOST)
-        assertThat(SweepPreset.named(null)).isEqualTo(SweepPreset.DETAIL_BOOST)
-        assertThat(SweepPreset.DETAIL_BOOST.gridSide).isEqualTo(2)
-        assertThat(SweepPreset.LARGE_FORMAT.gridSide).isEqualTo(3)
-        assertThat(SweepPreset.CUSTOM.gridSide).isEqualTo(0)
+        assertThat(MosaicPreset.DETAIL_BOOST.next()).isEqualTo(MosaicPreset.LARGE_FORMAT)
+        assertThat(MosaicPreset.CUSTOM.next()).isEqualTo(MosaicPreset.DETAIL_BOOST)
+        assertThat(MosaicPreset.named("LARGE_FORMAT")).isEqualTo(MosaicPreset.LARGE_FORMAT)
+        assertThat(MosaicPreset.named("nonsense")).isEqualTo(MosaicPreset.DETAIL_BOOST)
+        assertThat(MosaicPreset.named(null)).isEqualTo(MosaicPreset.DETAIL_BOOST)
+        assertThat(MosaicPreset.DETAIL_BOOST.gridSide).isEqualTo(2)
+        assertThat(MosaicPreset.LARGE_FORMAT.gridSide).isEqualTo(3)
+        assertThat(MosaicPreset.CUSTOM.gridSide).isEqualTo(0)
     }
 }

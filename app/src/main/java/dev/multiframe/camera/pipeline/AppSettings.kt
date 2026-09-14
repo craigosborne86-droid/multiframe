@@ -38,11 +38,11 @@ data class AppSettings(
      */
     val superRes: Boolean = false,
     /**
-     * How much of the framing a telephoto sweep covers. See [SweepPreset].
+     * How much of the framing a telephoto mosaic covers. See [MosaicPreset].
      * Remembered because the grid is a decision about the kind of picture,
      * not about the shot.
      */
-    val sweepPreset: SweepPreset = SweepPreset.DETAIL_BOOST,
+    val mosaicPreset: MosaicPreset = MosaicPreset.DETAIL_BOOST,
     /**
      * Whether the bilateral-grid local tone operator runs in the develop.
      *
@@ -86,7 +86,7 @@ data class AppSettings(
         KEY_GUARD to highlightGuard.toString(),
         KEY_ZSL to zslEnabled.toString(),
         KEY_SUPER_RES to superRes.toString(),
-        KEY_SWEEP_PRESET to sweepPreset.name,
+        KEY_MOSAIC_PRESET to mosaicPreset.name,
         KEY_LOCAL_TONE to localTone.toString(),
         KEY_MODE to captureMode.name,
         KEY_TIMER to timerSeconds.toString(),
@@ -114,7 +114,7 @@ data class AppSettings(
         const val KEY_GUIDES = "guides"
         const val KEY_DCG = "dcg"
         const val KEY_SUPER_RES = "superRes"
-        const val KEY_SWEEP_PRESET = "sweepPreset"
+        const val KEY_MOSAIC_PRESET = "mosaicPreset"
         const val KEY_LOCAL_TONE = "localTone"
         const val KEY_FORMAT = "outputFormat"
 
@@ -172,7 +172,9 @@ data class AppSettings(
                 guides = stored[KEY_GUIDES]?.takeIf { it.isNotBlank() } ?: defaults.guides,
                 dcgEnabled = bool(KEY_DCG, defaults.dcgEnabled),
                 superRes = bool(KEY_SUPER_RES, defaults.superRes),
-                sweepPreset = SweepPreset.named(stored[KEY_SWEEP_PRESET]),
+                // The key was "sweepPreset" for one release; a phone that
+                // stored it under that name keeps its choice.
+                mosaicPreset = MosaicPreset.named(stored[KEY_MOSAIC_PRESET] ?: stored["sweepPreset"]),
                 localTone = bool(KEY_LOCAL_TONE, defaults.localTone),
                 outputFormat = OutputFormat.named(stored[KEY_FORMAT]),
             )

@@ -110,8 +110,10 @@ data class ControlBarState(
     val guardPull: Float = 0f,
     val zslOffered: Boolean = false,
     val zslOn: Boolean = false,
-    val sweepOffered: Boolean = false,
-    val sweepRunning: Boolean = false,
+    val mosaicOffered: Boolean = false,
+    /** Armed: the capture lens is up and the outline is on the viewfinder, waiting for the shutter. */
+    val mosaicArmed: Boolean = false,
+    val mosaicRunning: Boolean = false,
     val rawBurstOffered: Boolean = false,
     val dngOffered: Boolean = false,
 )
@@ -178,7 +180,7 @@ object ControlBar {
     const val PRO = "pro"
     const val ABOUT = "about"
 
-    const val SWEEP = "sweep"
+    const val MOSAIC = "mosaic"
     const val RAW_BURST = "rawBurst"
     const val DNG = "dng"
 
@@ -318,16 +320,23 @@ object ControlBar {
      * rather than a control that sends a request the camera will reject.
      */
     fun actions(state: ControlBarState): List<ControlSpec> = buildList {
-        if (state.sweepOffered || state.sweepRunning) {
+        if (state.mosaicOffered || state.mosaicArmed || state.mosaicRunning) {
+            // "Mosaic", not "sweep": a sweep is a pan, and a pan is the blurred
+            // frame this mode exists to avoid. The word says what the picture
+            // is -- tiles, each held still.
             add(
                 ControlSpec(
-                    id = SWEEP,
-                    label = if (state.sweepRunning) "STOP SWEEP" else "SUPER RES",
+                    id = MOSAIC,
+                    label = when {
+                        state.mosaicRunning -> "STOP MOSAIC"
+                        state.mosaicArmed -> "MOSAIC ARMED"
+                        else -> "MOSAIC"
+                    },
                     kind = ControlKind.Action,
-                    active = state.sweepRunning,
-                    // Stopping a sweep must stay available while one runs, or
+                    active = state.mosaicRunning || state.mosaicArmed,
+                    // Stopping a mosaic must stay available while one runs, or
                     // the only way out is to leave the app.
-                    enabled = state.sweepRunning || !state.busy,
+                    enabled = state.mosaicRunning || state.mosaicArmed || !state.busy,
                 )
             )
         }

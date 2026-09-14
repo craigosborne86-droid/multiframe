@@ -33,7 +33,7 @@ class ControlBarUiTest {
         captureModeLabel = "AUTO",
         highlightGuardOffered = true,
         zslOffered = true,
-        sweepOffered = true,
+        mosaicOffered = true,
         rawBurstOffered = true,
         dngOffered = true,
     )
@@ -120,9 +120,9 @@ class ControlBarUiTest {
 
     @Test
     fun aRunningSweepCanStillBeStopped() {
-        val fired = showActions(capable.copy(busy = true, sweepRunning = true))
-        compose.onNodeWithContentDescription("STOP SWEEP").performClick()
-        assertThat(fired).containsExactly(ControlBar.SWEEP)
+        val fired = showActions(capable.copy(busy = true, mosaicRunning = true))
+        compose.onNodeWithContentDescription("STOP MOSAIC").performClick()
+        assertThat(fired).containsExactly(ControlBar.MOSAIC)
     }
 
     /**

@@ -7,18 +7,18 @@ import kotlin.math.sqrt
 import kotlin.math.tan
 
 /**
- * How much of the framing a sweep covers, chosen before it starts.
+ * How much of the framing a mosaic covers, chosen before it starts.
  *
  * The earlier design swept the whole of the wide lens's framing, which at
- * this device's pairing is forty-nine tiles -- a sweep nobody finishes. These
+ * this device's pairing is forty-nine tiles -- a mosaic nobody finishes. These
  * are the sizes a person will actually hold a phone still for, and the grid
  * is fixed so the nodes can be drawn before the first frame is taken.
  */
-enum class SweepPreset {
+enum class MosaicPreset {
     /** 2x2, four tiles: a handheld gain in detail over a framing near the centre. */
     DETAIL_BOOST,
 
-    /** 3x3, nine tiles: a medium-format-sized canvas from a sweep that still fits a minute. */
+    /** 3x3, nine tiles: a medium-format-sized canvas from a mosaic that still fits a minute. */
     LARGE_FORMAT,
 
     /** The grid that covers a rectangle the user drew on the wide preview. */
@@ -39,19 +39,19 @@ enum class SweepPreset {
             CUSTOM -> 0
         }
 
-    fun next(): SweepPreset = entries[(ordinal + 1) % entries.size]
+    fun next(): MosaicPreset = entries[(ordinal + 1) % entries.size]
 
     companion object {
-        fun named(name: String?): SweepPreset =
+        fun named(name: String?): MosaicPreset =
             entries.firstOrNull { it.name == name } ?: DETAIL_BOOST
     }
 }
 
 /**
- * One tile the sweep asks for: where its centre sits on the canvas, and its
+ * One tile the mosaic asks for: where its centre sits on the canvas, and its
  * place in the grid. The reticle guidance draws one dot per node.
  */
-data class SweepNode(
+data class MosaicNode(
     val index: Int,
     val column: Int,
     val row: Int,
@@ -84,7 +84,7 @@ data class MosaicPlan(
      * How much a tile must be scaled when placed on the canvas.
      *
      * One when the canvas is the full size the geometry asks for. Less when it
-     * has been capped for memory: the canvas is then smaller than the sweep's
+     * has been capped for memory: the canvas is then smaller than the mosaic's
      * true extent, so a tile placed at its native size would occupy a larger
      * share of the frame than it actually saw. Left uncorrected, a capped sweep
      * reports itself complete after two or three frames having covered a
@@ -92,12 +92,12 @@ data class MosaicPlan(
      */
     val tileScale: Float,
     /**
-     * The grid a guided sweep asks for, or empty for a sweep planned to cover
+     * The grid a guided mosaic asks for, or empty for a mosaic planned to cover
      * the framing by free panning. Centred on the canvas: the anchor frame --
-     * wherever the user is pointing when the sweep begins -- defines the
+     * wherever the user is pointing when the mosaic begins -- defines the
      * canvas centre, and the nodes are laid out around it.
      */
-    val nodes: List<SweepNode> = emptyList(),
+    val nodes: List<MosaicNode> = emptyList(),
     /** The tile's size in sensor pixels, recorded so the node geometry follows from the plan alone. */
     val tileWidthPx: Int = 0,
     val tileHeightPx: Int = 0,
@@ -177,7 +177,7 @@ object MosaicPlanner {
     }
 
     /**
-     * Plans a sweep of [capture] covering the framing of [target].
+     * Plans a mosaic of [capture] covering the framing of [target].
      *
      * Returns null when the pairing makes no sense: the same lens, or a capture
      * lens wider than the target, neither of which buys any resolution.
@@ -249,17 +249,19 @@ object MosaicPlanner {
     }
 
     /**
-     * Plans a sweep of a fixed [columns] x [rows] grid of [capture] tiles.
+     * Plans a mosaic of a fixed [columns] x [rows] grid of [capture] tiles.
      *
-     * The canvas is sized to the grid rather than to the target's framing: a
-     * 2x2 at the default overlap is 1.65 tiles across, whatever the lenses.
-     * The target lens still matters for what the sweep *means* -- the plan
-     * records the gain over shooting the target directly -- but the user is
-     * told how much of the framing the grid will cover rather than how many
-     * tiles the framing would need.
+     * The canvas is sized to the grid rather than to a framing: a 2x2 at the
+     * default overlap is 1.65 tiles across, whatever the lenses. So the grid
+     * needs no wider lens to be planned from, and the mode is offered on every
+     * lens: on the telephoto itself the canvas is 1.65 telephoto frames across,
+     * which is a 67mm-equivalent framing at 110mm detail. [target] is the
+     * framing the user was composing with when they asked, recorded in the
+     * file when it is wider than the capture lens; otherwise the plan records
+     * the framing the grid covers, as a lens of that equivalent focal length.
      */
     fun planGrid(
-        target: Lens,
+        target: Lens?,
         capture: Lens,
         tileWidth: Int,
         tileHeight: Int,
@@ -268,14 +270,20 @@ object MosaicPlanner {
         overlap: Float = DEFAULT_OVERLAP,
         maxMegapixels: Double = DEFAULT_MAX_MEGAPIXELS,
     ): MosaicPlan? {
-        if (target.equivalent35mm <= 0 || capture.equivalent35mm <= 0) return null
+        if (capture.equivalent35mm <= 0) return null
         if (tileWidth <= 0 || tileHeight <= 0 || columns <= 0 || rows <= 0) return null
-        if (capture.equivalent35mm <= target.equivalent35mm) return null
         val clampedOverlap = overlap.coerceIn(0.05f, 0.8f)
         val step = (1f - clampedOverlap).toDouble()
 
         val fullWidth = ceil(tileWidth * (1.0 + (columns - 1) * step)).toInt()
         val fullHeight = ceil(tileHeight * (1.0 + (rows - 1) * step)).toInt()
+        // The framing the grid covers, as an equivalent focal length: the
+        // capture lens's over how many tiles the canvas spans.
+        val coverage = fullWidth.toDouble() / tileWidth
+        val covered = capture.copy(
+            equivalent35mm = (capture.equivalent35mm / coverage).toInt().coerceAtLeast(1),
+        )
+        val framing = if (target != null && target.equivalent35mm in 1 until capture.equivalent35mm) target else covered
         var canvasWidth = fullWidth
         var canvasHeight = fullHeight
         var capped = false
@@ -288,15 +296,15 @@ object MosaicPlanner {
         }
         val tileScale = canvasWidth.toFloat() / fullWidth
 
-        // The gain over the target is what the whole exercise is for, and is
-        // the same number whether the sweep covers the framing or a part of it.
-        val targetHalfWidth = tan(Math.toRadians(horizontalFovDegrees(target.equivalent35mm) / 2))
+        // The gain over the framing is what the whole exercise is for, and is
+        // the same number whether the mosaic covers the framing or a part of it.
+        val targetHalfWidth = tan(Math.toRadians(horizontalFovDegrees(framing.equivalent35mm) / 2))
         val captureHalfWidth = tan(Math.toRadians(horizontalFovDegrees(capture.equivalent35mm) / 2))
         val linearGain = if (captureHalfWidth > 0) (targetHalfWidth / captureHalfWidth).toFloat() else 1f
 
         return MosaicPlan(
             captureLens = capture,
-            targetLens = target,
+            targetLens = framing,
             columns = columns,
             rows = rows,
             canvasWidth = canvasWidth,
@@ -313,7 +321,7 @@ object MosaicPlanner {
      *
      * [regionWidth] and [regionHeight] are fractions of the target lens's
      * frame, as the user drew them on the wide preview. Where the rectangle
-     * sits does not enter: the anchor -- where the user aims when the sweep
+     * sits does not enter: the anchor -- where the user aims when the mosaic
      * begins -- is its centre, so the drawing chooses the grid's size and the
      * aim chooses its place.
      */
@@ -340,21 +348,34 @@ object MosaicPlanner {
         return planGrid(target, capture, tileWidth, tileHeight, columns, rows, overlap, maxMegapixels)
     }
 
-    /** The plan for a preset, or null where [SweepPreset.CUSTOM] has no region yet. */
+    /**
+     * The plan for a preset, or null where [MosaicPreset.CUSTOM] has no region
+     * yet -- or has one but no wider lens to have drawn it on: a box drawn on
+     * the capture lens's own frame is smaller than one tile.
+     */
     fun planPreset(
-        preset: SweepPreset,
-        target: Lens,
+        preset: MosaicPreset,
+        target: Lens?,
         capture: Lens,
         tileWidth: Int,
         tileHeight: Int,
         customRegion: Pair<Float, Float>? = null,
         overlap: Float = DEFAULT_OVERLAP,
     ): MosaicPlan? = when (preset) {
-        SweepPreset.CUSTOM -> customRegion?.let { (w, h) ->
-            planRegion(target, capture, tileWidth, tileHeight, w, h, overlap)
+        MosaicPreset.CUSTOM -> customRegion?.let { (w, h) ->
+            if (target == null) null else planRegion(target, capture, tileWidth, tileHeight, w, h, overlap)
         }
         else -> planGrid(target, capture, tileWidth, tileHeight, preset.gridSide, preset.gridSide, overlap)
     }
+
+    /**
+     * The lens the mosaic is shot with: the longest rear lens that can deliver
+     * raw. The mode is offered whatever lens the user is on; if they are on
+     * this one already, no switch is needed.
+     */
+    fun captureLens(lenses: List<Lens>): Lens? =
+        LensCatalog.rear(lenses).filter { it.supportsRaw && it.equivalent35mm > 0 }
+            .maxByOrNull { it.equivalent35mm }
 
     /**
      * The node grid for a plan: tile centres laid out around the canvas centre
@@ -364,11 +385,11 @@ object MosaicPlanner {
         val sized = copy(tileWidthPx = tileWidth, tileHeightPx = tileHeight)
         val cx = canvasWidth / 2f
         val cy = canvasHeight / 2f
-        val nodes = ArrayList<SweepNode>(columns * rows)
+        val nodes = ArrayList<MosaicNode>(columns * rows)
         for (r in 0 until rows) {
             for (c in 0 until columns) {
                 nodes.add(
-                    SweepNode(
+                    MosaicNode(
                         index = nodes.size,
                         column = c,
                         row = r,
@@ -397,12 +418,12 @@ object MosaicPlanner {
     ): MosaicPlan? = LensCatalog.rear(lenses)
         .filter { it.supportsRaw && it.equivalent35mm > target.equivalent35mm }
         .mapNotNull { plan(target, it, tileWidth, tileHeight) }
-        // Most resolution, but not at the cost of an unreasonable sweep.
+        // Most resolution, but not at the cost of an unreasonable mosaic.
         .filter { it.tileCount <= MAX_REASONABLE_TILES }
         .maxByOrNull { it.megapixels }
 
     /**
-     * Beyond this a sweep takes long enough that the light will have changed,
+     * Beyond this a mosaic takes long enough that the light will have changed,
      * something will have moved, and the user will have given up.
      */
     const val MAX_REASONABLE_TILES = 64

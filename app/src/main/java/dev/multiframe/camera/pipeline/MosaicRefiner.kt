@@ -20,20 +20,20 @@ data class Constraint(
  * ### The problem with chaining
  *
  * [MosaicAssembler] places each frame by registering it against the previous
- * one and composing onto that placement. During a sweep that is the natural
+ * one and composing onto that placement. During a mosaic that is the natural
  * thing to do: consecutive frames overlap heavily and distant ones may not
  * overlap at all.
  *
  * It also integrates error. Every pairwise fit carries a small mistake, and a
  * chain adds them all up, so the far end of a long sweep drifts. Worse, the
  * drift is invisible while it happens: each individual join looks perfect,
- * because each was fitted to look perfect. It only shows when the sweep comes
+ * because each was fitted to look perfect. It only shows when the mosaic comes
  * back around and the two ends of the same row disagree about where a building
  * is.
  *
  * ### Reconciling instead
  *
- * A sweep does not only produce consecutive overlaps. The tile above and the
+ * A mosaic does not only produce consecutive overlaps. The tile above and the
  * tile to the left of a given frame both overlap it, and each is an independent
  * measurement of where it belongs. Chaining uses one and throws the rest away.
  *
@@ -44,7 +44,7 @@ data class Constraint(
  *
  * It is a relaxation rather than a true bundle adjustment -- there is no joint
  * non-linear solve -- but it addresses the same error and needs no optimiser.
- * For a sweep of a few dozen tiles the difference does not show.
+ * For a mosaic of a few dozen tiles the difference does not show.
  *
  * ### Why one tile is held still
  *
@@ -55,7 +55,7 @@ data class Constraint(
  */
 object MosaicRefiner {
 
-    /** Enough to converge on a sweep of this size; more changes nothing. */
+    /** Enough to converge on a mosaic of this size; more changes nothing. */
     const val DEFAULT_ITERATIONS = 12
 
     /**

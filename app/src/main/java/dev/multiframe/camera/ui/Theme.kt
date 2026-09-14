@@ -75,9 +75,9 @@ object Ink {
      *  * [Faint] is behind a graphic that carries its own contrast, where a
      *    darker ground would fight the photograph for no gain.
      *
-     * There was a third, `Dialogue`, at 0xAA. It was the sweep's ground, and
+     * There was a third, `Dialogue`, at 0xAA. It was the mosaic's ground, and
      * 0xAA of black over a sunlit street is not a ground -- the numbers were
-     * competing with the photograph they were reporting on. The sweep now uses
+     * competing with the photograph they were reporting on. The mosaic now uses
      * [Panel], the same surface as the manual controls, because it is the same
      * kind of thing: something the app puts in front of you deliberately.
      */
@@ -117,7 +117,7 @@ object Ink {
     /**
      * Semantic colours for states outside the viewfinder. These never appear
      * on the photograph during normal operation. [Confirm] appears in the
-     * sweep reticle guidance; [Danger] appears in gallery delete confirmation.
+     * mosaic reticle guidance; [Danger] appears in gallery delete confirmation.
      */
     val Confirm = Color(0xFF5BC87A)
     val Danger = Color(0xFFE85B5B)
@@ -149,7 +149,7 @@ object Type {
         color = Ink.Amber,
     )
 
-    /** Prominent reading: tile count during sweep, large zoom indicator. */
+    /** Prominent reading: tile count during mosaic, large zoom indicator. */
     val GaugeLarge = TextStyle(
         fontSize = 26.sp,
         fontFamily = FontFamily.Monospace,
@@ -201,7 +201,7 @@ object Type {
         color = Ink.Bone,
     )
 
-    /** Guidance text during sweep: "PAN SLOWLY". Uppercase by convention. */
+    /** Guidance text during mosaic: "PAN SLOWLY". Uppercase by convention. */
     val Instruction = TextStyle(
         fontSize = 10.sp,
         fontWeight = FontWeight.Medium,
@@ -305,11 +305,11 @@ object Haptics {
     fun segment(view: View) =
         view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK)
 
-    /** Sweep tile rejected, invalid action, error. */
+    /** Mosaic tile rejected, invalid action, error. */
     fun reject(view: View) =
         view.performHapticFeedback(HapticFeedbackConstants.REJECT)
 
-    /** Sweep tile locked, gallery delete confirmed. */
+    /** Mosaic tile locked, gallery delete confirmed. */
     fun confirm(view: View) =
         view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
 }

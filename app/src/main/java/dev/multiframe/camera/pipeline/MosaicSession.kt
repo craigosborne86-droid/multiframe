@@ -6,7 +6,7 @@ import android.util.Log
 
 private const val TAG = "Multiframe"
 
-/** How a sweep is going, for the capture guide to draw. */
+/** How a mosaic is going, for the capture guide to draw. */
 data class MosaicProgress(
     val placed: Int,
     val planned: Int,
@@ -18,17 +18,17 @@ data class MosaicProgress(
 
     companion object {
         /**
-         * Coverage at which a sweep is called finished.
+         * Coverage at which a mosaic is called finished.
          *
          * Not 1.0: the canvas corners are reached only by tiles that hang off
-         * the edge, and holding out for them means a sweep that never ends.
+         * the edge, and holding out for them means a mosaic that never ends.
          */
         const val COMPLETE_COVERAGE = 0.90f
     }
 }
 
 /**
- * One telephoto sweep, from the first frame to the saved image.
+ * One telephoto mosaic, from the first frame to the saved image.
  *
  * Holds the three pieces together: the assembler decides where a frame belongs,
  * the canvas is what it is drawn onto, and the plan says how much there is to
@@ -41,6 +41,14 @@ class MosaicSession private constructor(
     val plan: MosaicPlan,
     private val canvas: MosaicCanvas,
     private val assembler: MosaicAssembler,
+    /**
+     * The clockwise turn the canvas needs to be upright, for the file's
+     * orientation tag. The tiles are developed in the sensor's orientation
+     * and composited as they are -- turning a canvas this size would be a
+     * second copy of it -- so the first field test's mosaic, shot upright,
+     * arrived in the gallery on its side.
+     */
+    private val rotationDegrees: Int,
 ) : AutoCloseable {
 
     private var rejected = 0
@@ -62,7 +70,7 @@ class MosaicSession private constructor(
      * Read from each burst's own result, the white balance drifted between
      * tiles as the auto algorithm saw more or less sky, and the seams were
      * colour seams that no blend could hide because the tiles genuinely
-     * differed. The sweep locks exposure for the same reason; this locks
+     * differed. The mosaic locks exposure for the same reason; this locks
      * colour and shading beside it.
      */
     var color: ColorProfile? = null
@@ -81,7 +89,7 @@ class MosaicSession private constructor(
      * The develop gain every tile is rendered with, and the exposure it was
      * measured at, both fixed by the anchor.
      *
-     * The stream locks the sensor's exposure for the sweep, so the frames
+     * The stream locks the sensor's exposure for the mosaic, so the frames
      * should agree already; the normalisation is what holds if they do not.
      * A tile whose ISO times exposure came out at some other product than
      * the anchor's is scaled by the ratio, so the developed tiles sit on one
@@ -102,14 +110,23 @@ class MosaicSession private constructor(
     fun gainFor(isoTimesExposureNs: Double): Float =
         normalisedGain(developGain, anchorExposureProduct, isoTimesExposureNs)
 
-    // --- the guided sweep --------------------------------------------------
+    // --- the guided mosaic --------------------------------------------------
 
     /** Makes [proxy] the origin. See [MosaicAssembler.anchor]. */
     fun anchor(proxy: Plane): Placement = assembler.anchor(proxy)
 
-    /** Where a frame is, or null when nothing placed can see it. Pure. */
-    fun locate(proxy: Plane, proxyScale: Float): MosaicAssembler.Located? =
-        if (closed) null else assembler.locate(proxy, proxyScale)
+    /**
+     * Where a frame is, or null when nothing placed can see it. Pure.
+     *
+     * [maxCandidates] bounds how many placed frames it is registered against:
+     * the guidance tracking ten times a second wants the newest and its
+     * nearest neighbour, a tile being placed wants every neighbour it has.
+     */
+    fun locate(proxy: Plane, proxyScale: Float, maxCandidates: Int = Int.MAX_VALUE): MosaicAssembler.Located? =
+        if (closed) null else assembler.locate(proxy, proxyScale, maxCandidates)
+
+    /** Why the last [locate] failed, for the log. */
+    val lastLocateFailure: String? get() = assembler.lastFailure
 
     /**
      * Records a captured tile at its located transform and draws it.
@@ -128,7 +145,7 @@ class MosaicSession private constructor(
         return if (composite(tile, placement)) placement else null
     }
 
-    /** Coverage as a grid, for drawing the sweep guide. */
+    /** Coverage as a grid, for drawing the mosaic guide. */
     fun coverageGrid(): Array<BooleanArray> = assembler.coverageGrid()
 
     val canvasWidth: Int get() = canvas.width
@@ -158,8 +175,8 @@ class MosaicSession private constructor(
      * Decides where a frame belongs without drawing it.
      *
      * Separate from compositing because developing a full-resolution tile costs
-     * around half a second, and most frames a sweep produces are rejected.
-     * Paying that price before finding out would make a sweep unusable.
+     * around half a second, and most frames a mosaic produces are rejected.
+     * Paying that price before finding out would make a mosaic unusable.
      */
     fun evaluate(proxy: Plane, proxyScale: Float): OfferResult {
         if (closed) return OfferResult.Rejected(RejectionReason.OUT_OF_BOUNDS)
@@ -236,7 +253,7 @@ class MosaicSession private constructor(
      * Exposure and ISO are left out entirely. The tiles were taken under
      * whatever the meter decided at the time, so there is no single honest
      * number to record -- and this module's rule is no tag rather than a wrong
-     * one. Locking exposure across the sweep is what would earn them.
+     * one. Locking exposure across the mosaic is what would earn them.
      */
     private fun describe() = ExifWriter.from(
         result = null,
@@ -244,6 +261,7 @@ class MosaicSession private constructor(
         lens = plan.targetLens,
         frames = assembler.composited.size,
         kind = CaptureKind.MOSAIC,
+        rotationDegrees = rotationDegrees,
     )
 
     override fun close() {
@@ -279,11 +297,11 @@ class MosaicSession private constructor(
         val FEATHERS: FloatArray get() = MosaicCanvas.BLEND_FEATHERS
 
         /**
-         * Starts a sweep, or returns null when the canvas cannot be allocated.
+         * Starts a mosaic, or returns null when the canvas cannot be allocated.
          *
          * Null is recoverable: the caller can re-plan against a smaller cap.
          */
-        fun start(plan: MosaicPlan, tileWidth: Int, tileHeight: Int): MosaicSession? {
+        fun start(plan: MosaicPlan, tileWidth: Int, tileHeight: Int, rotationDegrees: Int = 0): MosaicSession? {
             val canvas = MosaicCanvas.create(plan) ?: return null
             Log.i(TAG, "mosaic session: $plan")
             return MosaicSession(
@@ -296,6 +314,7 @@ class MosaicSession private constructor(
                     tileHeight = tileHeight,
                     tileScale = plan.tileScale,
                 ),
+                rotationDegrees,
             )
         }
     }

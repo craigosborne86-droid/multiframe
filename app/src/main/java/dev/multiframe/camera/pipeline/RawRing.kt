@@ -185,6 +185,18 @@ class RawRing private constructor(
         return nLumaNewest(handle, out, width, height, black, profile.whiteLevel)
     }
 
+    /**
+     * A box-averaged luma view of the newest frame for tracking, into a
+     * reusable array, and the frame's timestamp -- or -1 when the ring holds
+     * nothing. See the native TrackingLumaNewest for how it differs from
+     * [lumaNewest].
+     */
+    fun trackingLumaNewest(out: ByteArray, width: Int, height: Int, profile: SensorProfile): Long {
+        if (closed) return -1L
+        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        return nTrackingLumaNewest(handle, out, width, height, black, profile.whiteLevel)
+    }
+
     fun resetStats() {
         if (!closed) nResetStats(handle)
     }
@@ -216,6 +228,9 @@ class RawRing private constructor(
     private external fun nResetStats(h: Long)
     private external fun nLockedCount(h: Long): Int
     private external fun nReadyCount(h: Long): Int
+    private external fun nTrackingLumaNewest(
+        h: Long, out: ByteArray, width: Int, height: Int, black: IntArray, white: Int,
+    ): Long
     private external fun nLumaNewest(
         h: Long, out: ByteArray, outWidth: Int, outHeight: Int,
         black: IntArray, white: Int,
@@ -226,6 +241,24 @@ class RawRing private constructor(
     ): Boolean
 
     companion object {
+        /**
+         * The tracking view of a frame the caller holds -- a locked slot's
+         * buffer -- through the same sampling as [trackingLumaNewest], so the
+         * two register at one scale.
+         */
+        fun trackingLumaOf(
+            buffer: java.nio.ByteBuffer, width: Int, height: Int, strideBytes: Int,
+            out: ByteArray, outWidth: Int, outHeight: Int, profile: SensorProfile,
+        ): Boolean {
+            val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+            return nTrackingLumaOf(buffer, width, height, strideBytes, out, outWidth, outHeight, black, profile.whiteLevel)
+        }
+
+        @JvmStatic
+        private external fun nTrackingLumaOf(
+            buffer: java.nio.ByteBuffer, width: Int, height: Int, strideBytes: Int,
+            out: ByteArray, outWidth: Int, outHeight: Int, black: IntArray, white: Int,
+        ): Boolean
         /**
          * Allocates a pool of [capacity] frames, backing off to smaller rings if
          * the mapping fails rather than giving up on ZSL entirely.

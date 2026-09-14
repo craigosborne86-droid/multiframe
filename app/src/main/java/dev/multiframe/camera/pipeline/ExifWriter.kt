@@ -19,7 +19,7 @@ private const val TAG = "Multiframe"
  *
  * Worth distinguishing because the two are opposite trades: a merge spends
  * frames on signal-to-noise at one framing, a mosaic spends them on resolution
- * across many. Calling a sweep's tiles "merged" would describe the wrong
+ * across many. Calling a mosaic's tiles "merged" would describe the wrong
  * photograph.
  */
 enum class CaptureKind { MERGE, MOSAIC, SUPER_RES }

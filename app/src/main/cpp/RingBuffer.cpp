@@ -358,6 +358,83 @@ bool RawRing::LumaNewest(uint8_t* out, int outWidth, int outHeight,
     return true;
 }
 
+/**
+ * The box-averaged luma of one raw frame at [width] x [height] (in
+ * pixels, row stride [strideBytes]) into [out] at [outWidth] x [outHeight].
+ * Shared by the ring's newest-frame view and the free-standing one a locked
+ * slot is read through, so a tracked frame and a captured frame's reference
+ * go through one sampling and register at one scale.
+ */
+void blockMeanLuma(const uint8_t* frame, int width, int height, int strideBytes,
+                   uint8_t* out, int outWidth, int outHeight, const int* black, int white) {
+    const int lo = std::min(std::min(black[0], black[1]), std::min(black[2], black[3]));
+    const float range = static_cast<float>(std::max(1, white - lo));
+    auto at = [&](int x, int y) -> int {
+        const uint8_t* p = frame + static_cast<size_t>(y) * strideBytes + static_cast<size_t>(x) * 2;
+        return p[0] | (p[1] << 8);
+    };
+
+    // Cells (2x2 CFA blocks) per output pixel, each axis.
+    const int cellsX = width / 2;
+    const int cellsY = height / 2;
+    const int blockW = std::max(1, cellsX / outWidth);
+    const int blockH = std::max(1, cellsY / outHeight);
+    // Every second cell of a large block: the mean of a quarter of the cells
+    // is as good a downsample as the mean of all of them for tracking, and
+    // it reads a quarter of the frame.
+    const int stepX = blockW >= 4 ? 2 : 1;
+    const int stepY = blockH >= 4 ? 2 : 1;
+
+    for (int oy = 0; oy < outHeight; ++oy) {
+        const int cy0 = (oy * cellsY) / outHeight;
+        const int cy1 = std::min(cellsY, cy0 + blockH);
+        for (int ox = 0; ox < outWidth; ++ox) {
+            const int cx0 = (ox * cellsX) / outWidth;
+            const int cx1 = std::min(cellsX, cx0 + blockW);
+            int64_t sum = 0;
+            int count = 0;
+            for (int cy = cy0; cy < cy1; cy += stepY) {
+                const int y = cy * 2;
+                for (int cx = cx0; cx < cx1; cx += stepX) {
+                    const int x = cx * 2;
+                    sum += at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1);
+                    count += 4;
+                }
+            }
+            if (count == 0) {
+                out[static_cast<size_t>(oy) * outWidth + ox] = 0;
+                continue;
+            }
+            const float mean = static_cast<float>(sum) / count - static_cast<float>(lo);
+            const float norm = std::clamp(mean / range, 0.0f, 1.0f);
+            out[static_cast<size_t>(oy) * outWidth + ox] = static_cast<uint8_t>(norm * 255.0f);
+        }
+    }
+}
+
+bool RawRing::TrackingLumaNewest(uint8_t* out, int outWidth, int outHeight,
+                                 const int* black, int white, int64_t* timestampNs) const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (base_ == nullptr || out == nullptr || outWidth <= 0 || outHeight <= 0) return false;
+
+    int newest = -1;
+    int64_t newestSequence = -1;
+    for (int i = 0; i < capacity_; ++i) {
+        const Slot& s = slots_[static_cast<size_t>(i)];
+        if (s.state != SlotState::kReady) continue;
+        if (s.sequence > newestSequence) {
+            newestSequence = s.sequence;
+            newest = i;
+        }
+    }
+    if (newest < 0) return false;
+    if (timestampNs != nullptr) *timestampNs = slots_[static_cast<size_t>(newest)].timestampNs;
+
+    blockMeanLuma(base_ + static_cast<size_t>(newest) * slotBytes_, width_, height_, width_ * 2,
+                  out, outWidth, outHeight, black, white);
+    return true;
+}
+
 RingStats RawRing::stats() const {
     std::lock_guard<std::mutex> guard(mutex_);
     return stats_;
@@ -536,6 +613,50 @@ Java_dev_multiframe_camera_pipeline_RawRing_nLumaNewest(
     std::vector<uint8_t> luma(static_cast<size_t>(needed));
     if (!ring->LumaNewest(luma.data(), outWidth, outHeight, black, white)) return JNI_FALSE;
     env->SetByteArrayRegion(out, 0, needed, reinterpret_cast<const jbyte*>(luma.data()));
+    return JNI_TRUE;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_multiframe_camera_pipeline_RawRing_nTrackingLumaNewest(
+        JNIEnv* env, jobject, jlong handle, jbyteArray out,
+        jint outWidth, jint outHeight, jintArray jblack, jint white) {
+    RawRing* ring = ringOf(handle);
+    if (ring == nullptr) return -1;
+    const jsize needed = outWidth * outHeight;
+    if (needed <= 0 || env->GetArrayLength(out) < needed) return -1;
+
+    int black[4];
+    env->GetIntArrayRegion(jblack, 0, 4, black);
+
+    // Straight into the caller's array: the array is reused poll after poll
+    // and pinning it costs nothing next to the read of the frame.
+    jboolean copy = JNI_FALSE;
+    auto* dst = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(out, &copy));
+    if (dst == nullptr) return -1;
+    int64_t timestamp = -1;
+    const bool ok = ring->TrackingLumaNewest(reinterpret_cast<uint8_t*>(dst), outWidth, outHeight,
+                                             black, white, &timestamp);
+    env->ReleasePrimitiveArrayCritical(out, dst, 0);
+    return ok ? static_cast<jlong>(timestamp) : -1;
+}
+
+/** The same view of a frame the caller holds -- a locked slot's buffer -- rather than the newest. */
+JNIEXPORT jboolean JNICALL
+Java_dev_multiframe_camera_pipeline_RawRing_nTrackingLumaOf(
+        JNIEnv* env, jclass, jobject buffer, jint width, jint height, jint strideBytes,
+        jbyteArray out, jint outWidth, jint outHeight, jintArray jblack, jint white) {
+    const auto* frame = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buffer));
+    if (frame == nullptr || width <= 0 || height <= 0 || strideBytes < width * 2) return JNI_FALSE;
+    const jsize needed = outWidth * outHeight;
+    if (needed <= 0 || env->GetArrayLength(out) < needed) return JNI_FALSE;
+    int black[4];
+    env->GetIntArrayRegion(jblack, 0, 4, black);
+    jboolean copy = JNI_FALSE;
+    auto* dst = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(out, &copy));
+    if (dst == nullptr) return JNI_FALSE;
+    multiframe::blockMeanLuma(frame, width, height, strideBytes, reinterpret_cast<uint8_t*>(dst),
+                  outWidth, outHeight, black, white);
+    env->ReleasePrimitiveArrayCritical(out, dst, 0);
     return JNI_TRUE;
 }
 

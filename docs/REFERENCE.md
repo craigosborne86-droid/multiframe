@@ -174,16 +174,16 @@ object Haptics {
 |---|---|---|---|
 | Shutter pressed | `onClick` on shutter button | `Haptics.shutter` | Strong confirmation: a photograph was taken |
 | Self-timer tick | Each countdown second | `Haptics.tick` | Light metronome, not distracting |
-| Mode toggle | MERGE, DCG, ZSL, A/B, GUARD changed | `Haptics.segment` | Detent feel, like a mechanical switch |
+| Mode toggle | MERGE, DCG, ZSL, A/B, GUARD, 2X, LOCAL TONE, MOSAIC 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
 | Cycle value | FRAMES, MODE, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
 | Slider at detent | ISO at round number (100, 200, ...), EV at 0 | `Haptics.tick` | Subtle stop point, not every pixel of drag |
 | Lens switch | New lens selected in strip | `Haptics.segment` | Camera is physically switching |
 | Sweep anchored | First frame taken; the dots appear | `Haptics.segment` | The sweep has begun; same detent as the lens switch that preceded it |
-| Sweep tile locked | Reticle has held on a dot; the burst is being taken | `Haptics.confirm` | "Got it" — eyes are on the subject. Fires *after* the burst is snapshotted from the ring, never before: the frames a haptic could blur are already in hand |
-| Sweep tile composited | The node's burst is on the canvas | `Haptics.tick` | Light: the hold is over, move on |
-| Sweep tile rejected | The burst could not be registered or developed | `Haptics.reject` | "Try again" — also eyes on subject; the dot flashes red for a beat |
-| Sweep pan too fast | Frame centre moved most of a tile between polls | `Haptics.reject` | Rate-limited to one per 800 ms; a fast pan is a blurred frame everywhere along it |
-| Sweep complete | Every node captured | `Haptics.confirm` | The sweep has finished itself |
+| Mosaic tile locked | Reticle has held still on a dot through the stability gate; the burst is being taken | `Haptics.confirm` | "Got it" — eyes are on the subject. Fires *after* the burst is snapshotted from the ring, never before: the frames a haptic could blur are already in hand |
+| Mosaic tile composited | The node's burst is on the canvas | `Haptics.tick` | Light: the hold is over, move on |
+| Mosaic tile rejected | The burst could not be registered or developed | `Haptics.reject` | "Try again" — also eyes on subject; the dot flashes red for a beat |
+| Mosaic pan too fast | Frame centre moved most of a tile between polls | `Haptics.reject` | Rate-limited to one per 800 ms; a fast pan is a blurred frame everywhere along it |
+| Mosaic complete | Every node captured | `Haptics.confirm` | The mosaic has finished itself |
 | Error action | Tapping a disabled control, invalid state | `Haptics.reject` | Something went wrong |
 | PRO panel open/close | Toggle PRO chip | (none) | Panel animation is sufficient feedback |
 | Gallery delete confirmed | After confirmation dialog | `Haptics.confirm` | Acknowledge destructive action |
@@ -822,6 +822,72 @@ than either ramp -- the measurement window straddles the equidistant line, so
 a third of it is the hand-off zone where the two tiles still mix; away from
 that line the detail is one tile's alone.
 
+#### 3.4.4 The Stability Gate and the Tracker
+
+**As built** (`StabilityGate.kt`, `MotionSensor.kt`, `MosaicGuide.kt`,
+`MosaicCapture.kt`), after the first field test fired every burst while the
+hand was still moving.
+
+**Still, in the sensor's numbers.** A frame is blurred by how far the image
+moves during its exposure: through `omega * t` radians at angular speed
+`omega` over exposure `t`, times the focal length in pixels
+`pixelsPerRadian = f_mm * (sensorWidthPx / sensorWidthMm)`. The gate's ceiling
+is the speed that moves the image two pixels:
+
+```
+omega_max = 2 px / (t * pixelsPerRadian)      clamped to [0.035, 0.09] rad/s
+```
+
+The camera publishes the focal length and the sensor's physical size;
+`pixelsPerRadian` on the Pixel 11 Pro's main lens comes out at 2,875 px/rad,
+so at 1/60 s the ceiling there is 0.043 rad/s (2.4°/s), and on the 110mm
+telephoto -- about four times the pixels per radian -- most exposures ask for
+less than the floor. The floor, 2°/s, is the tremor of a hand holding still
+(one to two degrees a second peak, poll to poll); it keeps a long exposure
+from asking for what a hand cannot do while still refusing the pan, which is
+five to twenty. The cap, 5°/s, is where a short exposure would otherwise
+accept a wobble the merge's alignment has to chase. A phone lying on a desk
+reads 0.003 to 0.02 rad/s peak, poll to poll, from the desk's own vibration.
+
+**Two measures, both required, every poll.** The gyroscope's *peak* speed
+since the last poll (the peak, not the mean: one frame smeared by a twitch is
+one tile smeared) against the ceiling; and the registration's own reading,
+the frame's centre moving less than 0.75% of a tile per 100 ms poll on the
+canvas, scaled to the poll interval and never more than the lock radius. The
+hold is the settle time of steady polls in a row, at least three of them,
+with the settle time stretched to cover the burst (`settleFor`): the burst
+is the ring's newest frames, so the hold *is* the frames' exposure window.
+
+**Why the old rule fired.** "Inside the radius for 250 ms, drift under a
+radius" -- with the tracker at the time polling every 300 ms, the second
+observation satisfied the clock, and 5% of a frame is a degree of arc: a hand
+arriving on a target is inside it for a quarter second at a degree a second.
+
+**The tracker, priced.** The dots are placed by registering each preview
+frame against the newest tile and its nearest neighbour. That registration
+was measured at 219 ms a poll (`ZslStreamDeviceTest.trackingIsPricedAgainstAnIdleStream`)
+and is now 25: a 320×240 box-averaged view read in place from the ring
+(`RawRing::TrackingLumaNewest`, every second CFA cell of each 12×12-cell
+block, into one reusable array); a linear-time Shi–Tomasi response
+(`FeatureMatcher.strengthMap`: gradient tensor once, sliding box sums) with
+non-maximum suppression and a floor at 2% of the frame's strongest response;
+features extracted once per frame and cached for each placed tile; a match
+that shortlists twelve candidates by a 3×3 block summary before the full
+15×15 correlation; RANSAC that stops once a model explains enough
+(`log 0.01 / log(1 - w^4)` samples, 34 at 60% inliers). The ring's counters
+show no frame dropped or delayed beside an idle stream. Where registration
+fails on a phone the gyroscope says is still (under half the ceiling), the
+last transform is held for up to thirty polls -- for drawing and for the
+hold only; a burst's own reference frame is always registered afresh and a
+burst that cannot be placed is rejected, so a held transform never places a
+tile.
+
+**The colour.** Unrelated to the gate but found by the same test: the lock
+taken before AE and AWB had converged on a fresh stream froze white balance
+at unity, and the whole mosaic was green. `ZslRawStream.controlsConverged`
+is waited on (up to 3 s) before the lock, and the anchor frame's result must
+carry `COLOR_CORRECTION_GAINS`.
+
 ### 3.5 Bilateral Grid Local Tone Mapping
 
 **As built** (`Tone.h` `BilateralGrid`, `BilateralGrid.kt` as the reference,
@@ -1192,7 +1258,7 @@ photograph is.
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt` |
 | **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `LensProfile.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |
 | **DCG calibration** | `DcgCalibration.kt`, `DcgProfiler.kt`, `DcgCalibrationStore.kt` |
-| **Mosaic** | `MosaicSession.kt`, `MosaicCapture.kt` (the guided runner), `GuidedSweep.kt` (the lock rule), `MosaicPlanner.kt` (presets, regions, nodes), `MosaicAssembler.kt` (anchor, locate, place), `MosaicCanvas.kt`, `MosaicRefiner.kt` |
+| **Mosaic** | `MosaicSession.kt`, `MosaicCapture.kt` (the guided runner), `MosaicGuide.kt` (the lock rule), `MosaicPlanner.kt` (presets, regions, nodes), `MosaicAssembler.kt` (anchor, locate, place), `MosaicCanvas.kt`, `MosaicRefiner.kt` |
 | **Memory** | `MemoryBudget.kt`, `MemoryPressure.kt` |
 | **Settings** | `AppSettings.kt`, `CaptureReadout.kt`, `RecentCapture.kt`, `CaptureLog.kt` |
 | **GPU** | `GpuCrossing.kt` (benchmark only) |
@@ -1224,7 +1290,7 @@ photograph is.
 | `ControlChips.kt` | Composable rendering of chips: `ControlRow`, `ActionStrip`, `ControlChip` |
 | `ControlsPanel.kt` | PRO panel: manual exposure, focus, WB, toggles, sliders |
 | `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation |
-| `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), the sweep map, and `SweepGuidance` -- the reticle and the dots |
+| `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), the sweep map, and `MosaicGuidance` -- the reticle and the dots |
 | `AboutSheet.kt` | About/info bottom sheet |
 
 ### Build Configuration

@@ -113,13 +113,14 @@ import dev.multiframe.camera.pipeline.MemoryPressure
 import dev.multiframe.camera.pipeline.NativeMerge
 import dev.multiframe.camera.pipeline.PressureResponse
 import dev.multiframe.camera.pipeline.DevelopParams
-import dev.multiframe.camera.pipeline.GuidedSweep
-import dev.multiframe.camera.pipeline.GuidedSweepView
+import dev.multiframe.camera.pipeline.MosaicGuide
+import dev.multiframe.camera.pipeline.MotionSensor
+import dev.multiframe.camera.pipeline.MosaicGuideView
 import dev.multiframe.camera.pipeline.MosaicCapture
 import dev.multiframe.camera.pipeline.MosaicPlanner
 import dev.multiframe.camera.pipeline.MosaicSession
-import dev.multiframe.camera.pipeline.SweepEvent
-import dev.multiframe.camera.pipeline.SweepPreset
+import dev.multiframe.camera.pipeline.MosaicEvent
+import dev.multiframe.camera.pipeline.MosaicPreset
 import dev.multiframe.camera.pipeline.ImageSaver
 import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.MemoryBudget
@@ -152,7 +153,8 @@ import dev.multiframe.camera.ui.GalleryScreen
 import dev.multiframe.camera.ui.GuideMode
 import dev.multiframe.camera.ui.Guides
 import dev.multiframe.camera.ui.Peaking
-import dev.multiframe.camera.ui.SweepGuidance
+import dev.multiframe.camera.ui.MosaicPresetPill
+import dev.multiframe.camera.ui.MosaicGuidance
 import dev.multiframe.camera.ui.ControlsPanel
 import dev.multiframe.camera.ui.ActionStrip
 import dev.multiframe.camera.ui.ControlBar
@@ -282,18 +284,26 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var focusAtMillis by remember { mutableLongStateOf(0L) }
     var digitalZoom by remember { mutableFloatStateOf(1f) }
 
-    // Telephoto mosaic: cover this framing with a longer lens's detail.
-    var sweepRequested by remember { mutableStateOf(false) }
-    var sweepView by remember { mutableStateOf<GuidedSweepView?>(null) }
-    var sweepTargetLens by remember { mutableStateOf<Lens?>(null) }
-    var sweepPreset by remember { mutableStateOf(restored.sweepPreset) }
+    // Telephoto mosaic: a grid of telephoto tiles, each held still, composed
+    // into one picture. Two stages. Armed: the capture lens is up, the outline
+    // of the picture and its nodes are on the viewfinder, the 2x2/3x3 choice is
+    // on the HUD, and nothing has been taken -- the user is composing. Running:
+    // the shutter has anchored it and the guidance is live.
+    var mosaicArmed by remember { mutableStateOf(false) }
+    var mosaicRunning by remember { mutableStateOf(false) }
+    var mosaicView by remember { mutableStateOf<MosaicGuideView?>(null) }
+    // The lens the user was on when they armed it: the framing the mosaic
+    // records when it is wider than the capture lens, and the lens to return
+    // to afterwards.
+    var mosaicReturnLens by remember { mutableStateOf<Lens?>(null) }
+    var mosaicPreset by remember { mutableStateOf(restored.mosaicPreset) }
     // The custom preset's region, as fractions of the wide frame, drawn by
-    // the user before the sweep; null until they have drawn one.
+    // the user before the mosaic; null until they have drawn one.
     var customRegion by remember { mutableStateOf<Pair<Float, Float>?>(null) }
     var drawingRegion by remember { mutableStateOf(false) }
     var regionDrag by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
     // A failed capture flashes its dot for a beat; this is the beat.
-    var sweepFlashUntil by remember { mutableLongStateOf(0L) }
+    var mosaicFlashUntil by remember { mutableLongStateOf(0L) }
 
     // Composition aids. One control cycles them rather than several toggles.
     var guides by remember {
@@ -980,53 +990,92 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    // The sweep. Waits for the stream to actually be running on the capture
+    // The plan for the armed mosaic: the preset's grid on the capture lens,
+    // with the lens the user armed it from as the framing where that is wider.
+    // Null until the stream is up on the capture lens.
+    val mosaicPlan = remember(mosaicArmed, mosaicPreset, customRegion, zslStream, lens, mosaicReturnLens) {
+        if (!mosaicArmed) null else {
+            val stream = zslStream
+            if (stream == null || stream.lensId != lens?.cameraId) null
+            else MosaicPlanner.planPreset(
+                preset = mosaicPreset,
+                target = mosaicReturnLens,
+                capture = stream.lens,
+                tileWidth = stream.config.width,
+                tileHeight = stream.config.height,
+                customRegion = customRegion,
+            )
+        }
+    }
+
+    // Armed and not yet running: the outline and the nodes as the anchor would
+    // place them, so the user sees the picture they are about to compose.
+    LaunchedEffect(mosaicArmed, mosaicRunning, mosaicPlan) {
+        if (mosaicArmed && !mosaicRunning) {
+            mosaicView = mosaicPlan?.let { MosaicCapture.armedView(it, it.captureLens.label) }
+            val stream = zslStream
+            status = when {
+                mosaicPlan == null && mosaicPreset == MosaicPreset.CUSTOM ->
+                    "draw the region from a wider lens"
+                mosaicPlan == null -> "switching to the telephoto…"
+                stream != null -> "%s · %d tiles · aim, then press the shutter".format(
+                    mosaicPlan.captureLens.label, mosaicPlan.tileCount,
+                )
+                else -> "…"
+            }
+        } else if (!mosaicArmed && !mosaicRunning) {
+            mosaicView = null
+        }
+    }
+
+    // The mosaic. Waits for the stream to actually be running on the capture
     // lens before starting, because switching lens tears the session down and
     // builds a new one, and a mosaic assembled across that boundary would mix
     // two focal lengths.
-    LaunchedEffect(sweepRequested, zslStream, lens) {
-        if (!sweepRequested) return@LaunchedEffect
+    LaunchedEffect(mosaicRunning, zslStream, lens) {
+        if (!mosaicRunning) return@LaunchedEffect
         val stream = zslStream ?: return@LaunchedEffect
         val c = caps ?: return@LaunchedEffect
-        val target = sweepTargetLens ?: return@LaunchedEffect
         if (stream.lensId != lens?.cameraId) return@LaunchedEffect
 
         val plan = MosaicPlanner.planPreset(
-            preset = sweepPreset,
-            target = target,
+            preset = mosaicPreset,
+            target = mosaicReturnLens,
             capture = stream.lens,
             tileWidth = stream.config.width,
             tileHeight = stream.config.height,
             customRegion = customRegion,
         )
         if (plan == null) {
-            status = "no useful mosaic for this pair of lenses"
-            sweepRequested = false
+            status = "no mosaic to take from here"
+            mosaicRunning = false
             return@LaunchedEffect
         }
 
-        val session = MosaicSession.start(plan, stream.config.width, stream.config.height)
+        val rot = c.let { orientation.captureRotation(it.sensorOrientation) }
+        val session = MosaicSession.start(plan, stream.config.width, stream.config.height, rot)
         if (session == null) {
             status = "not enough memory for a %.0f MP canvas".format(plan.megapixels)
-            sweepRequested = false
+            mosaicRunning = false
             return@LaunchedEffect
         }
 
         busy = true
-        status = "aim at the centre of the picture to begin"
-        val sweep = GuidedSweep(plan)
-        val result = withContext(Dispatchers.Default) {
+        status = "hold still to anchor"
+        val guide = MosaicGuide(plan)
+        val result = withContext(MosaicCapture.dispatcher) {
             session.use {
                 MosaicCapture.run(
                     context = context,
                     stream = stream,
                     session = it,
-                    sweep = sweep,
+                    guide = guide,
                     settings = settings,
                     caps = c,
                     frames = burstFrames,
                     lensProfile = lensProfiles[stream.lensId],
-                    onView = { v -> sweepView = v },
+                    motion = MotionSensor(context),
+                    onView = { v -> mosaicView = v },
                     onEvent = { event ->
                         // Haptics from the main thread, and only after the
                         // frames a haptic could blur have already been taken:
@@ -1034,29 +1083,29 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         // ring, not before.
                         scope.launch {
                             when (event) {
-                                is SweepEvent.Anchored -> {
+                                is MosaicEvent.Anchored -> {
                                     Haptics.segment(view)
                                     status = "pan the reticle onto each dot and hold"
                                 }
-                                is SweepEvent.Locked -> Haptics.confirm(view)
-                                is SweepEvent.Captured -> Haptics.tick(view)
-                                is SweepEvent.Rejected -> {
+                                is MosaicEvent.Locked -> Haptics.confirm(view)
+                                is MosaicEvent.Captured -> Haptics.tick(view)
+                                is MosaicEvent.Rejected -> {
                                     Haptics.reject(view)
-                                    sweepFlashUntil = System.currentTimeMillis() + 600
+                                    mosaicFlashUntil = System.currentTimeMillis() + 600
                                     status = "tile ${event.node.index + 1}: ${event.reason}"
                                 }
-                                is SweepEvent.TooFast -> {
+                                is MosaicEvent.TooFast -> {
                                     val now = System.currentTimeMillis()
-                                    if (now > sweepFlashUntil) {
+                                    if (now > mosaicFlashUntil) {
                                         Haptics.reject(view)
-                                        sweepFlashUntil = now + 800
+                                        mosaicFlashUntil = now + 800
                                     }
                                 }
-                                is SweepEvent.Complete -> Haptics.confirm(view)
+                                is MosaicEvent.Complete -> Haptics.confirm(view)
                             }
                         }
                     },
-                    shouldContinue = { sweepRequested },
+                    shouldContinue = { mosaicRunning },
                 )
             }
         }
@@ -1064,11 +1113,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         status = "%s  %.0f MP  %.1fs".format(
             result.message, result.megapixels, result.elapsedMillis / 1000.0,
         )
-        sweepView = null
-        sweepRequested = false
+        mosaicView = null
+        mosaicRunning = false
+        mosaicArmed = false
         // Back to the framing the user was composing with.
-        lens = target
-        sweepTargetLens = null
+        mosaicReturnLens?.let { lens = it }
+        mosaicReturnLens = null
         busy = false
     }
 
@@ -1076,7 +1126,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(
         settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, captureMode,
-        timerSeconds, guides, dcgEnabled, superRes, sweepPreset, localTone, outputFormat,
+        timerSeconds, guides, dcgEnabled, superRes, mosaicPreset, localTone, outputFormat,
     ) {
         AppSettings.save(
             context,
@@ -1092,7 +1142,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 guides = guides.name,
                 dcgEnabled = dcgEnabled,
                 superRes = superRes,
-                sweepPreset = sweepPreset,
+                mosaicPreset = mosaicPreset,
                 localTone = localTone,
                 outputFormat = outputFormat,
             ),
@@ -1270,15 +1320,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 ),
         )
 
-        // Only where a longer lens exists to sweep with.
-        val sweepPlan = remember(lenses, lens, zslStream) {
-            val here = lens
-            val stream = zslStream
-            if (here == null || stream == null) null
-            else MosaicPlanner.bestPairing(
-                lenses, here, stream.config.width, stream.config.height,
-            )
-        }
+        // The lens the mosaic shoots with: the longest that delivers raw. On
+        // any lens, including that one -- the first version offered the mode
+        // only from a wider lens and hid it on the telephoto, which is the
+        // lens it uses.
+        val mosaicCaptureLens = remember(lenses) { MosaicPlanner.captureLens(lenses) }
 
         // What the controls are is decided in one place and what they do in
         // another, joined by an id. That is what lets `ControlBar` be plain
@@ -1313,8 +1359,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // on raw the control never appears and nothing changes.
             zslOffered = zslDecision is ZslDecision.Stream,
             zslOn = zslWanted,
-            sweepOffered = sweepPlan != null,
-            sweepRunning = sweepRequested,
+            mosaicOffered = mosaicCaptureLens != null && zslStream != null,
+            mosaicArmed = mosaicArmed && !mosaicRunning,
+            mosaicRunning = mosaicRunning,
             rawBurstOffered = rawCapture != null && characteristics != null,
             dngOffered = rawCapture != null,
         )
@@ -1348,24 +1395,36 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 ControlBar.PRO -> showControls = !showControls
                 ControlBar.ABOUT -> showAbout = true
 
-                ControlBar.SWEEP -> {
-                    if (sweepRequested) {
-                        sweepRequested = false
+                ControlBar.MOSAIC -> {
+                    val capture = mosaicCaptureLens
+                    if (mosaicRunning) {
+                        // Stop, keeping what was taken.
+                        mosaicRunning = false
+                    } else if (mosaicArmed) {
+                        // Disarm: back to the lens the user came from.
+                        mosaicArmed = false
+                        mosaicReturnLens?.let { lens = it }
+                        mosaicReturnLens = null
+                        status = "mosaic off"
                     } else if (drawingRegion) {
                         drawingRegion = false
                         status = "region cancelled"
-                    } else if (sweepPlan != null) {
-                        if (sweepPreset == SweepPreset.CUSTOM && customRegion == null) {
+                    } else if (capture != null) {
+                        val here = lens
+                        val wider = here != null && here.equivalent35mm < capture.equivalent35mm
+                        if (mosaicPreset == MosaicPreset.CUSTOM && customRegion == null && wider) {
                             // The custom grid is sized from a rectangle the
-                            // user draws on the wide frame; the sweep starts
-                            // when they lift their finger.
+                            // user draws on the wide frame; it arms when they
+                            // lift their finger.
                             drawingRegion = true
-                            status = "drag a box over what the sweep should cover"
+                            status = "drag a box over what the mosaic should cover"
                         } else {
-                            sweepTargetLens = lens
-                            lens = sweepPlan.captureLens
-                            sweepRequested = true
-                            status = "switching to ${sweepPlan.captureLens.label}…"
+                            mosaicReturnLens = here
+                            mosaicArmed = true
+                            if (here?.cameraId != capture.cameraId) {
+                                lens = capture
+                                status = "switching to ${capture.label}…"
+                            }
                         }
                     }
                 }
@@ -1567,13 +1626,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         // a property of the ZSL burst.
                         superRes = if (caps?.supportsSuperRes == true && zslStream != null) superRes else null,
                         onSuperRes = { if (!busy) superRes = it },
-                        // Only where there is a longer lens to sweep with.
-                        sweepPreset = if (sweepPlan != null) sweepPreset else null,
-                        onSweepPreset = {
+                        // Only where there is a telephoto to shoot the tiles with.
+                        mosaicPreset = if (mosaicCaptureLens != null) mosaicPreset else null,
+                        onMosaicPreset = {
                             if (!busy) {
-                                sweepPreset = it
+                                mosaicPreset = it
                                 // A new preset means a new region to draw.
-                                if (it == SweepPreset.CUSTOM) customRegion = null
+                                if (it == MosaicPreset.CUSTOM) customRegion = null
                             }
                         },
                         localTone = localTone,
@@ -1596,7 +1655,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             abMode = false
                             dcgEnabled = fresh.dcgEnabled
                             superRes = fresh.superRes
-                            sweepPreset = fresh.sweepPreset
+                            mosaicPreset = fresh.mosaicPreset
                             customRegion = null
                             localTone = fresh.localTone
                             outputFormat = fresh.outputFormat
@@ -1659,6 +1718,19 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 return@ShutterButton
                             }
                             if (busy) return@ShutterButton
+
+                            // An armed mosaic: the shutter anchors it where the
+                            // reticle points and the guidance takes over. The
+                            // stream has to be on the capture lens already.
+                            if (mosaicArmed) {
+                                if (mosaicPlan == null) {
+                                    Haptics.reject(view)
+                                    return@ShutterButton
+                                }
+                                Haptics.shutter(view)
+                                mosaicRunning = true
+                                return@ShutterButton
+                            }
 
                             // Fires here, at the press, and nowhere later: the
                             // burst has not started yet, so the motor is still
@@ -1819,15 +1891,16 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 .padding(end = 16.dp),
         )
 
-        sweepView?.let { v ->
+        mosaicView?.let { v ->
             val orientation = caps?.sensorOrientation ?: 90
-            // The dots and the reticle, over the preview and only the
-            // preview: a dot on a letterbox bar would point at nothing.
+            // The outline, the dots and the reticle, over the preview and
+            // only the preview: a dot on a letterbox bar would point at
+            // nothing.
             previewBounds?.let { b ->
                 val density = LocalDensity.current
                 val boundsW = with(density) { b.width.toDp() }
                 val boundsH = with(density) { b.height.toDp() }
-                SweepGuidance(
+                MosaicGuidance(
                     view = v,
                     sensorOrientation = orientation,
                     modifier = Modifier
@@ -1835,37 +1908,82 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         .size(boundsW, boundsH),
                 )
             }
-            // The count, small and out of the way at the top. The number is
-            // the reading and takes the accent; the noun is not.
-            Row(
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .statusBarsPadding()
-                    .padding(top = 72.dp)
-                    .background(Ink.Readout, RoundedCornerShape(6.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.Bottom,
+                    .padding(top = 72.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(text = "${v.captured}", style = Type.GaugeLarge)
-                Text(
-                    text = " of ${v.total} nodes",
-                    style = Type.Control,
-                    color = Ink.Muted,
-                    modifier = Modifier.padding(bottom = 3.dp),
-                )
-                if (!v.located) {
+                // The count, small and out of the way at the top, with the
+                // lens doing the taking. The number is the reading and takes
+                // the accent; the nouns are not.
+                Row(
+                    modifier = Modifier
+                        .background(Ink.Readout, RoundedCornerShape(6.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.Bottom,
+                ) {
                     Text(
-                        text = "  ·  FINDING",
+                        text = v.captureLensLabel.uppercase(),
                         style = Type.Label,
                         color = Ink.Muted,
+                        modifier = Modifier.padding(bottom = 3.dp, end = 10.dp),
+                    )
+                    Text(text = "${v.captured}", style = Type.GaugeLarge)
+                    Text(
+                        text = " of ${v.total} nodes",
+                        style = Type.Control,
+                        color = Ink.Muted,
                         modifier = Modifier.padding(bottom = 3.dp),
+                    )
+                    if (v.anchored && !v.located) {
+                        Text(
+                            text = "  ·  FINDING",
+                            style = Type.Label,
+                            color = Ink.Muted,
+                            modifier = Modifier.padding(bottom = 3.dp),
+                        )
+                    }
+                }
+                // The grid, chosen on the HUD while armed, where the outline
+                // it changes is in view. Not while running: the nodes are
+                // laid out and some are taken.
+                if (mosaicArmed && !mosaicRunning) {
+                    val wider = mosaicReturnLens?.let { r ->
+                        mosaicCaptureLens?.let { c -> r.equivalent35mm < c.equivalent35mm }
+                    } ?: false
+                    MosaicPresetPill(
+                        preset = mosaicPreset,
+                        customOffered = wider,
+                        onPreset = {
+                            Haptics.segment(view)
+                            mosaicPreset = it
+                            if (it == MosaicPreset.CUSTOM) customRegion = null
+                        },
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                // The hold's hint: what the gate is waiting for.
+                v.unsteady?.let { why ->
+                    Text(
+                        text = when (why) {
+                            MosaicGuide.Unsteady.TURNING -> "HOLD STILL"
+                            MosaicGuide.Unsteady.DRIFTING -> "HOLD STEADY ON THE DOT"
+                        },
+                        style = Type.Instruction,
+                        color = Ink.Muted,
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .background(Ink.Readout, RoundedCornerShape(6.dp))
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
                     )
                 }
             }
         }
 
         // The custom region, being drawn: a rectangle from the first touch to
-        // the finger, in the guide's own faint ink, and the sweep begins when
+        // the finger, in the guide's own faint ink, and the mosaic begins when
         // the finger lifts.
         if (drawingRegion) {
             val bounds = previewBounds
@@ -1894,11 +2012,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                     if (region.first > 0.05f && region.second > 0.05f) {
                                         customRegion = region
                                         drawingRegion = false
-                                        sweepPlan?.let { plan ->
-                                            sweepTargetLens = lens
-                                            lens = plan.captureLens
-                                            sweepRequested = true
-                                            status = "switching to ${plan.captureLens.label}…"
+                                        mosaicCaptureLens?.let { capture ->
+                                            mosaicReturnLens = lens
+                                            mosaicArmed = true
+                                            if (lens?.cameraId != capture.cameraId) {
+                                                lens = capture
+                                                status = "switching to ${capture.label}…"
+                                            }
                                         }
                                     } else {
                                         status = "too small a box; drag a larger one"

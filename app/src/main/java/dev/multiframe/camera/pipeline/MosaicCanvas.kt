@@ -86,16 +86,16 @@ class MosaicCanvas private constructor(
      * image size is allocated.
      *
      * Returns what was actually written, which is the covered bounding box
-     * rather than the canvas: a hand-held sweep does not cover a rectangle, and
+     * rather than the canvas: a hand-held mosaic does not cover a rectangle, and
      * JPEG has no alpha to keep the rest honest.
      *
-     * The canvas is finished afterwards. Saving is the last thing a sweep does.
+     * The canvas is finished afterwards. Saving is the last thing a mosaic does.
      */
     fun compressTo(fd: Int, quality: Int = QUALITY): Written? {
         if (closed || consumed) return null
         val packed = nCompressTo(handle, fd, quality)
         // Zero means nothing had been swept, and the canvas was never touched;
-        // a sweep that has not covered anything yet is not a finished one.
+        // a mosaic that has not covered anything yet is not a finished one.
         consumed = packed != 0L
         if (packed <= 0L) return null
         return Written((packed ushr 32).toInt(), (packed and 0xFFFFFFFFL).toInt())

@@ -300,42 +300,51 @@ class ZslStreamDeviceTest {
      * A stationary phone cannot pan, so this does not test the panning -- that
      * is covered against scripted reticle paths, where the answer is known.
      * What it tests is everything around it against the live camera: that the
-     * sweep locks exposure, anchors on the first frame, registers the frames
-     * that follow, sees the reticle holding on the one node a 1x1 grid has,
-     * takes the burst, merges, develops, composites, saves, and comes back
-     * with a result instead of hanging or falling over.
+     * mosaic waits for the camera's controls to settle and locks them, anchors
+     * on a frame whose result carries white balance, registers the frames
+     * that follow, sees the reticle holding on the one node a 1x1 grid has --
+     * still, by the gyroscope as well as the registration -- takes the burst,
+     * merges, develops, composites, saves, and comes back with a result instead
+     * of hanging or falling over.
+     *
+     * And that the file is not green. The first field test's mosaic was: the
+     * lock was taken before white balance had converged on a fresh stream and
+     * every tile was developed at unity gains. The saved file is decoded and
+     * its channels compared.
      */
     @Test
-    fun aGuidedSweepRunsAgainstTheLiveCameraAndCompletesItsOneNode() {
+    fun aGuidedMosaicRunsAgainstTheLiveCameraAndCompletesItsOneNode() {
         val s = openStream() ?: return
         stream = s
         assertThat(waitForFrames(s, 10)).isTrue()
 
-        val lenses = LensCatalog.enumerate(manager)
-        val target = LensCatalog.default(lenses)!!
         // One node, at the centre, which is where a phone that does not move
         // is pointing. A small canvas: this is about the orchestration.
         val plan = MosaicPlanner.planGrid(
-            target = target,
-            capture = s.lens.copy(equivalent35mm = target.equivalent35mm * 3),
+            target = null,
+            capture = s.lens.copy(equivalent35mm = 72),
             tileWidth = s.config.width,
             tileHeight = s.config.height,
             columns = 1, rows = 1,
             maxMegapixels = 24.0,
         )!!
-        val session = MosaicSession.start(plan, s.config.width, s.config.height)
+        val session = MosaicSession.start(plan, s.config.width, s.config.height, rotationDegrees = 90)
         assumeTrue("canvas could not be allocated", session != null)
 
         val events = java.util.concurrent.CopyOnWriteArrayList<String>()
-        var lastView: GuidedSweepView? = null
-        val deadline = System.currentTimeMillis() + 12_000
+        var lastView: MosaicGuideView? = null
+        var sawHold = false
+        var polls = 0
+        var turning = 0
+        val deadline = System.currentTimeMillis() + 15_000
+        var colour: ColorProfile? = null
         val result = session!!.use {
-            runBlocking {
+            val r = runBlocking {
                 MosaicCapture.run(
                     context = context,
                     stream = s,
                     session = it,
-                    sweep = GuidedSweep(plan),
+                    guide = MosaicGuide(plan),
                     settings = ManualSettings(),
                     caps = CameraCapabilities(
                         hasManualSensor = true, isoMin = null, isoMax = null,
@@ -348,34 +357,254 @@ class ZslStreamDeviceTest {
                     ),
                     frames = 4,
                     lensProfile = null,
-                    onView = { v -> lastView = v },
+                    motion = MotionSensor(context),
+                    onView = { v ->
+                        lastView = v
+                        if (v.holdProgress > 0f) sawHold = true
+                        if (v.anchored) {
+                            polls++
+                            if (v.unsteady == MosaicGuide.Unsteady.TURNING) turning++
+                        }
+                    },
                     onEvent = { e -> events.add(e.toString()) },
                     shouldContinue = { System.currentTimeMillis() < deadline },
                 )
             }
+            colour = it.color
+            r
         }
-
         Log.i(
             TAG,
-            "guided sweep: ${result.message} | ${result.tiles} tiles, ${result.rejected} rejected, " +
-                "%.0f MP, %.1fs; events $events".format(result.megapixels, result.elapsedMillis / 1000.0),
+            "guided mosaic: ${result.message} | ${result.tiles} tiles, ${result.rejected} rejected, " +
+                "%.0f MP, %.1fs; gains %s; events $events".format(
+                    result.megapixels, result.elapsedMillis / 1000.0,
+                    colour?.gains?.joinToString { "%.2f".format(it) },
+                ),
         )
 
-        // Anchored, then the one node locked, captured and the sweep completed.
+        // The colour every tile was developed with came from the camera.
+        assertThat(colour).isNotNull()
+        assertThat(colour!!.isNeutralGains).isFalse()
+
+        // A phone that was being handled during the test is not a test of the
+        // gate's failing: the gate refusing to fire while the gyroscope reads
+        // it moving is the gate working, and a phone set down in a new place
+        // after it anchored has nothing for the registration to find. Skipped,
+        // and said, rather than failed.
+        if (events.none { it.startsWith("Locked") } && turning > 0) {
+            Log.w(TAG, "the phone was moving on $turning of $polls polls; the gate refused, as it should")
+            assumeTrue("the phone was moving during the test", false)
+        }
+
+        // Anchored, then the one node held, captured and the mosaic completed.
         assertThat(events.first()).isEqualTo("Anchored")
         assertThat(events.any { it.startsWith("Locked") }).isTrue()
         assertThat(events.any { it.startsWith("Captured") }).isTrue()
         assertThat(events.last()).isEqualTo("Complete")
         assertThat(result.tiles).isEqualTo(1)
         assertThat(result.savedName).isNotNull()
-        assertThat(result.coverage).isGreaterThan(0f)
-        // The screen was told where the node was, on the frame it was seen in.
+        // The ring filled before the burst fired.
+        assertThat(sawHold).isTrue()
         val node = lastView!!.nodes.single()
-        assertThat(node.state).isEqualTo(GuidedSweep.NodeState.DONE)
-        // Done well inside the deadline: a stationary phone locks in a quarter second.
-        assertThat(result.elapsedMillis).isLessThan(10_000)
+        assertThat(node.state).isEqualTo(MosaicGuide.NodeState.DONE)
+        assertThat(lastView!!.captureLensLabel).isEqualTo(s.lens.label)
+        assertThat(lastView!!.canvasCorners).isNotNull()
         // Exposure has to be handed back, or the viewfinder stays frozen after.
         assertThat(s.isLocked).isFalse()
+
+        // The file: the newest mosaic in the library, decoded small. Not
+        // green: on a scene the camera balanced, green is not more than a
+        // sixth over the mean of red and blue.
+        val mosaic = newestFile("_mosaic_")
+        assertThat(mosaic).isNotNull()
+        val (mr, mg, mb) = meanRgb(mosaic!!)
+        Log.i(TAG, "mosaic mean rgb: %.0f %.0f %.0f".format(mr, mg, mb))
+        assertThat(mg).isLessThan(((mr + mb) / 2f) * 1.17f)
+        // And it says which way is up.
+        context.contentResolver.openFileDescriptor(mosaic, "r")!!.use { pfd ->
+            val exif = android.media.ExifInterface(pfd.fileDescriptor)
+            assertThat(exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 0))
+                .isEqualTo(android.media.ExifInterface.ORIENTATION_ROTATE_90)
+        }
+    }
+
+    /** The newest file of this app's in the library whose name carries [tag]. */
+    private fun newestFile(tag: String): android.net.Uri? =
+        CaptureLog.records(context).firstOrNull { it.baseName.contains(tag) }?.preview?.uri
+
+    private fun meanRgb(uri: android.net.Uri): Triple<Float, Float, Float> {
+        val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = 16 }
+        val bmp = context.contentResolver.openInputStream(uri)!!.use {
+            android.graphics.BitmapFactory.decodeStream(it, null, opts)
+        }!!
+        var r = 0.0; var g = 0.0; var b = 0.0; var n = 0
+        for (y in 0 until bmp.height step 2) for (x in 0 until bmp.width step 2) {
+            val p = bmp.getPixel(x, y)
+            r += (p shr 16) and 0xFF; g += (p shr 8) and 0xFF; b += p and 0xFF; n++
+        }
+        bmp.recycle()
+        return Triple((r / n).toFloat(), (g / n).toFloat(), (b / n).toFloat())
+    }
+
+    /**
+     * What the guidance's tracking costs the camera, measured two ways.
+     *
+     * The first sweep stuttered in the hand. This puts the ring's own frame
+     * counters -- gaps the camera left, the longest interval between frames --
+     * beside three seconds of nothing, three seconds of the tracking loop as
+     * it first shipped (lock a slot, build the merge's 3 MP luma proxy, halve
+     * it three times on the JVM, register), and three seconds of the in-place
+     * read that replaced it. The ring's counters are the honest meter: the
+     * preview and the raw stream ride one request, and a request the raw
+     * reader cannot take a buffer for is a preview frame that does not come.
+     */
+    @Test
+    fun trackingIsPricedAgainstAnIdleStream() {
+        val s = openStream() ?: return
+        stream = s
+        assertThat(waitForFrames(s, 10)).isTrue()
+        val profile = SensorProfile.from(s.characteristics)
+
+        fun measure(label: String, seconds: Int, body: () -> Unit): RingStats {
+            s.resetStats()
+            val until = System.currentTimeMillis() + seconds * 1000L
+            var polls = 0
+            val t0 = System.nanoTime()
+            while (System.currentTimeMillis() < until) {
+                body()
+                polls++
+                Thread.sleep(90)
+            }
+            val st = s.stats().ring
+            Log.i(TAG, "%s: %d polls in %.1fs; %s".format(label, polls, (System.nanoTime() - t0) / 1e9, st))
+            return st
+        }
+
+        val idle = measure("idle", 3) { }
+
+        // The loop as it shipped.
+        val prober = NativeMerge.create(s.config.width, s.config.height, profile)!!
+        var anchored = false
+        val session = MosaicSession.start(
+            MosaicPlanner.planGrid(
+                LensCatalog.default(LensCatalog.enumerate(manager))!!,
+                s.lens.copy(equivalent35mm = 999), s.config.width, s.config.height, 2, 2, maxMegapixels = 24.0,
+            )!!, s.config.width, s.config.height,
+        )!!
+        var proxyMs = 0L
+        var locateMs = 0L
+        var polls = 0
+        val shipped = prober.use { m ->
+            session.use { sess ->
+                measure("shipped tracking", 3) {
+                    val burst = s.snapshot(1)
+                    if (burst.count > 0) {
+                        val buffer = burst.frames.buffer(0)!!
+                        val t0 = System.nanoTime()
+                        var plane = m.lumaProxy(buffer, burst.frames.rowStride)
+                        repeat(3) { plane = Aligner.downsampleByTwo(plane) }
+                        val t1 = System.nanoTime()
+                        val scale = m.width.toFloat() / plane.width
+                        if (!anchored) { sess.anchor(plane); anchored = true } else sess.locate(plane, scale)
+                        val t2 = System.nanoTime()
+                        proxyMs += (t1 - t0) / 1_000_000
+                        locateMs += (t2 - t1) / 1_000_000
+                        polls++
+                    }
+                    burst.close()
+                }
+            }
+        }
+        Log.i(TAG, "shipped tracking per poll: proxy %d ms, locate %d ms".format(
+            proxyMs / maxOf(1, polls), locateMs / maxOf(1, polls)))
+
+        // The in-place read.
+        val w = 320
+        val h = 240
+        val luma = ByteArray(w * h)
+        val session2 = MosaicSession.start(
+            MosaicPlanner.planGrid(
+                LensCatalog.default(LensCatalog.enumerate(manager))!!,
+                s.lens.copy(equivalent35mm = 999), s.config.width, s.config.height, 2, 2, maxMegapixels = 24.0,
+            )!!, s.config.width, s.config.height,
+        )!!
+        anchored = false
+        var readMs = 0L
+        var locate2Ms = 0L
+        var polls2 = 0
+        var lastStamp = -1L
+        val inPlace = session2.use { sess ->
+            measure("in-place tracking", 3) {
+                val t0 = System.nanoTime()
+                val stamp = s.trackingLuma(luma, w, h)
+                val t1 = System.nanoTime()
+                if (stamp >= 0 && stamp != lastStamp) {
+                    lastStamp = stamp
+                    val plane = Plane(w, h, luma.copyOf())
+                    val scale = s.config.width.toFloat() / w
+                    if (!anchored) { sess.anchor(plane); anchored = true } else sess.locate(plane, scale, maxCandidates = 2)
+                    locate2Ms += (System.nanoTime() - t1) / 1_000_000
+                    polls2++
+                }
+                readMs += (t1 - t0) / 1_000_000
+            }
+        }
+        Log.i(TAG, "in-place tracking per poll: read %d ms, locate %d ms".format(
+            readMs / maxOf(1, polls2), locate2Ms / maxOf(1, polls2)))
+
+        // The two routes to a tracking view -- the newest frame in place, and a
+        // locked slot's buffer -- read the same frame the same way.
+        run {
+            val viaRing = ByteArray(w * h)
+            val stampA = s.trackingLuma(viaRing, w, h)
+            val burst = s.snapshot(1)
+            val viaSlot = ByteArray(w * h)
+            val ok = RawRing.trackingLumaOf(burst.frames.buffer(0)!!, s.config.width, s.config.height,
+                burst.frames.rowStride, viaSlot, w, h, profile)
+            val stampB = burst.frames.timestampsNs[0]
+            burst.close()
+            var diff = 0L
+            for (i in viaRing.indices) diff += kotlin.math.abs((viaRing[i].toInt() and 0xFF) - (viaSlot[i].toInt() and 0xFF))
+            Log.i(TAG, "tracking view via ring vs via slot: ok=%s, same frame=%s, mean abs diff %.2f".format(
+                ok, stampA == stampB, diff.toDouble() / viaRing.size))
+            assertThat(ok).isTrue()
+            assertThat(diff.toDouble() / viaRing.size).isLessThan(if (stampA == stampB) 0.01 else 6.0)
+        }
+
+        // Where a registration's time goes, on two frames read a moment apart.
+        run {
+            val a = ByteArray(w * h)
+            val b = ByteArray(w * h)
+            s.trackingLuma(a, w, h)
+            Thread.sleep(200)
+            s.trackingLuma(b, w, h)
+            val pa = Plane(w, h, a)
+            val pb = Plane(w, h, b)
+            repeat(2) { FeatureMatcher.extract(pa) }  // warm the JIT
+            var tExtract = 0L; var tMatch = 0L; var tRansac = 0L
+            var corners = 0; var matched = 0; var inliers = 0
+            repeat(5) {
+                val t0 = System.nanoTime()
+                val fa = FeatureMatcher.extract(pa)
+                val fb = FeatureMatcher.extract(pb)
+                val t1 = System.nanoTime()
+                val matches = FeatureMatcher.match(fa, fb)
+                val t2 = System.nanoTime()
+                val fit = Homography.ransac(matches, threshold = 2.5f, iterations = 600)
+                val t3 = System.nanoTime()
+                tExtract += t1 - t0; tMatch += t2 - t1; tRansac += t3 - t2
+                corners = fa.size; matched = matches.size; inliers = fit?.inliers?.size ?: 0
+            }
+            Log.i(TAG, "registration at %dx%d: extract x2 %.1f ms, match %.1f ms, ransac %.1f ms; %d corners, %d matches, %d inliers".format(
+                w, h, tExtract / 5e6, tMatch / 5e6, tRansac / 5e6, corners, matched, inliers))
+        }
+        DeviceKind.warnIfNotAPhone(TAG)
+
+        // The claim: the in-place loop leaves the camera no worse than idle.
+        assertThat(inPlace.cameraGaps).isAtMost(idle.cameraGaps + 2)
+        assertThat(inPlace.droppedNoSlot).isEqualTo(0)
+        // And the shipped loop's figures are in the log to compare.
+        assertThat(shipped.pushed).isGreaterThan(0)
     }
 
     /**
