@@ -189,9 +189,9 @@ object Haptics {
 | Slider at detent | ISO at round number (100, 200, ...), EV at 0 | `Haptics.tick` | Subtle stop point, not every pixel of drag |
 | Lens switch | New lens selected in strip | `Haptics.segment` | Camera is physically switching |
 | Super Res anchored | First frame taken; the dots appear | `Haptics.segment` | The capture has begun; same detent as the lens switch that preceded it |
-| Mosaic tile locked | Reticle has held still on a dot through the stability gate; the burst is being taken | `Haptics.confirm` | "Got it" — eyes are on the subject. Fires *after* the burst is snapshotted from the ring, never before: the frames a haptic could blur are already in hand |
-| Mosaic tile composited | The node's burst is on the canvas | `Haptics.tick` | Light: the hold is over, move on |
-| Mosaic tile rejected | The burst could not be registered or developed | `Haptics.reject` | "Try again" — also eyes on subject; the dot flashes red for a beat |
+| Super Res node taken | Reticle has held still on a dot through the stability gate; the burst is in hand and the node is done | `Haptics.confirm` | "Got it" — eyes are on the subject. Fires *after* the burst is snapshotted from the ring, never before: the frames a haptic could blur are already in hand. This is the photograph; nothing afterwards can un-take it |
+| Super Res tile placed | The node's tile is on the canvas, by its pixels or by the attitude | `Haptics.tick` | Light: the canvas caught up; which tier placed it is the log's business |
+| Super Res tile rejected | The burst could not become a tile at all: the ring was empty, the develop failed, the canvas would not take it | `Haptics.reject` | "Try again" — also eyes on subject; the dot flashes red for a beat. Never for a registration that found nothing: that tile is placed by the attitude |
 | Mosaic pan too fast | Frame centre moved most of a tile between polls | `Haptics.reject` | Rate-limited to one per 800 ms; a fast pan is a blurred frame everywhere along it |
 | Mosaic complete | Every node captured | `Haptics.confirm` | The mosaic has finished itself |
 | Error action | Tapping a disabled control, invalid state | `Haptics.reject` | Something went wrong |
@@ -878,18 +878,43 @@ left where the world put them and the drift is logged, not applied.
 The frame is paired with the attitude *at its exposure* --
 `SENSOR_TIMESTAMP + exposure/2` against the attitude history -- where the
 camera stamps frames on the sensors' clock (`SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME`).
-Nothing about where a tile is placed comes from the attitude: placement is
-registration of the burst's reference frame against the anchor and the
-neighbouring tiles. But the attitude *judges* the registration
-(`MosaicCapture.captureNode`): a fit that puts the tile's centre more than a
-quarter of a tile from where the phone was pointing
-(`MAX_ATTITUDE_DISAGREEMENT`), or that fits the tile at more than a sixth
-off its size (`MAX_SCALE_ERROR`), is a fit onto the wrong features and is
-refused -- the node goes back to pending and the tile is taken again. The
-third field test's ghosts and black cutouts were tiles a weak fit had placed
-in the wrong place; a refused tile costs a second, a misplaced one ruins the
-canvas. `TouchFocus.toSensorFraction` is the inverse of `toDisplayPoint` and
-is tested as such.
+`TouchFocus.toSensorFraction` is the inverse of `toDisplayPoint` and is
+tested as such.
+
+**A node is never refused for what its pixels say.** The third field test's
+fix refused a tile whose registration disagreed with the attitude; the
+fourth, in the evening on the telephoto, found a dark frame registers
+against a dark anchor not at all, and every node was refused in a loop. So
+the node is *done* the moment its burst is in the ring's hand
+(`MosaicEvent.Locked`: the checkmark, the `CONFIRM` haptic, the guidance
+moving on), and the burst is tagged with the attitude at its reference
+frame's exposure. Making the tile is a separate job on a separate thread
+(`MosaicCapture.placementDispatcher`), one tile at a time in the order taken,
+while the guidance thread keeps the dots moving; the ring locks one burst at
+a time, so the next burst waits for the last to be merged (a fraction of a
+second; the hand is still). Placement has two tiers:
+
+1. **Registration**, against the anchor and the neighbouring tiles -- exact
+   when it works. Believed when it finds at least `MIN_VISUAL_INLIERS` (10)
+   inliers, puts the tile's centre within `MAX_ATTITUDE_DISAGREEMENT` (¼
+   tile) of where the attitude says the phone pointed, and fits the tile
+   within `MAX_SCALE_ERROR` (⅙) of a tile's size.
+2. **The attitude**, otherwise: `ImuGuidance.tileTransform` -- the tile is a
+   rectangle of directions in the device frame, each carried to the anchor's
+   frame by `R_anchorᵀ · R_now` and met with the canvas plane. A rotation
+   between two views of a plane is a homography exactly, so the four corners
+   fit it exactly (the centre and edge midpoints are added for conditioning);
+   at 13.6° off axis the tile is a keystone 6% wider than at the centre,
+   which `ImuGuidanceTest` holds to 1%. An attitude placement is a few
+   percent of a tile from exact -- inside the thirty percent overlap and
+   under the blend -- and is recorded with zero inliers so later
+   registrations weigh it accordingly.
+
+Only a tile that cannot be *made* -- the ring empty, the develop failed, the
+canvas refusing it -- is rejected and its node put back to pending
+(`MosaicEvent.Rejected`); the worker hands that to the guidance thread, which
+owns the guide. `MosaicEvent.Placed(node, byAttitude)` says which tier placed
+each tile, for the log and the tick.
 
 **The grid is angular, at thirty percent overlap.** Nodes are
 `(1 − overlap)` of the field of view apart --
@@ -935,23 +960,34 @@ sample in a 33 ms poll, not the exposure's mean, and the tile lands on the
 canvas at half to two-thirds scale. The cap is 12°/s, where a very short
 exposure would otherwise accept a wobble the merge's alignment has to chase.
 
-**The shutter floor.** What keeps 6°/s at five pixels rather than forty is
-the exposure. Auto exposure on a dim scene chooses 1/30 s without regard to
-the lens. When the mosaic locks the stream (`ZslRawStream.lockForSweep`) and
-the converged exposure is longer than the lens's floor, the stream is pinned
-at the floor with the ISO scaled to keep the light:
+**The shutter floor, and how it gives way in the dark.** What keeps 6°/s at
+five pixels rather than forty is the exposure. Auto exposure on a dim scene
+chooses 1/30 s without regard to the lens. When the mosaic locks the stream
+(`ZslRawStream.lockForSweep`) and the converged exposure is longer than the
+lens's floor, the stream is pinned at the floor with the ISO scaled to keep
+the light:
 
 ```
 t_floor(eq) = 4 ms · 105 / eq       clamped to [2 ms, 16.7 ms]   (1/250 s at 105mm)
 ISO' = ISO · t / t_floor            clamped to the sensor's range
 ```
 
-(`StabilityGate.shutterFloorNs`, `StabilityGate.sweepExposure`). Where the
-ISO range runs out the frame is under and the anchor's measured develop gain
-makes it up; the merge removes the noise and nothing removes the blur. A
-manual exposure is the photographer's and is left alone. Dual conversion
-gain is suspended for the lock's duration -- the mosaic's merge weighs every
-frame alike -- and restored on unlock.
+But a floor that starves the sensor guarantees a black frame: the fourth
+field test's telephoto at 1/250 s in the evening asked for ISO 13,000 of a
+sensor that stops at 6,000, and saw nothing. So where keeping the light at
+the floor would need more than `LOW_LIGHT_ISO` (3200), and the hand is still
+-- the gyroscope's peak over the last half second under
+`LOW_LIGHT_ANGULAR_SPEED` (4°/s) at the moment of the lock -- the floor
+*stretches*: to the exposure that brings the ISO back to 3200, no more than
+`LOW_LIGHT_STRETCH` (4×) the floor, never past `LOW_LIGHT_MAX_NS` (1/60 s),
+and never longer than what auto exposure had chosen. A stretched shutter is
+paid for: the gate's ceiling for every node of that capture tightens to
+4°/s. A moving hand gets the floor and the ceiling and the dark frame -- and
+the attitude places it. (`StabilityGate.sweepExposure`; `StabilityGateTest`
+walks the evening case, the slightly dark case and the cap.) A manual
+exposure is the photographer's and is left alone. Dual conversion gain is
+suspended for the lock's duration -- the mosaic's merge weighs every frame
+alike -- and restored on unlock.
 
 **Two measures, both required, every poll.** The gyroscope's *peak* speed
 since the last poll (the peak, not the mean: one frame smeared by a twitch is

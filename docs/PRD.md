@@ -307,12 +307,19 @@ the doorknob it was laid on, the way a panorama's targets do: nothing -- not
 a lock, not a registration -- moves it afterwards. The second version's
 magnet, which drew the locking dot at the reticle, and its drift correction,
 which shifted every dot by each tile's registration residual, both made
-targets that moved, and were removed. Visual registration places the tile
-that has been taken and is judged against the attitude: a fit that puts a
-tile far from where the phone pointed is refused and the tile taken again,
-because a misplaced tile is a ghost on the canvas and a refused one costs a
-second. The finished canvas is written as the largest rectangle with no hole
-in it.
+targets that moved, and were removed.
+
+**A node is never refused for what its pixels say.** The node is done the
+moment its burst is in hand -- checkmark, `CONFIRM`, on to the next -- and
+the burst carries the attitude it was taken at. Placing the tile is a job on
+its own thread with two tiers: registration where it finds a believable fit
+(ten inliers or more, within a quarter of a tile of where the phone pointed,
+a tile's size), and otherwise the attitude's own transform onto the canvas
+plane. In the dark, on a wall, on sky, the tile is placed by the attitude a
+few percent of a tile from exact and blended like any other; a refusal, which
+the third revision made and the fourth field test met in the evening as an
+endless loop of retakes, is no longer a thing the mode can do. The finished
+canvas is written as the largest rectangle with no hole in it.
 
 **The stability gate.** The first version measured a hold as "inside the
 radius for a quarter second" and fired on every approach: a hand decelerating
@@ -327,7 +334,10 @@ hold at two), capped at 12°/s. What keeps 6°/s sharp is the **shutter floor**:
 when the mode locks the stream and auto exposure has chosen slower than
 1/250 s on the telephoto (scaled by focal length on other lenses), the stream
 is pinned at the floor with the ISO raised to keep the light -- the merge
-removes noise; nothing removes blur. A poll that fails either measure resets
+removes noise; nothing removes blur -- and where even the sensor's top ISO
+would not keep the light at the floor, the floor gives way for a still hand:
+stretched from 1/250 s toward 1/60 s until the ISO is back at 3200, with the
+gate tightened to 4°/s to pay for it. A poll that fails either measure resets
 the hold, and the hold needs three steady polls and **170 ms** (from 250),
 stretched to cover the burst so every frame the ring hands over was taken
 during the verified hold -- the burst *is* the hold; the ring fills and the
@@ -655,7 +665,7 @@ described is not yet built. This is what those numbers mean.
 | 1 | Foundation & Hardware Truth | **Delivered.** Design tokens, haptic vocabulary, decoupled viewfinder HUD, `LensProfile` discovery, non-invasive DCG noise profiling, gallery and review surface. |
 | 2 | Lens Corrections & Develop Quality | Geometric distortion correction from `LensProfile`, lateral chromatic aberration correction, dual-illuminant colour matrix, HEIF output. |
 | 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel alignment refinement (equiangular, after the parabola was measured biased); sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native tiled strips, parity-verified); coverage prediction from the alignment; the linear develop of the canvas to a JPEG from native memory; the `2X` control, readout and gallery badge; IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. See §5.2. |
-| 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after three field tests (§5.4–§5.6).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
+| 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after four field tests (§5.4–§5.7).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
 | 5 | Responsive UI & GPU Develop | Responsive layout, accessibility pass; Vulkan compute develop if the CPU budget is ever exceeded. |
 | 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
 
@@ -913,6 +923,27 @@ test.
    viewfinder carries the focus peaking, in cyan, in the picture's own
    orientation -- the first version drew the landscape mask straight onto the
    portrait screen (`Ink.Peaking`, the third documented exception).
+
+### 5.7 What the fourth field test found
+
+One thing, and it was the third field test's fix. In the evening, on the
+telephoto at the 1/250 s floor, the frames were black with noise in them;
+registration found nothing in them to fit, the attitude gate refused every
+node, and the user was held in an endless loop of retakes on all four. Two
+answers.
+
+1. **A node is never refused for what its pixels say** (§2.3.3). The node is
+   done when its burst is in hand; the tile is made on its own thread with
+   registration as the first tier and the attitude's transform onto the
+   canvas plane as the second (`ImuGuidance.tileTransform`, held to the
+   keystone geometry in `ImuGuidanceTest`). The live device test now
+   *requires* a dark run to complete, by the attitude.
+
+2. **The shutter floor gives way in the dark** (`REFERENCE.md` §3.4.4). Where
+   the floor would need more than ISO 3200, a hand still under 4°/s at the
+   lock gets the floor stretched toward 1/60 s and the gate tightened to 4°/s
+   for the capture; a moving hand gets the floor. `StabilityGateTest` walks
+   the evening case.
 
 **Still open from Phase 3.** The chroma channels of an eight-frame handheld burst leave
 about a fifth of their cells to the fill; a longer burst closes them and the

@@ -343,7 +343,7 @@ class ZslStreamDeviceTest {
         // pinned: the shutter floor is exercised here with the sensor's real
         // ranges, on whatever light the phone is lying in.
         val converged = s.latestExposure()
-        var pinned: Pair<Int, Long>? = null
+        var pinned: StabilityGate.SweepExposure? = null
         var pinnedReadout: Pair<Int, Long>? = null
         val isoRange = s.characteristics.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val exposureRange = s.characteristics.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
@@ -418,21 +418,26 @@ class ZslStreamDeviceTest {
             Log.w(TAG, "the phone was moving on $turning of $polls polls; the gate refused, as it should")
             assumeTrue("the phone was moving during the test", false)
         }
-        // Nor is a phone lying face down. A develop gain at its ceiling is a
-        // frame the sensor saw nothing in, and a burst of nothing cannot be
-        // registered against an anchor of nothing -- refusing it is the
-        // assembler working. Skipped, and said.
-        if (events.none { it.startsWith("Captured") } && developGain >= DARK_GAIN) {
-            Log.w(TAG, "the scene was too dark to register: develop gain %.0f".format(developGain))
-            assumeTrue("the scene was too dark to register during the test", false)
-        }
+        // A phone lying face down, or in the dark, is not skipped: a develop
+        // gain at its ceiling is a frame the sensor saw nothing in, and a
+        // burst of nothing registers against an anchor of nothing not at all
+        // -- which is exactly when the tile has to be placed by the attitude
+        // instead. The fourth field test's failure was every node refused in
+        // the evening; a dark run here has to complete.
+        val dark = developGain >= DARK_GAIN
+        val placed = events.filter { it.startsWith("Placed") }
+        Log.i(TAG, "develop gain %.0f (%s); placed: $placed".format(developGain, if (dark) "dark" else "lit"))
 
-        // Anchored, then the one node held, captured and the mosaic completed.
+        // Anchored, then the one node held -- done the moment its burst was in
+        // hand -- placed on the canvas by one tier or the other, and complete.
         assertThat(events.first()).isEqualTo("Anchored")
         assertThat(events.any { it.startsWith("Locked") }).isTrue()
-        assertThat(events.any { it.startsWith("Captured") }).isTrue()
+        assertThat(placed).hasSize(1)
+        assertThat(events.none { it.startsWith("Rejected") }).isTrue()
         assertThat(events.last()).isEqualTo("Complete")
         assertThat(result.tiles).isEqualTo(1)
+        // In the dark the pixels cannot have placed it.
+        if (dark) assertThat(placed.single()).contains("byAttitude=true")
         assertThat(result.savedName).isNotNull()
         // The ring filled before the burst fired.
         assertThat(sawHold).isTrue()
@@ -451,12 +456,22 @@ class ZslStreamDeviceTest {
         Log.i(TAG, "shutter floor: converged $converged, floor ${floor / 1e6} ms, pinned $pinned, readout $pinnedReadout")
         if (converged != null && isoRange != null && converged.second > floor) {
             assertThat(pinned).isNotNull()
-            assertThat(pinned!!.second).isEqualTo(maxOf(floor, exposureRange?.lower ?: 0L))
-            assertThat(pinned!!.first).isAtLeast(converged.first)
-            assertThat(pinned!!.first).isAtMost(isoRange.upper)
-            // And the sensor obeyed: the frames under the lock were exposed at the floor.
+            val p = pinned!!
+            if (p.stretched) {
+                // The dark, on a still phone: the floor gave way, but never
+                // past 1/60 s, four times the floor, or what auto exposure chose.
+                assertThat(p.exposureNs).isGreaterThan(floor)
+                assertThat(p.exposureNs).isAtMost(StabilityGate.LOW_LIGHT_MAX_NS)
+                assertThat(p.exposureNs).isAtMost(converged.second)
+                assertThat(p.iso).isAtMost(isoRange.upper)
+            } else {
+                assertThat(p.exposureNs).isEqualTo(maxOf(floor, exposureRange?.lower ?: 0L))
+                assertThat(p.iso).isAtLeast(converged.first)
+                assertThat(p.iso).isAtMost(isoRange.upper)
+            }
+            // And the sensor obeyed: the frames under the lock were exposed as pinned.
             assertThat(pinnedReadout).isNotNull()
-            assertThat(pinnedReadout!!.second).isWithin(pinned!!.second / 20).of(pinned!!.second)
+            assertThat(pinnedReadout!!.second).isWithin(p.exposureNs / 20).of(p.exposureNs)
         } else if (converged != null && isoRange != null) {
             assertThat(pinned).isNull()
         }

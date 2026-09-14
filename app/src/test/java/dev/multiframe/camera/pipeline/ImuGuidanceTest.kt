@@ -140,6 +140,42 @@ class ImuGuidanceTest {
         }
     }
 
+    /**
+     * The fallback placement: the whole tile's transform from the attitude.
+     * At the anchor it is the anchor's own placement -- the tile centred and
+     * scaled; panned onto a node, the tile's centre lands on the node.
+     */
+    @Test
+    fun `a tile's transform from the attitude puts it where the guidance says it is`() {
+        val g = guidance()
+        val at = g.tileTransform(ImuGuidance.IDENTITY)!!
+        val centre = at.apply(4080 / 2f, 3072 / 2f)
+        assertThat(centre[0]).isWithin(0.05f).of(plan.canvasWidth / 2f)
+        assertThat(centre[1]).isWithin(0.05f).of(plan.canvasHeight / 2f)
+        val corner = at.apply(0f, 0f)
+        assertThat(corner[0]).isWithin(0.05f).of(plan.canvasWidth / 2f - 4080 / 2f * plan.tileScale)
+        assertThat(corner[1]).isWithin(0.05f).of(plan.canvasHeight / 2f - 3072 / 2f * plan.tileScale)
+
+        // Panned right onto node 5, as in the pan test.
+        val node = plan.nodes[5]
+        val dx = (node.canvasX - plan.canvasWidth / 2f) / plan.tileScale
+        val panned = g.tileTransform(ImuGuidance.yaw(-atan(dx / f)))!!
+        val c = panned.apply(4080 / 2f, 3072 / 2f)
+        assertThat(c[0]).isWithin(0.5f).of(node.canvasX)
+        assertThat(c[1]).isWithin(0.5f).of(node.canvasY)
+        // And the tile is a tile's size on the plane, a shade wider for being
+        // off-axis: a rectilinear tile at an angle is a keystone.
+        val left = panned.apply(0f, 3072 / 2f)
+        val right = panned.apply(4080f, 3072 / 2f)
+        val width = hypot(right[0] - left[0], right[1] - left[1])
+        val theta = atan(dx / f)
+        // The plane's local scale at angle theta is 1/cos^2(theta): six percent
+        // at this node on this lens.
+        val keystone = 1f / (kotlin.math.cos(theta) * kotlin.math.cos(theta))
+        assertThat(width / (4080 * plan.tileScale)).isWithin(0.01f).of(keystone)
+        assertThat(width / (4080 * plan.tileScale)).isGreaterThan(1f)
+    }
+
     @Test
     fun `on a portrait phone a pan moves the reticle along the sensor's y axis`() {
         // Sensor orientation 90: the display's horizontal is the sensor's y.

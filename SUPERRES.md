@@ -102,7 +102,8 @@ to tell the user this in the interface rather than let them discover it.
 | Native compositing canvas, three-band blending | Done | One tile is identical to the byte in one band and three; two tiles a quarter-stop and a pixel apart keep their texture and lose their step (`MosaicBlendDeviceTest`) |
 | Reticle and dot guidance, from the attitude, with a stability gate | Done, revised after three field tests | 18 unit tests on the lock rule against scripted pans, including a hand still settling and a gyroscope veto; 8 on the attitude geometry, turning the phone by known angles and reading the dots -- `f · tan` to a twentieth of a pixel, and a node that stays where the world put it; the overlay draws the canvas outline and each node where the attitude puts it, and nothing moves a dot |
 | Angular grid at thirty percent overlap, hole-free write | Done | The planner's `gridGeometry`: 4 unit tests on the step, the canvas reach and the seventy-degree limit; the canvas writes the largest fully covered rectangle, read back with no black pixel (`MosaicCanvasTest`) |
-| Registration judged against the attitude | Done | A fit more than a quarter of a tile from where the phone pointed, or a sixth off a tile's size, is refused and the node re-taken |
+| Two-tier placement: registration, then the attitude | Done, after the fourth field test | A node is done when its burst is in hand; the tile is placed by its pixels where they fit believably (ten inliers, within a quarter of a tile of the attitude, a tile's size) and by the attitude's transform onto the canvas plane otherwise. The live device test requires a dark run to complete by the attitude |
+| Low-light shutter stretch | Done | Where the floor would need more than ISO 3200, a still hand (< 4°/s) gets the floor stretched toward 1/60 s and the gate tightened to match; 1 unit test walks the evening case |
 | The mode's lifecycle and the back gesture | Done, after the second field test's deadlock | `SuperResMachine` walked stop → re-arm → run by 7 unit tests; `BackNavigation` as a rule (6) and as plumbing on the device (2) |
 | The shutter floor | Done | 1/250 s at 105mm, scaled by focal length, ISO raised to keep the light; 3 unit tests |
 | Burst per node, merged and lens-corrected | Done | The same merge as a shutter press, the Phase 2 optics before the homography |
@@ -128,7 +129,9 @@ right way to test the algorithm.
 2. The shutter anchors it. The app waits for the camera's exposure and white
    balance to converge, **locks exposure, focus and white balance** -- pinning
    the shutter at 1/250 s with the ISO raised if auto exposure had chosen
-   slower -- and takes the anchor: wherever the reticle points becomes the
+   slower, or, in the dark on a hand still under four degrees a second,
+   stretching that floor toward 1/60 s so the sensor is not starved -- and
+   takes the anchor: wherever the reticle points becomes the
    centre of the canvas, the develop gain and colour are measured from that
    frame and held, and the nodes are laid out around it as directions in the
    world, from the phone's attitude at that instant.
@@ -145,14 +148,17 @@ right way to test the algorithm.
    burst is taken from the ring, then a haptic. Pan too fast and the phone
    says so. STOP, or the back gesture, ends the capture keeping what was
    taken.
-4. Each burst is merged like any other photograph, developed with the anchor's
-   colour and gain (the gain scaled by its own ISO and exposure), corrected
-   for the lens's geometry, and composited where its reference frame
-   registered -- against the anchor and every tile so far, not chained. The
-   registration is judged against the attitude: a fit that puts the tile more
-   than a quarter of a tile from where the phone was pointing, or at more
-   than a sixth off a tile's size, has fitted the wrong features and is
-   refused; the node goes back to pending and the tile is taken again.
+4. The node is done the moment the burst is in hand: the checkmark, the
+   haptic, the next dot. On its own thread the burst is merged like any other
+   photograph, developed with the anchor's colour and gain (the gain scaled
+   by its own ISO and exposure), corrected for the lens's geometry, and
+   composited -- where its reference frame registered against the anchor and
+   every tile so far, if that fit is believable (ten inliers, within a quarter
+   of a tile of where the attitude says the phone pointed, a tile's size),
+   and otherwise where the attitude puts it: the tile's rectangle of
+   directions met with the canvas plane. A dark frame, a blank wall, a patch
+   of sky all place by the attitude, a few percent of a tile from exact and
+   inside the overlap. Nothing a registration says can refuse a node.
 5. Compositing is in three frequency bands: the fine detail is handed from
    one tile to the next along the line where they are equally deep, the broad
    differences between them are spread over six hundred pixels, so the texture

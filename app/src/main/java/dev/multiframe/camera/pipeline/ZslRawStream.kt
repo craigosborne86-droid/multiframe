@@ -218,7 +218,7 @@ class ZslRawStream private constructor(
 
     // The mosaic's pinned exposure while locked, and whether the lock turned
     // dual conversion gain off to be turned back on.
-    private var sweepExposure: Pair<Int, Long>? = null
+    private var sweepExposure: StabilityGate.SweepExposure? = null
     private var dcgSuspended = false
     private val histogramBins = IntArray(64)
     private var lastSettings: ManualSettings? = null
@@ -366,10 +366,10 @@ class ZslRawStream private constructor(
      * is the photographer's and is left alone. Dual conversion gain is
      * suspended for the duration: the mosaic's merge weighs every frame alike.
      */
-    fun lockForSweep(settings: ManualSettings, caps: CameraCapabilities) {
+    fun lockForSweep(settings: ManualSettings, caps: CameraCapabilities, steady: Boolean = false) {
         if (closed || locked) return
         locked = true
-        sweepExposure = sweepExposureFor(settings, caps)
+        sweepExposure = sweepExposureFor(settings, caps, steady)
         if (dcg) {
             dcgSuspended = true
             dcg = false
@@ -377,7 +377,11 @@ class ZslRawStream private constructor(
         Log.i(
             TAG,
             "locking exposure, white balance and focus for a mosaic" +
-                (sweepExposure?.let { (iso, ns) -> "; shutter floored at 1/%d s, ISO %d".format((1e9 / ns).toInt(), iso) } ?: ""),
+                (sweepExposure?.let {
+                    "; shutter %s at 1/%d s, ISO %d".format(
+                        if (it.stretched) "stretched for the light" else "floored", (1e9 / it.exposureNs).toInt(), it.iso,
+                    )
+                } ?: ""),
         )
         applySettings(settings, caps)
     }
@@ -393,23 +397,24 @@ class ZslRawStream private constructor(
         applySettings(settings, caps)
     }
 
-    /** The exposure a locked mosaic is pinned at, ISO and nanoseconds, or null where the converged one stands. */
-    val sweepExposureOrNull: Pair<Int, Long>? get() = if (locked) sweepExposure else null
+    /** The exposure a locked mosaic is pinned at, or null where the converged one stands. */
+    val sweepExposureOrNull: StabilityGate.SweepExposure? get() = if (locked) sweepExposure else null
 
     /**
      * What the mosaic's lock pins the sensor at, from the exposure the camera
      * has converged on: the lens's shutter floor, and the ISO scaled to keep
-     * the light, clamped to what the sensor offers. Null where the converged
-     * exposure is already short enough, where the sensor cannot be told, or
-     * where the photographer set the exposure by hand.
+     * the light, clamped to what the sensor offers -- or, in the dark on a
+     * [steady] hand, a floor stretched for the light. Null where the
+     * converged exposure is already short enough, where the sensor cannot be
+     * told, or where the photographer set the exposure by hand.
      */
-    internal fun sweepExposureFor(settings: ManualSettings, caps: CameraCapabilities): Pair<Int, Long>? {
+    internal fun sweepExposureFor(settings: ManualSettings, caps: CameraCapabilities, steady: Boolean = false): StabilityGate.SweepExposure? {
         if (settings.manualExposureActive(caps)) return null
         if (!caps.hasManualSensor || !caps.hasIsoRange) return null
         val isoMin = caps.isoMin ?: return null
         val isoMax = caps.isoMax ?: return null
         val (iso, exposureNs) = latestExposure() ?: return null
-        return StabilityGate.sweepExposure(iso, exposureNs, lens.equivalent35mm, isoMin, isoMax, caps.exposureMinNs ?: 0L)
+        return StabilityGate.sweepExposure(iso, exposureNs, lens.equivalent35mm, isoMin, isoMax, caps.exposureMinNs ?: 0L, steady)
     }
 
     val isLocked: Boolean get() = locked
@@ -799,8 +804,8 @@ class ZslRawStream private constructor(
                 CaptureRequest.CONTROL_AE_MODE,
                 android.hardware.camera2.CameraMetadata.CONTROL_AE_MODE_OFF,
             )
-            builder.set(CaptureRequest.SENSOR_SENSITIVITY, pinned?.first ?: settings.effectiveIso(caps))
-            val exposure = pinned?.second ?: settings.effectiveExposureTimeNs(caps)
+            builder.set(CaptureRequest.SENSOR_SENSITIVITY, pinned?.iso ?: settings.effectiveIso(caps))
+            val exposure = pinned?.exposureNs ?: settings.effectiveExposureTimeNs(caps)
             builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
             // Frame duration must cover the exposure or the stream slows to it.
             builder.set(

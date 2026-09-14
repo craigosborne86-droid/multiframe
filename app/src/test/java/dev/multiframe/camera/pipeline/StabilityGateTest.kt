@@ -71,17 +71,55 @@ class StabilityGateTest {
     fun `a slow converged exposure is pinned at the floor with the ISO raised to keep the light`() {
         // 1/30 s at ISO 100 on the 105: eight and a third times shorter, ISO 833.
         val pinned = StabilityGate.sweepExposure(100, 33_333_333L, 105, 50, 6400)!!
-        assertThat(pinned.second).isEqualTo(StabilityGate.SHUTTER_FLOOR_NS)
-        assertThat(pinned.first).isEqualTo(833)
-        // The ISO runs out: clamped, and the frame is under.
-        assertThat(StabilityGate.sweepExposure(800, 66_666_666L, 105, 50, 6400)!!.first).isEqualTo(6400)
+        assertThat(pinned.exposureNs).isEqualTo(StabilityGate.SHUTTER_FLOOR_NS)
+        assertThat(pinned.iso).isEqualTo(833)
+        assertThat(pinned.stretched).isFalse()
         // Already fast enough: nothing to pin.
         assertThat(StabilityGate.sweepExposure(400, 2_000_000L, 105, 50, 6400)).isNull()
         assertThat(StabilityGate.sweepExposure(400, 4_000_000L, 105, 50, 6400)).isNull()
         // A sensor whose shortest exposure is longer than the floor is pinned at its shortest.
         val slowSensor = StabilityGate.sweepExposure(100, 33_333_333L, 105, 50, 6400, sensorMinExposureNs = 8_000_000L)!!
-        assertThat(slowSensor.second).isEqualTo(8_000_000L)
-        assertThat(slowSensor.first).isEqualTo(416)
+        assertThat(slowSensor.exposureNs).isEqualTo(8_000_000L)
+        assertThat(slowSensor.iso).isEqualTo(416)
+    }
+
+    /**
+     * The evening telephoto. At the floor the light would need ISO 13,000; a
+     * moving hand gets the floor and the ceiling, and a black frame with noise
+     * in it. A still hand gets the floor stretched until the ISO is back at
+     * 3200 -- here to the full 1/60 s -- and the gate tightens to pay for it.
+     */
+    @Test
+    fun `in the dark the floor stretches for a still hand and not for a moving one`() {
+        // 1/15 s at ISO 800: ISO 13,333 at 1/250. Moving: floored and clamped.
+        val moving = StabilityGate.sweepExposure(800, 66_666_666L, 105, 50, 6400, steady = false)!!
+        assertThat(moving.exposureNs).isEqualTo(StabilityGate.SHUTTER_FLOOR_NS)
+        assertThat(moving.iso).isEqualTo(6400)
+        assertThat(moving.stretched).isFalse()
+        // Still: stretched. ISO 3200 would need 1/60 s; the stretch stops at
+        // four times the floor, 1/62.5 s, and the ISO lands a shade over.
+        val still = StabilityGate.sweepExposure(800, 66_666_666L, 105, 50, 6400, steady = true)!!
+        assertThat(still.exposureNs).isEqualTo((StabilityGate.SHUTTER_FLOOR_NS * StabilityGate.LOW_LIGHT_STRETCH).toLong())
+        assertThat(still.exposureNs).isAtMost(StabilityGate.LOW_LIGHT_MAX_NS)
+        assertThat(still.iso).isEqualTo(3333)
+        assertThat(still.stretched).isTrue()
+        // A little dark: stretched only as far as the light needs. 1/30 s at
+        // ISO 400 is ISO 3333 at 1/250; ISO 3200 needs 1/240.
+        val slightly = StabilityGate.sweepExposure(400, 33_333_333L, 105, 50, 6400, steady = true)!!
+        assertThat(slightly.exposureNs).isWithin(50_000L).of(4_166_666L)
+        assertThat(slightly.iso).isEqualTo(3200)
+        assertThat(slightly.stretched).isTrue()
+        // Never longer than what auto exposure chose: 1/100 s at ISO 6400 is
+        // ISO 16,000 at the floor, but the stretch stops at 1/100.
+        val chosen = StabilityGate.sweepExposure(6400, 10_000_000L, 105, 50, 6400, steady = true)!!
+        assertThat(chosen.exposureNs).isEqualTo(10_000_000L)
+        assertThat(chosen.iso).isEqualTo(6400)
+        // Light enough for the floor: still a plain floor, whatever the hand.
+        val bright = StabilityGate.sweepExposure(100, 33_333_333L, 105, 50, 6400, steady = true)!!
+        assertThat(bright.stretched).isFalse()
+        assertThat(bright.exposureNs).isEqualTo(StabilityGate.SHUTTER_FLOOR_NS)
+        // And the hand a stretch asks for is four degrees a second.
+        assertThat(Math.toDegrees(StabilityGate.LOW_LIGHT_ANGULAR_SPEED.toDouble())).isWithin(0.05).of(4.0)
     }
 
     @Test

@@ -134,9 +134,18 @@ class MosaicSession private constructor(
      * Returns the placement, or null if the canvas would not take it -- in
      * which case the node stays pending and the user is asked again.
      */
-    fun place(tile: Bitmap, proxy: Plane, located: MosaicAssembler.Located): Placement? {
+    fun place(tile: Bitmap, proxy: Plane, located: MosaicAssembler.Located): Placement? =
+        place(tile, proxy, located.transform, located.inliers, located.inlierRatio)
+
+    /**
+     * Records a captured tile at [transform] -- from its registration, or
+     * from the attitude where the registration found nothing -- and draws it.
+     * [inliers] is zero for an attitude placement, which is what later
+     * registrations read to weigh it.
+     */
+    fun place(tile: Bitmap, proxy: Plane, transform: Homography, inliers: Int, inlierRatio: Float): Placement? {
         if (closed) return null
-        val placement = assembler.place(proxy, located.transform, located.inliers, located.inlierRatio)
+        val placement = assembler.place(proxy, transform, inliers, inlierRatio)
         if (placement == null) {
             rejected++
             lastReason = RejectionReason.OUT_OF_BOUNDS

@@ -1137,8 +1137,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                                     Haptics.segment(view)
                                                     status = "pan the reticle onto each dot and hold"
                                                 }
+                                                // The photograph is taken here: the
+                                                // node is done, and the confirmation
+                                                // is for that, not for the canvas.
                                                 is MosaicEvent.Locked -> Haptics.confirm(view)
-                                                is MosaicEvent.Captured -> Haptics.tick(view)
+                                                // The canvas caught up: a light tick,
+                                                // and nothing said about which tier
+                                                // placed it -- the log has that.
+                                                is MosaicEvent.Placed -> Haptics.tick(view)
                                                 is MosaicEvent.Rejected -> {
                                                     Haptics.reject(view)
                                                     mosaicFlashUntil = System.currentTimeMillis() + 600

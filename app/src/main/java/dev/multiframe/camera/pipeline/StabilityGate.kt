@@ -100,12 +100,49 @@ object StabilityGate {
     }
 
     /**
+     * The ISO past which the shutter floor gives way. At the floor, a dim
+     * scene asks for an ISO the sensor may not have, and a frame at the
+     * ceiling is a black frame with noise in it: the third field test's
+     * telephoto at 1/250 s in the evening saw nothing to register and nothing
+     * to keep. Past this the floor stretches instead.
+     */
+    const val LOW_LIGHT_ISO = 3200
+
+    /** The floor stretches by at most this factor: 1/250 s to 1/60 s on the telephoto. */
+    const val LOW_LIGHT_STRETCH = 4.0
+
+    /** And never past this, on any lens: 1/60 s. */
+    const val LOW_LIGHT_MAX_NS = 16_666_666L
+
+    /**
+     * A stretched shutter is allowed only to a hand this still, four degrees
+     * a second, and the gate holds every node to it for the capture. A longer
+     * exposure is more blur per degree; the stillness has to pay for it.
+     */
+    const val LOW_LIGHT_ANGULAR_SPEED = 0.0698f
+
+    /** What the mosaic's lock pins the sensor at. */
+    data class SweepExposure(
+        val iso: Int,
+        val exposureNs: Long,
+        /** Whether the floor was stretched for the light; the gate tightens when it was. */
+        val stretched: Boolean,
+    )
+
+    /**
      * What to pin a mosaic's sensor at, given what auto exposure converged on.
      * Null where the converged exposure is already at or under the lens's
      * floor. Otherwise the floor -- raised to the sensor's own shortest
      * exposure where that is longer -- and the ISO scaled to keep the light,
-     * `iso * exposure / floor`, clamped to the sensor's range: the frame is
-     * under where the range runs out, and the develop gain makes it up.
+     * `iso * exposure / floor`, clamped to the sensor's range.
+     *
+     * Where keeping the light at the floor would need more than
+     * [LOW_LIGHT_ISO], and [steady] says the hand is still enough for it,
+     * the floor stretches instead: to the exposure that brings the ISO back
+     * to [LOW_LIGHT_ISO], no more than [LOW_LIGHT_STRETCH] times the floor,
+     * never past [LOW_LIGHT_MAX_NS], and never longer than what auto
+     * exposure had chosen. Starving the sensor guarantees a black frame; a
+     * longer exposure on a still hand is a photograph.
      */
     fun sweepExposure(
         iso: Int,
@@ -114,11 +151,23 @@ object StabilityGate {
         isoMin: Int,
         isoMax: Int,
         sensorMinExposureNs: Long = 0L,
-    ): Pair<Int, Long>? {
+        steady: Boolean = false,
+    ): SweepExposure? {
         val floor = maxOf(shutterFloorNs(equivalent35mm), sensorMinExposureNs)
         if (exposureNs <= floor) return null
-        val scaled = (iso.toDouble() * exposureNs / floor).toLong().coerceIn(isoMin.toLong(), isoMax.toLong())
-        return scaled.toInt() to floor
+        val light = iso.toDouble() * exposureNs
+        val isoAtFloor = light / floor
+        val ceiling = minOf(LOW_LIGHT_ISO, isoMax)
+        if (isoAtFloor <= ceiling || !steady) {
+            return SweepExposure(isoAtFloor.toLong().coerceIn(isoMin.toLong(), isoMax.toLong()).toInt(), floor, stretched = false)
+        }
+        val stretched = (light / ceiling).toLong()
+            .coerceAtMost((floor * LOW_LIGHT_STRETCH).toLong())
+            .coerceAtMost(LOW_LIGHT_MAX_NS)
+            .coerceAtMost(exposureNs)
+            .coerceAtLeast(floor)
+        val isoStretched = (light / stretched).toLong().coerceIn(isoMin.toLong(), isoMax.toLong())
+        return SweepExposure(isoStretched.toInt(), stretched, stretched = stretched > floor)
     }
 
     /**

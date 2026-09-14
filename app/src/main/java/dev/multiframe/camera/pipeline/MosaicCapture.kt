@@ -3,9 +3,13 @@ package dev.multiframe.camera.pipeline
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 private const val TAG = "Multiframe"
 
@@ -68,19 +72,31 @@ sealed interface MosaicEvent {
     /** The anchor frame was taken; the nodes are laid out. */
     data object Anchored : MosaicEvent
 
-    /** The reticle has held on [node]; its burst is being taken. */
+    /**
+     * The reticle has held on [node], its burst is in hand, and the node is
+     * done. This is the moment the photograph was taken, whatever the canvas
+     * makes of it afterwards; the guidance moves on.
+     */
     data class Locked(val node: MosaicNode) : MosaicEvent
 
-    /** [node]'s burst is composited. */
-    data class Captured(val node: MosaicNode) : MosaicEvent
+    /**
+     * [node]'s tile is on the canvas -- placed by its pixels where they
+     * registered, or by the attitude where they did not ([byAttitude]).
+     */
+    data class Placed(val node: MosaicNode, val byAttitude: Boolean) : MosaicEvent
 
-    /** [node]'s burst could not be used and it is pending again. */
+    /**
+     * [node]'s burst could not become a tile at all -- the ring was empty, the
+     * develop failed, the canvas would not take it -- and it is pending again.
+     * Never for a registration that found nothing: that tile is placed by
+     * the attitude instead.
+     */
     data class Rejected(val node: MosaicNode, val reason: String) : MosaicEvent
 
     /** The pan was too fast for a sharp frame. */
     data object TooFast : MosaicEvent
 
-    /** Every node is captured. */
+    /** Every node is taken and every tile is on the canvas. */
     data object Complete : MosaicEvent
 }
 
@@ -112,12 +128,26 @@ sealed interface MosaicEvent {
  * The attitude never fails to answer -- it does not look at the scene -- and
  * it answers in a millisecond. The dots it places are static: directions in
  * the world, fixed at the anchor, never moved by anything that happens
- * afterwards. Nothing about where a tile is placed comes from the attitude
- * -- but a registration that puts a tile far from where the attitude says the
- * phone was pointing is a wrong registration, not a wrong attitude, and is
- * refused: the field test's ghosts and holes were tiles a weak fit had put in
- * the wrong place, and a refused tile is captured again while a misplaced one
- * ruins the canvas.
+ * afterwards.
+ *
+ * ### A node is never refused for what the pixels say
+ *
+ * The third field test's fix judged every registration against the attitude
+ * and refused the tile when they disagreed -- and the fourth, in the evening
+ * on the telephoto at 1/250 s, found that a dark frame registers against a
+ * dark anchor not at all, so every node was refused and the user was held
+ * in a loop of retakes. A camera that will not take a photograph in the dark
+ * is not a camera. So the node is done the moment its burst is in the
+ * ring's hand: the checkmark, the haptic, the guidance moving on. Placing
+ * the tile is a separate job on a separate thread, and it has two tiers.
+ * Registration first, because it is exact when it works; and where it finds
+ * nothing, or fewer than [MIN_VISUAL_INLIERS], or a fit that disagrees with
+ * the attitude by more than [MAX_ATTITUDE_DISAGREEMENT] of a tile or a sixth
+ * of its size, the tile is placed by the attitude alone -- the homography a
+ * rotation of the sensor makes on the canvas plane ([ImuGuidance.tileTransform]).
+ * A tile placed by the attitude is a few percent of a tile from exact, inside
+ * the overlap and under the blend; a tile refused is a hole and a user
+ * trapped.
  *
  * ### Why only bursts are developed
  *
@@ -164,6 +194,31 @@ object MosaicCapture {
 
     /** How often to look for the anchor frame before the mosaic has one. */
     private const val ANCHOR_POLL_MILLIS = 90L
+
+    /**
+     * The thread tiles are placed on: merged, registered, developed and
+     * composited, while the guidance thread keeps the dots moving. The same
+     * priority as the guidance, a step below the viewfinder's, for the same
+     * reason; its own thread so a tile's second of work never freezes the
+     * dots.
+     */
+    val placementDispatcher: kotlinx.coroutines.CoroutineDispatcher by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread({
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE)
+                r.run()
+            }, "mosaic-place").apply { isDaemon = true }
+        }.asCoroutineDispatcher()
+    }
+
+    /** A burst taken for a node, waiting to become a tile. */
+    private class PendingTile(
+        val node: MosaicNode,
+        val burst: ZslBurst,
+        /** The attitude at the reference frame's exposure; null where the sensor had not reported. */
+        val rotation: FloatArray?,
+    )
+
 
     /** How long to wait for the camera's controls to settle before locking them. */
     private const val CONVERGENCE_TIMEOUT_MILLIS = 3_000L
@@ -228,24 +283,35 @@ object MosaicCapture {
 
         // Everything pinned for the duration. Auto-exposure drifting between
         // tiles leaves each a different brightness, and feathering turns a hard
-        // seam into a soft gradient rather than removing it.
-        stream.lockForSweep(settings, caps)
+        // seam into a soft gradient rather than removing it. A hand that is
+        // still now -- under four degrees a second over the last half second
+        // -- is allowed a shutter floor stretched for the dark; see
+        // `StabilityGate.sweepExposure`.
+        val steadyNow = motion.peakSpeedSince(motion.nowNs() - 500_000_000L).let {
+            !it.isNaN() && it < StabilityGate.LOW_LIGHT_ANGULAR_SPEED
+        }
+        stream.lockForSweep(settings, caps, steady = steadyNow)
+        val pinned = stream.sweepExposureOrNull
 
         // The stability gate's ceiling, from the exposure the lock holds and
         // the lens's focal length in pixels. Logged, because it is the number
-        // that decides how still a hand has to be.
-        val exposureNs = stream.latestExposure()?.second ?: 0L
+        // that decides how still a hand has to be. A stretched shutter is
+        // paid for with a tighter ceiling.
+        val exposureNs = pinned?.exposureNs ?: stream.latestExposure()?.second ?: 0L
         val pixelsPerRadian = pixelsPerRadian(stream)
         Log.i(TAG, "guidance focal length: %.0f px/rad (%s)".format(
             pixelsPerRadian,
             if (stream.characteristics.get(android.hardware.camera2.CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)?.getOrNull(0)?.let { it > 0f } == true) "intrinsic calibration"
             else "focal length over sensor pitch",
         ))
-        val maxSpeed = StabilityGate.maxAngularSpeed(exposureNs, pixelsPerRadian)
+        val maxSpeed = StabilityGate.maxAngularSpeed(exposureNs, pixelsPerRadian).let {
+            if (pinned?.stretched == true) minOf(it, StabilityGate.LOW_LIGHT_ANGULAR_SPEED) else it
+        }
         Log.i(
             TAG,
-            "stability gate: exposure %.1f ms, %.0f px/rad, ceiling %.3f rad/s (%.1f deg/s), gyro %s".format(
-                exposureNs / 1e6, pixelsPerRadian, maxSpeed, Math.toDegrees(maxSpeed.toDouble()),
+            "stability gate: exposure %.1f ms%s, %.0f px/rad, ceiling %.3f rad/s (%.1f deg/s), gyro %s".format(
+                exposureNs / 1e6, if (pinned?.stretched == true) " (stretched for the light)" else "",
+                pixelsPerRadian, maxSpeed, Math.toDegrees(maxSpeed.toDouble()),
                 if (motion.isAvailable) "present" else "absent",
             ),
         )
@@ -264,120 +330,188 @@ object MosaicCapture {
         // The registration view's scale: full frame to registration pixels.
         val scale = stream.config.width.toFloat() / TRACK_WIDTH
 
-        try {
-            while (shouldContinue() && !guide.complete) {
-                if (!imu.anchored) {
-                    // The colour and the exposure every tile will be developed
-                    // with, and the origin. The gain is measured from the anchor
-                    // frame the way a single capture would measure it, and then
-                    // held: each tile developed with its own automatic gain is
-                    // a mosaic of nine exposures. The frame's own result has to
-                    // carry the white balance gains, or there is nothing to
-                    // develop with; a frame without them is waited past.
-                    val burst = stream.snapshot(1)
-                    val result = burst.referenceResult
-                    val color = ColorProfile.calibrated(stream.characteristics, result)
-                    val buffer = burst.frames.buffer(0)
-                    // And the attitude has to be reporting and settled, or
-                    // there is nothing to anchor the directions to. Waited
-                    // for up to a few seconds; a fusion that never settles is
-                    // anchored anyway and said so, and the tiles' corrections
-                    // then carry what they can.
-                    val settled = motion.attitudeSettled() || settleAttempts++ >= MAX_SETTLE_WAIT_POLLS
-                    val rotation = frameRotation(motion, result, realtimeStamps)
-                    if (burst.count == 0 || buffer == null || result == null || rotation == null || !settled ||
-                        (color.isNeutralGains && anchorAttempts++ < MAX_ANCHOR_WAIT_POLLS)
-                    ) {
+        // What the placement thread has done, for the guidance thread to
+        // draw: the session's own counters are not read across the two.
+        val coverage = java.util.concurrent.atomic.AtomicReference(0f)
+        // Whether a burst's slots are still in the ring's hand. The ring
+        // locks one burst at a time -- closing one releases every locked slot
+        // -- so the next burst is not taken until the last is merged.
+        val slotsHeld = AtomicInteger(0)
+        // Tiles the worker could not make: handed back to the guidance thread,
+        // which owns the guide, to put the node back to pending.
+        val failed = java.util.concurrent.ConcurrentLinkedQueue<Pair<MosaicNode, String>>()
+        fun drainFailures() {
+            while (true) {
+                val (node, reason) = failed.poll() ?: break
+                guide.rejected(node, System.currentTimeMillis())
+                onEvent(MosaicEvent.Rejected(node, reason))
+            }
+        }
+
+        coroutineScope {
+            val tiles = Channel<PendingTile>(Channel.UNLIMITED)
+            // The placement worker: one tile at a time, in the order taken.
+            val worker = launch(placementDispatcher) {
+                for (pending in tiles) {
+                    val outcome = runCatching {
+                        placeTile(stream, session, profile, lensProfile, scale, imu, pending, slotsHeld)
+                    }.onFailure { Log.w(TAG, "node ${pending.node.index} could not be placed", it) }
+                        .getOrElse { PlaceOutcome.Failed(it.message ?: "placement failed") }
+                    when (outcome) {
+                        is PlaceOutcome.Placed -> {
+                            coverage.set(session.progress.coverage)
+                            onEvent(MosaicEvent.Placed(pending.node, outcome.byAttitude))
+                        }
+                        is PlaceOutcome.Failed -> {
+                            // Not a registration refusal -- those are placed by
+                            // the attitude. The develop failed or the canvas
+                            // would not take it: the node goes back to pending,
+                            // on the thread that owns the guide.
+                            failed.add(pending.node to outcome.reason)
+                        }
+                    }
+                }
+            }
+
+            try {
+                while (shouldContinue() && !guide.complete) {
+                    if (!imu.anchored) {
+                        // The colour and the exposure every tile will be developed
+                        // with, and the origin. The gain is measured from the anchor
+                        // frame the way a single capture would measure it, and then
+                        // held: each tile developed with its own automatic gain is
+                        // a mosaic of nine exposures. The frame's own result has to
+                        // carry the white balance gains, or there is nothing to
+                        // develop with; a frame without them is waited past.
+                        val burst = stream.snapshot(1)
+                        val result = burst.referenceResult
+                        val color = ColorProfile.calibrated(stream.characteristics, result)
+                        val buffer = burst.frames.buffer(0)
+                        // And the attitude has to be reporting and settled, or
+                        // there is nothing to anchor the directions to. Waited
+                        // for up to a few seconds; a fusion that never settles is
+                        // anchored anyway and said so.
+                        val settled = motion.attitudeSettled() || settleAttempts++ >= MAX_SETTLE_WAIT_POLLS
+                        val rotation = frameRotation(motion, result, realtimeStamps)
+                        if (burst.count == 0 || buffer == null || result == null || rotation == null || !settled ||
+                            (color.isNeutralGains && anchorAttempts++ < MAX_ANCHOR_WAIT_POLLS)
+                        ) {
+                            burst.close()
+                            delay(ANCHOR_POLL_MILLIS)
+                            continue
+                        }
+                        if (color.isNeutralGains) Log.w(TAG, "anchoring with unity white balance: the result carried no gains")
+                        if (!motion.attitudeSettled()) Log.w(TAG, "anchoring on an attitude that has not settled")
+                        val stride = burst.frames.rowStride
+                        session.lockColour(color, ShadingMap.from(result))
+                        NativeMerge.create(stream.config.width, stream.config.height, profile)?.use { m ->
+                            m.setReference(buffer, stride)
+                            val (merged, _) = m.finish()
+                            session.lockExposure(m.autoExposure(merged, color), exposureProduct(result))
+                        }
+                        // The anchor's proxy is the frame the result describes,
+                        // read through the same sampling as the registration view.
+                        val anchorTrack = ByteArray(TRACK_WIDTH * TRACK_HEIGHT)
+                        RawRing.trackingLumaOf(buffer, stream.config.width, stream.config.height, stride,
+                            anchorTrack, TRACK_WIDTH, TRACK_HEIGHT, profile)
                         burst.close()
-                        delay(ANCHOR_POLL_MILLIS)
+                        session.anchor(Plane(TRACK_WIDTH, TRACK_HEIGHT, anchorTrack))
+                        // The directions of the nodes are fixed from the attitude
+                        // the anchor frame was exposed at.
+                        imu.anchor(rotation)
+                        Log.i(TAG, "anchored: gains %s, develop gain %.2f".format(
+                            color.gains.joinToString(",") { "%.2f".format(it) }, session.developGain))
+                        onEvent(MosaicEvent.Anchored)
+                        onView(imuView(guide, imu, rotation, captureLabel, System.currentTimeMillis(), coverage.get()))
+                        lastPollNs = motion.nowNs()
+                        delay(POLL_MILLIS)
                         continue
                     }
-                    if (color.isNeutralGains) Log.w(TAG, "anchoring with unity white balance: the result carried no gains")
-                    if (!motion.attitudeSettled()) Log.w(TAG, "anchoring on an attitude that has not settled")
-                    val stride = burst.frames.rowStride
-                    session.lockColour(color, ShadingMap.from(result))
-                    NativeMerge.create(stream.config.width, stream.config.height, profile)?.use { m ->
-                        m.setReference(buffer, stride)
-                        val (merged, _) = m.finish()
-                        session.lockExposure(m.autoExposure(merged, color), exposureProduct(result))
+
+                    // Anything the worker could not place goes back to pending
+                    // before this poll decides anything.
+                    drainFailures()
+
+                    // The attitude now, and the gyroscope's peak since the last
+                    // poll: the fastest the phone turned in between.
+                    val rotation = motion.rotation()
+                    val nowNs = motion.nowNs()
+                    val peak = motion.peakSpeedSince(lastPollNs)
+                    lastPollNs = nowNs
+
+                    val now = System.currentTimeMillis()
+                    val reticle = rotation?.let { imu.reticleOnCanvas(it) }
+                    val decision = guide.observe(reticle?.first, reticle?.second, now, peak)
+                    onView(imuView(guide, imu, rotation, captureLabel, now, coverage.get()))
+                    // The gate's readings, once a second: what the hold is waiting on.
+                    if (now - lastGateLog > 1000L) {
+                        lastGateLog = now
+                        Log.i(
+                            TAG,
+                            "gate: reticle %s, gyro peak %.4f rad/s of %.4f, %s%s, hold %.2f".format(
+                                reticle?.let { "(%.0f, %.0f)".format(it.first, it.second) } ?: "off-canvas",
+                                peak, guide.maxAngularSpeed,
+                                if (guide.steady) "steady" else "unsteady",
+                                guide.unsteadyReason?.let { " ($it)" } ?: "",
+                                guide.holdProgress(now),
+                            ),
+                        )
                     }
-                    // The anchor's proxy is the frame the result describes,
-                    // read through the same sampling as the tracking view.
-                    val anchorTrack = ByteArray(TRACK_WIDTH * TRACK_HEIGHT)
-                    RawRing.trackingLumaOf(buffer, stream.config.width, stream.config.height, stride,
-                        anchorTrack, TRACK_WIDTH, TRACK_HEIGHT, profile)
-                    burst.close()
-                    session.anchor(Plane(TRACK_WIDTH, TRACK_HEIGHT, anchorTrack))
-                    // The directions of the nodes are fixed from the attitude
-                    // the anchor frame was exposed at.
-                    imu.anchor(rotation)
-                    Log.i(TAG, "anchored: gains %s, develop gain %.2f".format(
-                        color.gains.joinToString(",") { "%.2f".format(it) }, session.developGain))
-                    onEvent(MosaicEvent.Anchored)
-                    onView(imuView(guide, session, imu, rotation, captureLabel, System.currentTimeMillis()))
-                    lastPollNs = motion.nowNs()
-                    delay(POLL_MILLIS)
-                    continue
-                }
 
-                // The attitude now, and the gyroscope's peak since the last
-                // poll: the fastest the phone turned in between.
-                val rotation = motion.rotation()
-                val nowNs = motion.nowNs()
-                val peak = motion.peakSpeedSince(lastPollNs)
-                lastPollNs = nowNs
+                    when (decision) {
+                        is MosaicGuide.Decision.TooFast -> onEvent(MosaicEvent.TooFast)
+                        is MosaicGuide.Decision.Capture -> {
+                            // The previous burst's slots first, if the ring still
+                            // holds them: the ring locks one burst at a time, and
+                            // closing one releases every locked slot, so a second
+                            // burst taken now would lose its frames under the
+                            // merge. The merge takes a fraction of a second and
+                            // the hand is still; the hold simply runs a little
+                            // longer.
+                            while (slotsHeld.get() > 0 && shouldContinue()) delay(20)
+                            if (!shouldContinue()) break
 
-                val now = System.currentTimeMillis()
-                val reticle = rotation?.let { imu.reticleOnCanvas(it) }
-                val decision = guide.observe(reticle?.first, reticle?.second, now, peak)
-                onView(imuView(guide, session, imu, rotation, captureLabel, now))
-                // The gate's readings, once a second: what the hold is waiting on.
-                if (now - lastGateLog > 1000L) {
-                    lastGateLog = now
-                    Log.i(
-                        TAG,
-                        "gate: reticle %s, gyro peak %.4f rad/s of %.4f, %s%s, hold %.2f".format(
-                            reticle?.let { "(%.0f, %.0f)".format(it.first, it.second) } ?: "off-canvas",
-                            peak, guide.maxAngularSpeed,
-                            if (guide.steady) "steady" else "unsteady",
-                            guide.unsteadyReason?.let { " ($it)" } ?: "",
-                            guide.holdProgress(now),
-                        ),
-                    )
-                }
-
-                when (decision) {
-                    is MosaicGuide.Decision.TooFast -> onEvent(MosaicEvent.TooFast)
-                    is MosaicGuide.Decision.Capture -> {
-                        val outcome = runCatching {
-                            captureNode(stream, session, profile, frames, lensProfile, scale, imu, motion, realtimeStamps) {
-                                // The burst is in hand: the haptic can fire.
+                            val burst = stream.snapshot(frames)
+                            if (burst.count == 0) {
+                                burst.close()
+                                guide.rejected(decision.node, System.currentTimeMillis())
+                                onEvent(MosaicEvent.Rejected(decision.node, "ring empty"))
+                            } else {
+                                // The photograph is taken. The node is done, the
+                                // haptic fires -- the frames a haptic could blur are
+                                // in the ring's hand -- and the guidance moves on.
+                                // The tile is the worker's from here.
+                                slotsHeld.incrementAndGet()
+                                val atFrame = frameRotation(motion, burst.results.getOrNull(0) ?: burst.referenceResult, realtimeStamps)
+                                guide.captured(decision.node)
                                 onEvent(MosaicEvent.Locked(decision.node))
+                                tiles.send(PendingTile(decision.node, burst, atFrame))
                             }
-                        }.onFailure { Log.w(TAG, "node ${decision.node.index} failed", it) }
-                            .getOrDefault("capture failed")
-                        if (outcome == null) {
-                            guide.captured(decision.node)
-                            onEvent(MosaicEvent.Captured(decision.node))
-                            if (guide.complete) onEvent(MosaicEvent.Complete)
-                        } else {
-                            guide.rejected(decision.node, System.currentTimeMillis())
-                            onEvent(MosaicEvent.Rejected(decision.node, outcome))
+                            onView(imuView(guide, imu, motion.rotation(), captureLabel, System.currentTimeMillis(), coverage.get()))
+                            lastPollNs = motion.nowNs()
                         }
-                        onView(imuView(guide, session, imu, motion.rotation(), captureLabel, System.currentTimeMillis()))
-                        // The capture took time; the gyroscope's window restarts.
-                        lastPollNs = motion.nowNs()
+                        MosaicGuide.Decision.Idle -> Unit
                     }
-                    MosaicGuide.Decision.Idle -> Unit
+                    delay(POLL_MILLIS)
                 }
-                delay(POLL_MILLIS)
+            } finally {
+                // Whatever ended the loop: no more bursts, and the stream is
+                // given back its exposure, its white balance and its focus
+                // while the last tiles are still being placed. The sensors are
+                // the caller's -- the screen keeps them running while the mode
+                // is armed, so the next run anchors on an attitude that has
+                // long since settled.
+                tiles.close()
+                stream.unlock(settings, caps)
             }
-        } finally {
-            // Whatever ended the loop: the stream is given back its exposure,
-            // its white balance and its focus. The sensors are the caller's --
-            // the screen keeps them running while the mode is armed, so the
-            // next run anchors on an attitude that has long since settled.
-            stream.unlock(settings, caps)
+            // The tiles already taken are finished and composited before the
+            // canvas is written: a burst in hand is a photograph owed. A tile
+            // that failed after the loop ended leaves its node pending in a
+            // run that is over -- the result says how many tiles there are.
+            worker.join()
+            drainFailures()
+            if (guide.complete) onEvent(MosaicEvent.Complete)
+            onView(imuView(guide, imu, motion.rotation(), captureLabel, System.currentTimeMillis(), session.progress.coverage))
         }
 
         val progress = session.progress
@@ -409,11 +543,11 @@ object MosaicCapture {
      */
     private fun imuView(
         guide: MosaicGuide,
-        session: MosaicSession,
         imu: ImuGuidance,
         rotation: FloatArray?,
         captureLabel: String,
         nowMillis: Long,
+        coverage: Float,
     ): MosaicGuideView {
         val positions = rotation?.let { imu.nodesInFrame(it) }
         val nodes = guide.nodes.mapIndexed { i, node ->
@@ -425,7 +559,7 @@ object MosaicCapture {
             captured = guide.captured,
             total = guide.total,
             located = rotation != null,
-            coverage = session.progress.coverage,
+            coverage = coverage,
             canvasCorners = rotation?.let { imu.cornersInFrame(it) },
             holdProgress = guide.holdProgress(nowMillis),
             steady = guide.steady,
@@ -555,44 +689,44 @@ object MosaicCapture {
     /** Polls to wait for the attitude to settle before anchoring on it as it is: about four seconds. */
     private const val MAX_SETTLE_WAIT_POLLS = 45
 
+    /** What became of a burst on the placement thread. */
+    private sealed interface PlaceOutcome {
+        class Placed(val byAttitude: Boolean) : PlaceOutcome
+        class Failed(val reason: String) : PlaceOutcome
+    }
+
     /**
-     * Takes the burst for a node: the ring's newest [frames], merged, developed
-     * with the mosaic's locked colour, corrected for the lens, and composited at
-     * the place the burst's reference frame registered to -- if that place is
-     * where the attitude says the phone was pointing, to within
-     * [MAX_ATTITUDE_DISAGREEMENT] of a tile, and the fit is a tile's size.
+     * Turns a node's burst into a tile on the canvas: merged, developed with
+     * the mosaic's locked colour, corrected for the lens, and composited --
+     * where its pixels registered if they registered well, and where the
+     * attitude says the phone was pointing if they did not. The two tiers.
      *
-     * Returns null on success, or the reason it could not be used.
+     * Runs on [placementDispatcher] while the guidance thread keeps polling.
+     * The ring's slots are released the moment the merge has read them,
+     * before anything slower; [slotsHeld] tells the guidance thread when.
      */
-    private fun captureNode(
+    private fun placeTile(
         stream: ZslRawStream,
         session: MosaicSession,
         profile: SensorProfile,
-        frames: Int,
         lensProfile: LensProfile?,
         proxyScale: Float,
         imu: ImuGuidance,
-        motion: MotionSensor,
-        realtimeStamps: Boolean,
-        onSnapshotted: () -> Unit,
-    ): String? {
-        val burst = stream.snapshot(frames)
-        if (burst.count == 0) {
-            burst.close()
-            return "ring empty"
-        }
-        // The frames a haptic could have blurred are locked in the ring now.
-        onSnapshotted()
+        pending: PendingTile,
+        slotsHeld: AtomicInteger,
+    ): PlaceOutcome {
+        val burst = pending.burst
         val merger = NativeMerge.create(stream.config.width, stream.config.height, profile)
-            ?: run { burst.close(); return "no memory for the merge" }
+            ?: run { burst.close(); slotsHeld.decrementAndGet(); return PlaceOutcome.Failed("no memory for the merge") }
 
         return merger.use { m ->
             val stride = burst.frames.rowStride
             // The newest frame is the reference: it is the one the user saw
-            // when the lock fired, and the one the node's dot was drawn from.
+            // when the lock fired, and the one the attitude was read for.
             val refIndex = 0
             val referenceResult = burst.results.getOrNull(refIndex) ?: burst.referenceResult
-            val refBuffer = burst.frames.buffer(refIndex) ?: run { burst.close(); return@use "reference unreadable" }
+            val refBuffer = burst.frames.buffer(refIndex)
+                ?: run { burst.close(); slotsHeld.decrementAndGet(); return@use PlaceOutcome.Failed("reference unreadable") }
             m.setReference(refBuffer, stride)
             val refProxy = m.lumaProxy(refBuffer, stride)
             val tilesX = maxOf(1, m.proxyWidth / TILE_TARGET)
@@ -606,47 +740,51 @@ object MosaicCapture {
                 m.addFrame(buffer, stride, field)
             }
 
-            // Where this burst is, from its own reference frame, read through
-            // the same sampling as the tracking view so it registers at the
-            // tracking view's scale. The node said where to point; the frame
-            // says where the tile is. The slots go back to the ring before
-            // the registration, which needs nothing from them.
+            // The registration view of the reference frame, read through the
+            // same sampling as the anchor's. Then the slots go back to the
+            // ring: nothing below needs them.
             val smallData = ByteArray(TRACK_WIDTH * TRACK_HEIGHT)
             RawRing.trackingLumaOf(refBuffer, stream.config.width, stream.config.height, stride,
                 smallData, TRACK_WIDTH, TRACK_HEIGHT, profile)
             val small = Plane(TRACK_WIDTH, TRACK_HEIGHT, smallData)
             burst.close()
-            val located = session.locate(small, proxyScale)
-            if (located == null) return@use "could not register the burst"
+            slotsHeld.decrementAndGet()
 
-            // The registration has to agree with the attitude. Where the
-            // attitude at the reference frame's exposure put the reticle,
-            // against where the frame's pixels put it: a residual of a few
-            // percent of a tile is drift and timing and is fine; a residual of
-            // a quarter of a tile is a fit onto the wrong features, and the
-            // tile it would place is the field test's ghost. And the fit has
-            // to be a tile's size: a homography that shrinks or stretches the
-            // frame by more than a sixth has fitted noise.
+            // Tier one: the pixels. Tier two: the attitude. The attitude's
+            // transform is computed either way, because it is what tier one
+            // is judged against.
+            val plan = session.plan
             val w = stream.config.width.toFloat()
             val h = stream.config.height.toFloat()
-            val actual = located.transform.apply(w / 2f, h / 2f)
-            val predicted = frameRotation(motion, referenceResult, realtimeStamps)?.let { imu.reticleOnCanvas(it) }
-            val plan = session.plan
-            if (predicted != null) {
-                val residual = kotlin.math.hypot(actual[0] - predicted.first, actual[1] - predicted.second)
-                Log.i(TAG, "tile registered %.0f px from where the attitude put it (%d inliers)".format(residual, located.inliers))
-                if (residual > plan.placedTileWidth * MAX_ATTITUDE_DISAGREEMENT) {
-                    return@use "registration %.0f px from where the phone pointed".format(residual)
+            val attitude = pending.rotation?.let { imu.tileTransform(it) }
+            val located = session.locate(small, proxyScale)
+            val visual = located?.takeIf { fit ->
+                if (fit.inliers < MIN_VISUAL_INLIERS) {
+                    Log.i(TAG, "node ${pending.node.index}: registration found only ${fit.inliers} inliers")
+                    return@takeIf false
                 }
+                if (attitude == null) return@takeIf true
+                val actual = fit.transform.apply(w / 2f, h / 2f)
+                val predicted = attitude.apply(w / 2f, h / 2f)
+                val residual = kotlin.math.hypot(actual[0] - predicted[0], actual[1] - predicted[1])
+                val fittedWidth = kotlin.math.hypot(
+                    fit.transform.apply(w, h / 2f)[0] - fit.transform.apply(0f, h / 2f)[0],
+                    fit.transform.apply(w, h / 2f)[1] - fit.transform.apply(0f, h / 2f)[1],
+                )
+                val scaleError = fittedWidth / plan.placedTileWidth
+                Log.i(TAG, "node ${pending.node.index}: registered %.0f px from where the attitude put it, %d inliers, %.2fx".format(
+                    residual, fit.inliers, scaleError))
+                residual <= plan.placedTileWidth * MAX_ATTITUDE_DISAGREEMENT &&
+                    scaleError in (1f - MAX_SCALE_ERROR)..(1f + MAX_SCALE_ERROR)
             }
-            val fittedWidth = kotlin.math.hypot(
-                located.transform.apply(w, h / 2f)[0] - located.transform.apply(0f, h / 2f)[0],
-                located.transform.apply(w, h / 2f)[1] - located.transform.apply(0f, h / 2f)[1],
-            )
-            val scaleError = fittedWidth / plan.placedTileWidth
-            if (scaleError < 1f - MAX_SCALE_ERROR || scaleError > 1f + MAX_SCALE_ERROR) {
-                return@use "registration fitted the tile at %.2fx its size".format(scaleError)
-            }
+            val transform = visual?.transform ?: attitude
+                ?: return@use PlaceOutcome.Failed(
+                    if (located == null) "could not register the burst and the attitude was unknown"
+                    else "registration disagreed with an unknown attitude",
+                )
+            val byAttitude = visual == null
+            if (byAttitude) Log.i(TAG, "node ${pending.node.index}: placed by the attitude" +
+                (session.lastLocateFailure?.let { " ($it)" } ?: ""))
 
             val (merged, _) = m.finish()
             val color = session.color ?: ColorProfile.NEUTRAL
@@ -656,7 +794,7 @@ object MosaicCapture {
             val gain = session.gainFor(exposureProduct(referenceResult))
             var tile = m.develop(
                 merged, color, DevelopParams(exposureGain = gain), shading = session.shading,
-            ) ?: return@use "develop failed"
+            ) ?: return@use PlaceOutcome.Failed("develop failed")
 
             // The lens's geometry, before the tile is placed by a homography
             // that assumes a rectilinear image. Distortion left in would make
@@ -669,9 +807,9 @@ object MosaicCapture {
                 }
             }
 
-            val placed = session.place(tile, small, located)
+            val placed = session.place(tile, small, transform, visual?.inliers ?: 0, visual?.inlierRatio ?: 0f)
             tile.recycle()
-            if (placed == null) "the canvas would not take it" else null
+            if (placed == null) PlaceOutcome.Failed("the canvas would not take it") else PlaceOutcome.Placed(byAttitude)
         }
     }
 
@@ -679,14 +817,18 @@ object MosaicCapture {
 
     /**
      * How far a registration may put a tile from where the attitude says the
-     * phone was pointing, as a fraction of a placed tile's width. The
-     * attitude's own error over a capture -- drift, the frame's timing, the
-     * anchor -- is a few percent; a quarter is a wrong fit.
+     * phone was pointing, as a fraction of a placed tile's width, before the
+     * attitude places it instead. The attitude's own error over a capture --
+     * drift, the frame's timing, the anchor -- is a few percent; a quarter is
+     * a wrong fit.
      */
     const val MAX_ATTITUDE_DISAGREEMENT = 0.25f
 
-    /** How far a registration's fitted tile width may differ from a tile's. */
+    /** How far a registration's fitted tile width may differ from a tile's before the attitude places it instead. */
     const val MAX_SCALE_ERROR = 0.17f
+
+    /** Fewer inliers than this is a fit onto noise, and the attitude places the tile instead. */
+    const val MIN_VISUAL_INLIERS = 10
 
     /** ISO times exposure, the sensor's own measure of how much light a frame gathered. */
     private fun exposureProduct(result: android.hardware.camera2.TotalCaptureResult?): Double {

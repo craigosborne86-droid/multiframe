@@ -108,6 +108,50 @@ class ImuGuidance(
     fun nodesInFrame(rotation: FloatArray): List<Pair<Float, Float>?> =
         nodeDirections.map { inFrame(rotation, it) }
 
+    /**
+     * Where a whole tile taken at [rotation] lands on the canvas: the
+     * homography from the tile's sensor pixels to canvas pixels, from the
+     * attitude alone.
+     *
+     * This is the fallback placement. Registration places a tile by its
+     * pixels and is exact when it works; in the dark, on a blank wall, on a
+     * patch of sky, it finds nothing to fit and used to refuse the tile --
+     * and a mode that refuses to take a photograph in the dark is not a
+     * camera. The attitude always has an answer: the tile is a rectangle of
+     * directions in the device frame, each direction is carried to the
+     * anchor's frame by `R_anchorᵀ · R_now`, and where it meets the canvas
+     * plane is where that pixel lands. A rotation between two views of a
+     * plane is a homography exactly, so four corners fit it exactly; the
+     * centre and the edge midpoints are added for conditioning. Null only
+     * when a corner is behind the camera, which no grid reaches.
+     */
+    fun tileTransform(rotation: FloatArray): Homography? {
+        if (anchor == null) return null
+        val points = listOf(
+            0f to 0f, sensorW to 0f, sensorW to sensorH, 0f to sensorH,
+            sensorW / 2f to sensorH / 2f,
+            sensorW / 2f to 0f, sensorW to sensorH / 2f, sensorW / 2f to sensorH, 0f to sensorH / 2f,
+        )
+        val matches = ArrayList<Match>(points.size)
+        for ((px, py) in points) {
+            val canvas = canvasOfSensorPixel(rotation, px, py) ?: return null
+            matches.add(Match(px, py, canvas.first, canvas.second))
+        }
+        return Homography.fit(matches)
+    }
+
+    /** The canvas point a sensor pixel of a frame taken at [rotation] looks at, or null behind the camera. */
+    private fun canvasOfSensorPixel(rotation: FloatArray, px: Float, py: Float): Pair<Float, Float>? {
+        val r0 = anchor ?: return null
+        val (dx, dy) = sensorOffsetToDisplay(px - sensorW / 2f, py - sensorH / 2f)
+        val v = normalise(floatArrayOf(dx, -dy, -pixelsPerRadian))
+        val world = mul(rotation, v)
+        val inAnchor = mulTransposed(r0, world)
+        val disp = projectToDisplay(inAnchor) ?: return null
+        val (sx, sy) = displayOffsetToSensor(disp.first, disp.second)
+        return (plan.canvasWidth / 2f + sx * plan.tileScale) to (plan.canvasHeight / 2f + sy * plan.tileScale)
+    }
+
     /** The canvas's four corners in the current frame, top-left first, or null where any is behind the camera. */
     fun cornersInFrame(rotation: FloatArray): List<Pair<Float, Float>>? {
         val pts = cornerDirections.map { inFrame(rotation, it) }
