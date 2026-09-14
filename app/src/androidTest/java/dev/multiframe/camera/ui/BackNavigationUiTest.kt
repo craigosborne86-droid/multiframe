@@ -83,7 +83,7 @@ class BackNavigationUiTest {
             MultiframeTheme {
                 if (open) {
                     SettingsScreen(
-                        chips = ControlBar.settings(ControlBarState(streamOffered = true, zslOn = true)),
+                        chips = ControlBar.settings(ControlBarState(streamOffered = true, dngOn = true)),
                         onControl = { fired.add(it) },
                         onDismiss = { open = false },
                         panel = { androidx.compose.material3.Text("MANUAL PANEL") }
@@ -92,11 +92,11 @@ class BackNavigationUiTest {
             }
         }
         compose.assumeRendered()
-        // The developer switch is here now, and nowhere over the picture.
-        compose.onNodeWithContentDescription("ZSL ON").assertExists()
+        // The DNG switch is here, and nowhere over the picture.
+        compose.onNodeWithContentDescription("DNG ON").assertExists()
         compose.onNodeWithText("MANUAL PANEL").assertExists()
-        compose.onNodeWithContentDescription("ZSL ON").performClickAndWait()
-        assertThat(fired).containsExactly(ControlBar.ZSL)
+        compose.onNodeWithContentDescription("DNG ON").performClickAndWait()
+        assertThat(fired).containsExactly(ControlBar.DNG)
         compose.onNodeWithContentDescription("Close settings").performClickAndWait()
         assertThat(open).isFalse()
     }

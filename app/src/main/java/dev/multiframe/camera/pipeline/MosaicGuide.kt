@@ -227,10 +227,11 @@ class MosaicGuide(
         lastNow = nowMillis
 
         // Every pending node's state follows from its distance; only one can
-        // be locking, and it is the nearest. A node that is already locking
-        // keeps the lock a little past the radius -- the magnet: once the
-        // reticle is on the dot, the tremor that carries it a few pixels over
-        // the edge does not lose it. The reticle has to leave by a margin.
+        // be locking, and it is the nearest. One radius, in and out: a version
+        // let a locking node keep its lock out to one and a half radii, so a
+        // tremor over the edge would not restart the hold, and with the dot
+        // drawn at the reticle it read as a target that moved. The radius is
+        // the radius.
         val nearest = nearestPending(reticleX, reticleY)
         for (node in plan.nodes) {
             val s = states[node.index]
@@ -242,10 +243,8 @@ class MosaicGuide(
                 states[node.index] = NodeState.PENDING
             }
             val d = distance(node, reticleX, reticleY)
-            val holding = lockingNode == node.index && s == NodeState.LOCKING
-            val radius = if (holding) lockRadius * MAGNET_MULTIPLE else lockRadius
             states[node.index] = when {
-                node === nearest && d <= radius -> NodeState.LOCKING
+                node === nearest && d <= lockRadius -> NodeState.LOCKING
                 d <= lockRadius * NEAR_MULTIPLE -> NodeState.NEAR
                 else -> NodeState.PENDING
             }
@@ -307,9 +306,6 @@ class MosaicGuide(
 
         /** Within this many radii the dot reads as approached. */
         const val NEAR_MULTIPLE = 3f
-
-        /** A locking node keeps its lock out to this many radii: the magnet's reach. */
-        const val MAGNET_MULTIPLE = 1.5f
 
         /**
          * Hold this long, still, inside the radius before the burst fires.

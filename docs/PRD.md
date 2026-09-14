@@ -237,11 +237,20 @@ output is 263 MP. Practically, overlap reduces this; the default cap is 80 MP /
 
 #### 2.3.2 User-Selectable Matrices
 
-**Built (Phase 4), revised after two field tests.** `MosaicPreset`,
+**Built (Phase 4), revised after three field tests.** `MosaicPreset`,
 remembered in `AppSettings.mosaicPreset`; `MosaicPlanner.planGrid`,
-`planRegion` and `planPreset`; the `2×2 · 33 MP | 3×3 · 75 MP` pill directly
+`planRegion` and `planPreset`; the `2×2 · 37 MP | 3×3 · 80 MP` pill directly
 above the shutter while SUPER RES is armed, with each grid's megapixels from
 the planner on the lens in hand.
+
+**The grid is angular, at thirty percent overlap.** Neighbouring nodes are
+seventy percent of the telephoto's field of view apart, horizontally and
+vertically -- `Δyaw = FOV_h × 0.70`, `Δpitch = FOV_v × 0.70` -- and the
+canvas is the plane those directions project onto, reaching the outermost
+tile's far edge plus a margin for aim. Thirty percent of every tile is shared
+with each neighbour whatever the lens, which is what registration and the
+blend need and what a hand-held aim inside the lock radius still leaves
+intact. `REFERENCE.md` §3.4.4.
 
 **The mode is called SUPER RES.** It was MOSAIC, and before that "sweep" -- a
 sweep is a pan, and a pan is the blurred frame this mode exists to avoid. It
@@ -284,17 +293,26 @@ the phone's attitude, `MosaicCapture.run` drives both against the live ring,
 `MosaicGuidance` draws it, `StabilityGate` says what still means, and
 `SuperResMachine` is the mode's lifecycle.
 
-**The dots are placed by the attitude, not by the image.** The first guidance
-registered every preview frame against the tiles so far to place the dots. On
-a lens seven degrees across a pan of a few degrees carries the anchor's
-features out of frame, and the dots swam, stuck and vanished. The rotation
-vector -- gyroscope and accelerometer fused by the platform, two hundred
-times a second, whatever the scene shows -- now gives the phone's attitude;
-each node is a direction in the world fixed at the anchor, and where it falls
-in the frame is that direction in the phone's current axes through the lens
-(`REFERENCE.md` §3.4.4). Its slow yaw drift is measured and absorbed each time
-a tile registers. Visual registration is for placing the tile that has been
-taken, and for nothing in real time.
+**The dots are placed by the attitude, not by the image, and they do not
+move.** The first guidance registered every preview frame against the tiles
+so far to place the dots. On a lens seven degrees across a pan of a few
+degrees carries the anchor's features out of frame, and the dots swam, stuck
+and vanished. The rotation vector -- gyroscope and accelerometer fused by the
+platform, two hundred times a second, whatever the scene shows -- now gives
+the phone's attitude; each node is a direction in the world fixed at the
+anchor, and where it falls in the frame is that direction in the phone's
+current axes through the lens: `f · tan(Δyaw)` across, `f · tan(Δpitch)`
+down, one to one with the sensor (`REFERENCE.md` §3.4.4). A node stays over
+the doorknob it was laid on, the way a panorama's targets do: nothing -- not
+a lock, not a registration -- moves it afterwards. The second version's
+magnet, which drew the locking dot at the reticle, and its drift correction,
+which shifted every dot by each tile's registration residual, both made
+targets that moved, and were removed. Visual registration places the tile
+that has been taken and is judged against the attitude: a fit that puts a
+tile far from where the phone pointed is refused and the tile taken again,
+because a misplaced tile is a ghost on the canvas and a refused one costs a
+second. The finished canvas is written as the largest rectangle with no hole
+in it.
 
 **The stability gate.** The first version measured a hold as "inside the
 radius for a quarter second" and fired on every approach: a hand decelerating
@@ -313,11 +331,9 @@ removes noise; nothing removes blur. A poll that fails either measure resets
 the hold, and the hold needs three steady polls and **170 ms** (from 250),
 stretched to cover the burst so every frame the ring hands over was taken
 during the verified hold -- the burst *is* the hold; the ring fills and the
-burst fires itself. The **magnet**: a dot that is locking keeps its lock out
-to 1.5 radii, so the tremor that carries the reticle a few pixels over the
-edge does not restart the hold, and its dot is drawn at the reticle while it
-holds. The HUD says HOLD STILL or HOLD STEADY ON THE DOT while it waits.
-`REFERENCE.md` §3.4.4.
+burst fires itself. The lock radius is five percent of a tile, in and out,
+with no hysteresis and no snap. The HUD says HOLD STILL or HOLD STEADY ON
+THE DOT while it waits. `REFERENCE.md` §3.4.4.
 
 **This replaces the free-roam panning arrow concept.**
 
@@ -639,7 +655,7 @@ described is not yet built. This is what those numbers mean.
 | 1 | Foundation & Hardware Truth | **Delivered.** Design tokens, haptic vocabulary, decoupled viewfinder HUD, `LensProfile` discovery, non-invasive DCG noise profiling, gallery and review surface. |
 | 2 | Lens Corrections & Develop Quality | Geometric distortion correction from `LensProfile`, lateral chromatic aberration correction, dual-illuminant colour matrix, HEIF output. |
 | 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel alignment refinement (equiangular, after the parabola was measured biased); sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native tiled strips, parity-verified); coverage prediction from the alignment; the linear develop of the canvas to a JPEG from native memory; the `2X` control, readout and gallery badge; IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. See §5.2. |
-| 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after two field tests (§5.4, §5.5).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
+| 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after three field tests (§5.4–§5.6).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
 | 5 | Responsive UI & GPU Develop | Responsive layout, accessibility pass; Vulkan compute develop if the CPU budget is ever exceeded. |
 | 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
 
@@ -858,6 +874,45 @@ it was not usable in the hand. Five things, each with a test.
    3×3 · 75 MP` sits directly above the shutter; the histogram is a setting,
    off by default; and the mode is SUPER RES on every surface, enum and
    document. `ControlBarTest`, `ControlBarUiTest`, `GuidesTest`.
+
+### 5.6 What the third field test found
+
+The canvas was real and the experience was worse. Four things, each with a
+test.
+
+1. **Chasing the dots.** The magnet -- a locking node's dot drawn at the
+   reticle, its lock held to 1.5 radii -- made a target that jumped toward
+   the reticle on approach and away when the lock dropped; the drift
+   correction moved every dot at every tile. Both removed. A node is a
+   direction in the world and stays over what it was laid on; the pan moves
+   the frame by `f · tan(Δyaw)`, held to a twentieth of a pixel in
+   `ImuGuidanceTest`; the radius is the radius (`MosaicGuideTest`).
+
+2. **Black cutouts and ghosts.** Tiles a weak registration had placed in the
+   wrong place. Three answers: the grid is angular at thirty percent overlap
+   with a canvas that actually reaches the outer tiles' far edges
+   (`MosaicPlannerTest`); a registration that disagrees with the attitude by
+   more than a quarter of a tile, or fits the tile at more than a sixth off
+   its size, is refused and the tile taken again (`MosaicCapture.captureNode`);
+   and the canvas is written as the largest rectangle with no hole in it
+   rather than the box around the union (`MosaicCanvasTest`).
+
+3. **The ring was a setting.** The sequential path, which the switch fell
+   back to, was trapped on the main lens. The ring is the engine now: wanted
+   on every mode from the first frame, released only under memory pressure
+   or hardware refusal and tried again half a minute on, with no switch and
+   no message on the viewfinder. `AppSettings` no longer stores it.
+
+4. **The viewfinder was still a control panel.** The developer's switches --
+   ISP, A/B, DCG, MERGE -- are gone from the user's app (`ControlBarTest`,
+   `ControlsPanelTest`); the memory-pressure message is gone from the HUD;
+   the `RAW ×N` and `DNG` chips are gone from over the shutter, the DNG a
+   setting written beside every JPEG. The manual controls left the settings
+   screen for a drawer PRO slides up over the bottom bar with the picture
+   whole above it (`ManualPanel`), and with manual focus engaged the
+   viewfinder carries the focus peaking, in cyan, in the picture's own
+   orientation -- the first version drew the landscape mask straight onto the
+   portrait screen (`Ink.Peaking`, the third documented exception).
 
 **Still open from Phase 3.** The chroma channels of an eight-frame handheld burst leave
 about a fifth of their cells to the fill; a longer burst closes them and the

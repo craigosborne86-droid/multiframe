@@ -184,7 +184,16 @@ fun Histogram(
  * second. An ImageBitmap is one.
  *
  * Shown only while manual focus is engaged, because that is the only time it
- * answers a question the user is asking.
+ * answers a question the user is asking. In [Ink.Peaking], the cyan every
+ * camera with a focus ring uses: a hue no scene has, so an edge lit by it is
+ * unmistakably the overlay's and not the picture's.
+ *
+ * The mask is read from the sensor, in the sensor's orientation; the picture
+ * is drawn in the display's. The mask is turned through [sensorOrientation]
+ * as it is turned into an image -- the same mapping a focus tap goes through
+ * the other way -- so an edge lands on the edge it was found at. The first
+ * version drew the landscape mask straight onto the portrait screen, which
+ * put every edge on the wrong side of the picture.
  */
 @Composable
 fun Peaking(
@@ -192,26 +201,33 @@ fun Peaking(
     maskWidth: Int,
     maskHeight: Int,
     modifier: Modifier = Modifier,
-    colour: Color = Ink.Amber,
+    colour: Color = Ink.Peaking,
+    sensorOrientation: Int = 0,
 ) {
     if (mask == null || maskWidth <= 0 || maskHeight <= 0) return
     if (mask.size < maskWidth * maskHeight) return
 
-    val image = remember(mask, maskWidth, maskHeight) {
-        val pixels = IntArray(maskWidth * maskHeight)
-        val base = colour.value.toLong().let {
-            // Colour components, so only the alpha varies per pixel.
-            val argb = colour.toArgb()
-            argb and 0x00FFFFFF
-        }
-        for (i in pixels.indices) {
-            val strength = mask[i].toInt() and 0xFF
-            // Transparent where nothing is resolving, so the picture shows
-            // through everywhere the overlay has nothing to say.
-            pixels[i] = (strength shl 24) or base
+    val image = remember(mask, maskWidth, maskHeight, sensorOrientation) {
+        val swaps = ((sensorOrientation % 360) + 360) % 360 % 180 != 0
+        val outW = if (swaps) maskHeight else maskWidth
+        val outH = if (swaps) maskWidth else maskHeight
+        val pixels = IntArray(outW * outH)
+        // Colour components, so only the alpha varies per pixel.
+        val base = colour.toArgb() and 0x00FFFFFF
+        for (y in 0 until outH) {
+            val fy = (y + 0.5f) / outH
+            for (x in 0 until outW) {
+                val (sx, sy) = dev.multiframe.camera.pipeline.TouchFocus.toSensorFraction((x + 0.5f) / outW, fy, sensorOrientation)
+                val mx = (sx * maskWidth).toInt().coerceIn(0, maskWidth - 1)
+                val my = (sy * maskHeight).toInt().coerceIn(0, maskHeight - 1)
+                val strength = mask[my * maskWidth + mx].toInt() and 0xFF
+                // Transparent where nothing is resolving, so the picture shows
+                // through everywhere the overlay has nothing to say.
+                pixels[y * outW + x] = (strength shl 24) or base
+            }
         }
         android.graphics.Bitmap.createBitmap(
-            pixels, maskWidth, maskHeight, android.graphics.Bitmap.Config.ARGB_8888,
+            pixels, outW, outH, android.graphics.Bitmap.Config.ARGB_8888,
         ).asImageBitmap()
     }
 
@@ -323,15 +339,14 @@ fun MosaicGuidance(
             val fx = node.frameX
             val fy = node.frameY
             if (fx == null || fy == null) continue
-            val projected = display(fx, fy)
-            // The magnet's visual half: a node that is locking is drawn *at*
-            // the reticle, not a few pixels off it where the tremor has the
-            // attitude putting it. The gate has latched; the eye should see
-            // the latch, not the jitter it is absorbing. Every other state is
-            // drawn where it is.
-            val locking = node.state == dev.multiframe.camera.pipeline.MosaicGuide.NodeState.LOCKING ||
-                node.state == dev.multiframe.camera.pipeline.MosaicGuide.NodeState.CAPTURING
-            val raw = if (locking) Offset(cx, cy) else projected
+            // Every dot is drawn exactly where the attitude projects it, in
+            // every state. A version drew the locking dot at the reticle, so
+            // the eye saw the latch -- and saw a target that jumped toward the
+            // reticle as it was approached and away as the lock dropped, which
+            // is a target to chase. A node is a direction in the world; it
+            // stays on the doorknob it was laid over, and the reticle comes to
+            // it.
+            val raw = display(fx, fy)
             // Clamped to the frame, with a margin so a dot at the edge is whole.
             val x = raw.x.coerceIn(margin, w - margin)
             val y = raw.y.coerceIn(margin, h - margin)

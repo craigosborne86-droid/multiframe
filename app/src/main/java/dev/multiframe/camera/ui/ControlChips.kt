@@ -17,7 +17,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -135,10 +134,12 @@ fun SettingsChips(
 }
 
 /**
- * The openers over the picture -- see [ControlBar.chrome]. Drawn as an icon
- * rather than a word: the top of the viewfinder is the one place a label is
- * clutter, and a pair of sliders is understood without one. A pill, like
- * every setting, and not a circle: circles are lenses.
+ * The openers: the settings gear over the picture ([ControlBar.chrome]) and
+ * PRO beside the shutter ([ControlBar.pro]). The gear is drawn as an icon --
+ * the top of the viewfinder is the one place a word is clutter, and a pair
+ * of sliders is understood without one; PRO is its word, which is what a
+ * camera engraves beside a manual dial. Pills, like every setting, and not
+ * circles: circles are lenses.
  */
 @Composable
 fun ChromeOpeners(
@@ -160,15 +161,19 @@ fun ChromeOpeners(
                     .semantics { contentDescription = spec.label },
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    imageVector = when (spec.id) {
-                        ControlBar.SETTINGS -> Icons.Outlined.Tune
-                        else -> Icons.Outlined.Info
-                    },
-                    contentDescription = null,
-                    tint = if (spec.active) Ink.OnBone else Ink.Bone,
-                    modifier = Modifier.size(22.dp),
-                )
+                when (spec.id) {
+                    ControlBar.SETTINGS -> Icon(
+                        imageVector = Icons.Outlined.Tune,
+                        contentDescription = null,
+                        tint = if (spec.active) Ink.OnBone else Ink.Bone,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    else -> Text(
+                        text = spec.label,
+                        style = Type.Control,
+                        color = if (spec.active) Ink.OnBone else Ink.Bone,
+                    )
+                }
             }
         }
     }

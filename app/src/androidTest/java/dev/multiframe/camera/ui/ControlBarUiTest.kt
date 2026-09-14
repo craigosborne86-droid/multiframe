@@ -35,9 +35,8 @@ class ControlBarUiTest {
 
     private val capable = ControlBarState(
         streamOffered = true,
+        manualOffered = true,
         superResOffered = true,
-        rawBurstOffered = true,
-        dngOffered = true,
     )
 
     private fun showSettings(state: ControlBarState): MutableList<String> {
@@ -76,10 +75,10 @@ class ControlBarUiTest {
     @Test
     fun touchingASettingReportsTheIdTheScreenDispatchesOn() {
         val fired = showSettings(capable)
-        compose.onNodeWithContentDescription("MERGE ON").performClick()
+        compose.onNodeWithContentDescription("DNG ON").performClick()
         compose.onNodeWithContentDescription("GUIDES OFF").performClick()
         compose.onNodeWithContentDescription("HISTOGRAM OFF").performClick()
-        assertThat(fired).containsExactly(ControlBar.MERGE, ControlBar.GUIDES, ControlBar.HISTOGRAM).inOrder()
+        assertThat(fired).containsExactly(ControlBar.DNG, ControlBar.GUIDES, ControlBar.HISTOGRAM).inOrder()
     }
 
     @Test
@@ -98,8 +97,8 @@ class ControlBarUiTest {
     @Test
     fun aDisabledSettingCannotBeFired() {
         val fired = showSettings(capable.copy(busy = true))
-        compose.onNodeWithContentDescription("MERGE ON").assertIsNotEnabled()
-        compose.onNodeWithContentDescription("MERGE ON").performClick()
+        compose.onNodeWithContentDescription("DNG ON").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("DNG ON").performClick()
         assertThat(fired).isEmpty()
     }
 
@@ -147,21 +146,13 @@ class ControlBarUiTest {
 
     // --- the actions ------------------------------------------------------------
 
+    /** The shutter bar is clean: nothing squared sits over the shutter unless a Super Res is running. */
     @Test
-    fun theCapturesThatAreNotTheShutterAreInTheirOwnStrip() {
-        val fired = showActions(capable.copy(burstFrames = 4))
-        compose.onNodeWithContentDescription("RAW ×4").assertIsDisplayed()
-        compose.onNodeWithContentDescription("DNG").performClick()
-        assertThat(fired).containsExactly(ControlBar.DNG)
-    }
-
-    @Test
-    fun noActionCanBeFiredWhileACaptureRuns() {
-        val fired = showActions(capable.copy(busy = true))
-        compose.onNodeWithContentDescription("DNG").assertIsNotEnabled()
-        compose.onNodeWithContentDescription("DNG").performClick()
-        compose.onNodeWithContentDescription("RAW ×4").performClick()
-        assertThat(fired).isEmpty()
+    fun theShutterBarIsEmptyUnlessASuperResIsRunning() {
+        showActions(capable.copy(burstFrames = 4))
+        compose.onNodeWithContentDescription("RAW ×4").assertDoesNotExist()
+        compose.onNodeWithContentDescription("DNG").assertDoesNotExist()
+        compose.onNodeWithContentDescription("STOP").assertDoesNotExist()
     }
 
     @Test
@@ -179,13 +170,6 @@ class ControlBarUiTest {
         assertThat(fired).isEmpty()
     }
 
-    @Test
-    fun aCameraWithoutRawRendersNoRawControls() {
-        showActions(capable.copy(rawBurstOffered = false, dngOffered = false))
-        compose.onNodeWithContentDescription("DNG").assertDoesNotExist()
-        compose.onNodeWithContentDescription("RAW ×4").assertDoesNotExist()
-    }
-
     // --- the chrome ---------------------------------------------------------------
 
     @Test
@@ -201,5 +185,18 @@ class ControlBarUiTest {
         assertThat(fired).containsExactly(ControlBar.SETTINGS)
         compose.onNodeWithContentDescription("INFO").assertDoesNotExist()
         compose.onNodeWithContentDescription("PRO").assertDoesNotExist()
+    }
+
+    @Test
+    fun theProOpenerRendersBesideTheShutterAndReportsItself() {
+        val fired = mutableListOf<String>()
+        compose.setContent {
+            MultiframeTheme {
+                ChromeOpeners(ControlBar.pro(capable), onControl = { fired.add(it) })
+            }
+        }
+        compose.assumeRendered()
+        compose.onNodeWithContentDescription("PRO").assertIsDisplayed().performClick()
+        assertThat(fired).containsExactly(ControlBar.PRO)
     }
 }

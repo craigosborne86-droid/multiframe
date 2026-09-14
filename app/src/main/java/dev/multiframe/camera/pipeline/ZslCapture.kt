@@ -40,6 +40,8 @@ object ZslCapture {
         superRes: Boolean = false,
         /** How the JPEG is rendered; the default is the PRD's global rendering. */
         develop: DevelopParams = DevelopParams(),
+        /** Whether the merged raw is written as a DNG beside the JPEG. */
+        writeDng: Boolean = true,
         onProgress: (String) -> Unit = {},
     ): RawBurstResult {
         val profile = SensorProfile.from(stream.characteristics)
@@ -215,6 +217,7 @@ object ZslCapture {
                         captured = captured,
                         lens = stream.lens,
                         params = develop,
+                        writeDng = writeDng,
                     )
                 } finally {
                     built.close()
@@ -267,6 +270,7 @@ object ZslCapture {
                 streamStats = statsAfter.toString(),
                 dcgActive = stream.dcg,
                 develop = develop,
+                writeDng = writeDng,
             ).copy(superRes = outcome)
         } catch (e: Exception) {
             Log.e(TAG, "ZSL merge failed", e)

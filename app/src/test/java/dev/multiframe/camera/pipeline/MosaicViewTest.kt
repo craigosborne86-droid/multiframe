@@ -25,20 +25,26 @@ class MosaicViewTest {
         assertThat(v.captureLensLabel).isEqualTo("110mm")
         val corners = v.canvasCorners!!
         assertThat(corners).hasSize(4)
-        // A 2x2 at the default overlap is 1.65 frames across, so the outline
-        // overhangs the frame by 0.325 of its width each side, symmetrically.
+        // The outline is the canvas, which for a 2x2 is wider than the frame
+        // -- the two tiles' far edges, plus the margin -- and overhangs it
+        // symmetrically.
         val (tlx, tly) = corners[0]
         val (brx, bry) = corners[2]
-        assertThat(tlx).isWithin(0.01f).of(-0.325f)
-        assertThat(brx).isWithin(0.01f).of(1.325f)
-        assertThat(tly).isWithin(0.01f).of(-0.325f)
-        assertThat(bry).isWithin(0.01f).of(1.325f)
+        val overhangX = (plan.canvasWidth / plan.placedTileWidth - 1f) / 2f
+        val overhangY = (plan.canvasHeight / plan.placedTileHeight - 1f) / 2f
+        assertThat(overhangX).isGreaterThan(0.3f)
+        assertThat(tlx).isWithin(0.01f).of(-overhangX)
+        assertThat(brx).isWithin(0.01f).of(1f + overhangX)
+        assertThat(tly).isWithin(0.01f).of(-overhangY)
+        assertThat(bry).isWithin(0.01f).of(1f + overhangY)
         assertThat((tlx + brx) / 2).isWithin(1e-3f).of(0.5f)
         assertThat((tly + bry) / 2).isWithin(1e-3f).of(0.5f)
         // The nodes sit inside it, a step apart, around the frame's centre.
         val xs = v.nodes.map { it.frameX!! }
-        assertThat(xs.min()).isWithin(0.01f).of(0.5f - 0.65f / 2)
-        assertThat(xs.max()).isWithin(0.01f).of(0.5f + 0.65f / 2)
+        val halfStep = plan.stepX / plan.placedTileWidth / 2f
+        assertThat(halfStep).isWithin(0.02f).of(0.35f)
+        assertThat(xs.min()).isWithin(0.01f).of(0.5f - halfStep)
+        assertThat(xs.max()).isWithin(0.01f).of(0.5f + halfStep)
         assertThat(v.nodes.all { it.state == MosaicGuide.NodeState.PENDING }).isTrue()
     }
 

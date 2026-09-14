@@ -73,6 +73,7 @@ not about the interface.
 |---|---|---|
 | `Level` | `#6FE39A` | Level gauge at rest. Appears only when level is achieved |
 | `Clipping` | `#FF6B6B` | Blown highlight indicator. Appears only when clipping |
+| `Peaking` | `#3DF2FF` | Focus peaking: the edges that are resolving, in a hue no scene has. Appears only while manual focus is engaged |
 
 **Sheet tokens (existing, for the About sheet):**
 
@@ -109,6 +110,13 @@ not about the interface.
 4. `Danger` and `Confirm` are **never** used on the viewfinder during normal
    operation. They appear only in: gallery delete confirmation, Super Res tile
    guidance (during an active capture only), and error dialogs.
+
+5. The three exception tokens -- `Level`, `Clipping`, `Peaking` -- are the
+   only chromatic marks permitted over the photograph, and each is a
+   *transient state about the photograph*: it appears when the thing is
+   true and vanishes when it stops being true. `Peaking` is drawn in the
+   preview's bounds and orientation, from the sensor's own luma, while
+   manual focus is engaged and at no other time.
 
 ---
 
@@ -174,7 +182,7 @@ object Haptics {
 |---|---|---|---|
 | Shutter pressed | `onClick` on shutter button | `Haptics.shutter` | Strong confirmation: a photograph was taken |
 | Self-timer tick | Each countdown second | `Haptics.tick` | Light metronome, not distracting |
-| Mode toggle | MERGE, DCG, ZSL, A/B, GUARD, 2X, LOCAL TONE, HISTOGRAM, SUPER RES 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
+| Mode toggle | GUARD, 2X, LOCAL TONE, HISTOGRAM, DNG, SUPER RES 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
 | Cycle value | FRAMES, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
 | Mode selected | AUTO, NIGHT, ACTION or SUPER RES chosen in the carousel | `Haptics.segment` | A dial detent; selecting SUPER RES also switches the lens, which has the same detent |
 | Super Res stopped | STOP tapped, or the back gesture while running | `Haptics.segment` | Acknowledging the request; the stop itself lands a moment later and is not felt |
@@ -188,6 +196,7 @@ object Haptics {
 | Mosaic complete | Every node captured | `Haptics.confirm` | The mosaic has finished itself |
 | Error action | Tapping a disabled control, invalid state | `Haptics.reject` | Something went wrong |
 | Settings open/close | The gear over the picture; DONE or the back gesture | (none) opening, `Haptics.segment` closing from DONE | Opening a screen is its own feedback; DONE is a control and gets the detent |
+| PRO drawer open/close | PRO beside the shutter; the back gesture | (none) | The drawer's slide is sufficient feedback |
 | Gallery delete confirmed | After confirmation dialog | `Haptics.confirm` | Acknowledge destructive action |
 
 #### 1.3.3 Anti-Patterns
@@ -851,20 +860,61 @@ current frame it is `R_nowᵀ · R₀ · v`, projected back as display pixels
 arithmetic on the optical axis `(0, 0, −1)`. Roll is a rotation like any
 other and costs nothing. The loop runs at 33 ms with no pixel read at all.
 
-The game rotation vector has no magnetometer to hold its yaw, so it drifts
-slowly. Every placed tile measures the drift: where the attitude at the
-burst's reference frame put the reticle, against where the frame's own
-pixels registered it. The difference is added to every reticle position and
-subtracted from every dot (`ImuGuidance.correct`), so the dots stay on the
-tiles. The frame is paired with the attitude *at its exposure* --
+**The targets are static.** A node is a direction in the world, fixed at
+the anchor, and nothing afterwards moves it: not a lock, not a registration.
+For a pure pan of `Δyaw` the displacement on the sensor is exactly
+`f · tan(Δyaw)`, and for a tilt `f · tan(Δpitch)` -- the general rotation
+above reduces to that, and `ImuGuidanceTest` holds it to a twentieth of a
+pixel at one, three and six degrees. Two things the third field test found
+and removed: a *magnet* -- the locking node kept its lock to 1.5 radii and
+its dot was drawn at the reticle -- which made a target that jumped toward
+the reticle as it was approached and away as the lock dropped, a target to
+chase; and a *drift correction* -- every placed tile's registration residual
+was added to every dot -- which made every dot jump at every tile. The game
+rotation vector's yaw drift over a capture is a fraction of a degree, a few
+percent of a tile, well inside the thirty percent overlap, so the dots are
+left where the world put them and the drift is logged, not applied.
+
+The frame is paired with the attitude *at its exposure* --
 `SENSOR_TIMESTAMP + exposure/2` against the attitude history -- where the
 camera stamps frames on the sensors' clock (`SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME`).
 Nothing about where a tile is placed comes from the attitude: placement is
 registration of the burst's reference frame against the anchor and the
-neighbouring tiles, exactly as before, and a burst that cannot be registered
-is rejected. `ImuGuidanceTest` turns the phone by known angles and reads the
-dots; `TouchFocus.toSensorFraction` is the inverse of `toDisplayPoint` and is
-tested as such.
+neighbouring tiles. But the attitude *judges* the registration
+(`MosaicCapture.captureNode`): a fit that puts the tile's centre more than a
+quarter of a tile from where the phone was pointing
+(`MAX_ATTITUDE_DISAGREEMENT`), or that fits the tile at more than a sixth
+off its size (`MAX_SCALE_ERROR`), is a fit onto the wrong features and is
+refused -- the node goes back to pending and the tile is taken again. The
+third field test's ghosts and black cutouts were tiles a weak fit had placed
+in the wrong place; a refused tile costs a second, a misplaced one ruins the
+canvas. `TouchFocus.toSensorFraction` is the inverse of `toDisplayPoint` and
+is tested as such.
+
+**The grid is angular, at thirty percent overlap.** Nodes are
+`(1 − overlap)` of the field of view apart --
+
+```
+step_yaw   = FOV_h · 0.70        step_pitch = FOV_v · 0.70
+node_k     = f · tan(k · step)   canvas half-width = f · tan(θ_max + FOV_h/2) · 1.05
+```
+
+-- with `f = (tileWidth/2) / tan(FOV_h/2)` in tile pixels and `FOV_v` from
+the sensor's own aspect (`MosaicPlanner.gridGeometry`). The first version
+stepped 0.65 of a tile in pixels and sized the canvas as if a tile at an
+angle were still a tile's width on the plane; on a 3×3 that came out four
+percent short and clipped the outer tiles' far edges. A grid that would reach
+past seventy degrees of half-angle is refused as not a picture.
+
+**The write has no hole in it.** Nine hand-held tiles are nine slightly
+turned rectangles, and the box around their union has corners nothing
+reached -- which JPEG, having no alpha, paints black. `MosaicCanvas` now
+writes the largest axis-aligned rectangle every pixel of which is covered
+(`CoveredInterior`, the maximal-rectangle histogram pass, one visit per
+pixel), so a complete mosaic is the picture inside the union and a partial
+one is the largest whole rectangle it contains.
+`MosaicCanvasTest.theWrittenImageIsTheLargestRectangleWithNoHoleInIt` lays
+two tiles as an L and reads no black pixel back.
 
 **Still, in the sensor's numbers.** A frame is blurred by how far the image
 moves during its exposure: through `omega * t` radians at angular speed
@@ -916,13 +966,10 @@ is the settle time of steady polls in a row, at least three of them: 170 ms
 frames' exposure window. The ring fills in proportion and the burst fires
 itself; there is nothing to press.
 
-**The magnet.** A node that is locking keeps its lock out to 1.5 radii
-(`MosaicGuide.MAGNET_MULTIPLE`): a hand on the dot trembles a few pixels
-over the edge and back, and without hysteresis the ring flickered and the
-hold restarted on every tremor. A node that was not locking gets no such
-reach, and a real departure past the magnet loses the lock. The guidance
-draws the locking node's dot at the reticle (the visual latch), so the eye
-reads "held" the moment the gate does.
+**The radius is the radius.** In and out at one lock radius, five percent
+of a tile, for every node in every state; see the retired magnet above. A
+tremor that carries the reticle over the edge restarts the hold, and the
+hold is 170 ms, so it is not a costly restart.
 
 **Why the old rule fired.** "Inside the radius for 250 ms, drift under a
 radius" -- with the tracker at the time polling every 300 ms, the second
@@ -1360,10 +1407,10 @@ photograph is.
 |---|---|
 | `Theme.kt` | `Ink` palette, `Type` scale, `Haptics` vocabulary, `MultiframeTheme` |
 | `Gauges.kt` | `GaugeState` holder and the live readouts: exposure, histogram, focus, zoom |
-| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`; the builders `chrome` (the one opener over the picture), `settings` (the settings screen's chips), `carousel` (AUTO · NIGHT · ACTION · SUPER RES), `actions` (STOP, RAW, DNG) |
+| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`; the builders `chrome` (the one opener over the picture), `pro` (the manual drawer's opener beside the shutter), `settings` (the settings screen's chips: FRAMES, TIMER, DNG, GUIDES, HISTOGRAM, INFO), `carousel` (AUTO · NIGHT · ACTION · SUPER RES), `actions` (STOP, while a Super Res runs; nothing otherwise) |
 | `ControlChips.kt` | Composable rendering: `ChromeOpeners`, `SettingsChips`, `ModeCarousel`, `ActionStrip`, `ControlChip` |
-| `SettingsScreen.kt` | Everything set once, on a screen of its own: the settings chips and the manual panel |
-| `ControlsPanel.kt` | The manual panel, a section of the settings screen: exposure, focus, WB, the set-once toggles, sliders |
+| `SettingsScreen.kt` | Everything set once, on a screen of its own: the settings chips and the set-once panel |
+| `ControlsPanel.kt` | `ManualPanel` -- exposure, focus, WB, in the PRO drawer over the bottom bar; `SetOncePanel` -- GUARD, 2X, LOCAL TONE, HEIF, reset, the capability summary, on the settings screen |
 | `BackNavigation.kt` | What the system back gesture does, given what is open: a pure stack, tested |
 | `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation; its own back handler |
 | `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), `MosaicGuidance` -- the outline, the reticle and the dots -- and `MosaicPresetPill` (`2×2 · 33 MP | 3×3 · 75 MP`) |

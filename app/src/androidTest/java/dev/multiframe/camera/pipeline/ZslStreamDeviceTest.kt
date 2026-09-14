@@ -338,6 +338,7 @@ class ZslStreamDeviceTest {
         var turning = 0
         val deadline = System.currentTimeMillis() + 15_000
         var colour: ColorProfile? = null
+        var developGain = 0f
         // What auto exposure had chosen before the lock, and what the lock
         // pinned: the shutter floor is exercised here with the sensor's real
         // ranges, on whatever light the phone is lying in.
@@ -391,6 +392,7 @@ class ZslStreamDeviceTest {
                 )
             }
             colour = it.color
+            developGain = it.developGain
             r
         }
         motion.close()
@@ -415,6 +417,14 @@ class ZslStreamDeviceTest {
         if (events.none { it.startsWith("Locked") } && turning > 0) {
             Log.w(TAG, "the phone was moving on $turning of $polls polls; the gate refused, as it should")
             assumeTrue("the phone was moving during the test", false)
+        }
+        // Nor is a phone lying face down. A develop gain at its ceiling is a
+        // frame the sensor saw nothing in, and a burst of nothing cannot be
+        // registered against an anchor of nothing -- refusing it is the
+        // assembler working. Skipped, and said.
+        if (events.none { it.startsWith("Captured") } && developGain >= DARK_GAIN) {
+            Log.w(TAG, "the scene was too dark to register: develop gain %.0f".format(developGain))
+            assumeTrue("the scene was too dark to register during the test", false)
         }
 
         // Anchored, then the one node held, captured and the mosaic completed.
@@ -466,6 +476,9 @@ class ZslStreamDeviceTest {
                 .isEqualTo(android.media.ExifInterface.ORIENTATION_ROTATE_90)
         }
     }
+
+    /** A develop gain this high is a frame with nothing in it: the sensor saw the dark. */
+    private val DARK_GAIN = 32f
 
     /** The newest file of this app's in the library whose name carries [tag]. */
     private fun newestFile(tag: String): android.net.Uri? =

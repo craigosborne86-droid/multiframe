@@ -108,6 +108,12 @@ class ThemeTest {
     fun theSemanticColoursAreNotTheViewfinderExceptions() {
         assertThat(Ink.Danger).isNotEqualTo(Ink.Clipping)
         assertThat(Ink.Confirm).isNotEqualTo(Ink.Level)
+        // The peaking hue is one no scene has, and none of the other three.
+        assertThat(Ink.Peaking).isNotEqualTo(Ink.Level)
+        assertThat(Ink.Peaking).isNotEqualTo(Ink.Clipping)
+        assertThat(Ink.Peaking.blue).isGreaterThan(0.9f)
+        assertThat(Ink.Peaking.green).isGreaterThan(0.9f)
+        assertThat(Ink.Peaking.red).isLessThan(0.3f)
     }
 
     @Test

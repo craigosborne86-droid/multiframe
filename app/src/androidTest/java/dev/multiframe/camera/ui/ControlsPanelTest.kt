@@ -2,6 +2,7 @@ package dev.multiframe.camera.ui
 
 import android.hardware.camera2.CameraMetadata
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
@@ -18,13 +19,14 @@ import org.junit.Rule
 import org.junit.Test
 
 /**
- * The pro controls.
+ * The manual drawer and the set-once panel.
  *
  * Every control is supposed to be gated on something the hardware actually
  * reports, so that a phone without a focusable lens or without manual exposure
- * gets a smaller panel rather than controls that send requests the camera will
- * reject. That gating is the thing worth testing: it is invisible on the
- * development device, which supports everything.
+ * gets a smaller drawer rather than controls that send requests the camera
+ * will reject. That gating is the thing worth testing: it is invisible on the
+ * development device, which supports everything. And nothing a developer
+ * flips -- the ISP switch, the A/B pair, the bracket -- is anywhere in either.
  */
 class ControlsPanelTest {
 
@@ -59,7 +61,7 @@ class ControlsPanelTest {
         val state = mutableStateOf(initial)
         compose.setContent {
             Box(modifier = Modifier.fillMaxSize()) {
-                ControlsPanel(
+                ManualPanel(
                     settings = state.value,
                     caps = caps,
                     onChange = { state.value = it },
@@ -70,25 +72,23 @@ class ControlsPanelTest {
         return { state.value }
     }
 
-    /** The panel with everything that moved into it from the row over the picture. */
-    private fun showFull(): Pair<() -> Boolean, () -> Int> {
-        val ab = mutableStateOf(false)
+    /** The set-once panel, with a guard to show and a reset to count. */
+    private fun showSetOnce(caps: CameraCapabilities? = fullyCapable, guard: Boolean? = true): Pair<() -> Boolean, () -> Int> {
+        val tone = mutableStateOf(false)
         val resets = mutableStateOf(0)
         compose.setContent {
             Box(modifier = Modifier.fillMaxSize()) {
-                ControlsPanel(
-                    settings = ManualSettings(),
-                    caps = fullyCapable,
-                    onChange = {},
-                    abMode = ab.value,
-                    onAbMode = { ab.value = it },
-                    highlightGuard = true,
+                SetOncePanel(
+                    caps = caps,
+                    highlightGuard = guard,
+                    localTone = tone.value,
+                    onLocalTone = { tone.value = it },
                     onReset = { resets.value++ },
                 )
             }
         }
         compose.assumeRendered()
-        return { ab.value } to { resets.value }
+        return { tone.value } to { resets.value }
     }
 
     // ------------------------------------------------------------------
@@ -100,29 +100,51 @@ class ControlsPanelTest {
      */
     @Test
     fun thereIsAWayBackToTheDefaults() {
-        val (_, resets) = showFull()
+        val (_, resets) = showSetOnce()
         compose.onNodeWithContentDescription("Reset all settings").performClick()
         assertThat(resets()).isEqualTo(1)
     }
 
-    /**
-     * These two moved out of the row over the viewfinder, which was nine long
-     * and showed two and a half on a phone. Neither is touched while composing.
-     */
+    /** The rendering choices are on the set-once panel and report back. */
     @Test
-    fun theSettingsThatMovedOutOfTheRowAreHere() {
-        val (ab, _) = showFull()
+    fun theRenderingChoicesAreHereAndReportBack() {
+        val (tone, _) = showSetOnce()
         compose.onNodeWithContentDescription("GUARD ON").assertIsDisplayed()
-        compose.onNodeWithContentDescription("A/B OFF").performClick()
-        assertThat(ab()).isTrue()
+        compose.onNodeWithContentDescription("LOCAL TONE OFF").performClick()
+        assertThat(tone()).isTrue()
     }
 
     /** No zero-shutter-lag stream, nothing to guard highlights for. */
     @Test
     fun theGuardIsAbsentWhereThereIsNoStreamToGuard() {
-        show(fullyCapable)
+        showSetOnce(guard = null)
         compose.onNodeWithContentDescription("GUARD ON").assertDoesNotExist()
         compose.onNodeWithContentDescription("GUARD OFF").assertDoesNotExist()
+    }
+
+    /**
+     * The developer's switches are gone from the user's app: the ISP switch
+     * from the drawer, the A/B pair and the bracket from the set-once panel.
+     */
+    @Test
+    fun noDeveloperSwitchIsDrawnAnywhere() {
+        compose.setContent {
+            Column(modifier = Modifier.fillMaxSize()) {
+                ManualPanel(settings = ManualSettings(), caps = fullyCapable, onChange = {})
+                SetOncePanel(caps = fullyCapable, highlightGuard = true, superRes = false, outputFormat = null)
+            }
+        }
+        compose.assumeRendered()
+        // Both panels are up, with their real controls...
+        compose.onNodeWithContentDescription("AE AUTO").assertExists()
+        compose.onNodeWithContentDescription("GUARD ON").assertExists()
+        // ...and none of the switches a developer used to flip.
+        for (label in listOf(
+            "ISP ON", "ISP OFF", "A/B ON", "A/B OFF", "DCG ON", "DCG OFF",
+            "MERGE ON", "MERGE OFF", "ZSL ON", "ZSL OFF",
+        )) {
+            compose.onNodeWithContentDescription(label).assertDoesNotExist()
+        }
     }
 
 
@@ -170,16 +192,22 @@ class ControlsPanelTest {
     fun theCapabilitySummaryIsShown() {
         // So a user can see what the hardware admits to rather than guessing
         // why a control is missing.
-        show(fullyCapable)
+        showSetOnce()
 
         compose.onNodeWithText(fullyCapable.summary()).assertIsDisplayed()
     }
 
     @Test
     fun noCapabilitiesYetDrawsNothingRatherThanCrashing() {
-        // The panel can be composed before the camera has finished binding.
-        show(caps = null)
-
+        // Either panel can be composed before the camera has finished binding.
+        compose.setContent {
+            Column(modifier = Modifier.fillMaxSize()) {
+                ManualPanel(settings = ManualSettings(), caps = null, onChange = {})
+                SetOncePanel(caps = null, onReset = {})
+            }
+        }
+        compose.assumeRendered()
         compose.onNodeWithContentDescription("AE AUTO").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Reset all settings").assertDoesNotExist()
     }
 }

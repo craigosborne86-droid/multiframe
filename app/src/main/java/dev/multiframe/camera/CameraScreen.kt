@@ -96,8 +96,6 @@ import dev.multiframe.camera.pipeline.CaptureReadout
 import dev.multiframe.camera.pipeline.CaptureModes
 import dev.multiframe.camera.pipeline.ColorProfile
 import dev.multiframe.camera.pipeline.ColorScience
-import dev.multiframe.camera.pipeline.DcgCalibrationStore
-import dev.multiframe.camera.pipeline.DcgProfiler
 import dev.multiframe.camera.pipeline.HeifEncoder
 import dev.multiframe.camera.pipeline.OutputFormat
 import dev.multiframe.camera.pipeline.SceneAnalysis
@@ -123,7 +121,6 @@ import dev.multiframe.camera.pipeline.ImageSaver
 import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.MemoryBudget
 import dev.multiframe.camera.pipeline.RawBurstCapture
-import dev.multiframe.camera.pipeline.RawCapture
 import dev.multiframe.camera.pipeline.RawRingBudget
 import dev.multiframe.camera.pipeline.RecentCapture
 import dev.multiframe.camera.pipeline.RecentShot
@@ -153,7 +150,11 @@ import dev.multiframe.camera.ui.Guides
 import dev.multiframe.camera.ui.Peaking
 import dev.multiframe.camera.ui.MosaicPresetPill
 import dev.multiframe.camera.ui.MosaicGuidance
-import dev.multiframe.camera.ui.ControlsPanel
+import dev.multiframe.camera.ui.ManualPanel
+import dev.multiframe.camera.ui.SetOncePanel
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import dev.multiframe.camera.ui.ActionStrip
 import dev.multiframe.camera.ui.BackNavigation
 import dev.multiframe.camera.ui.ChromeOpeners
@@ -177,6 +178,9 @@ import kotlin.math.roundToInt
 private const val TAG = "Multiframe"
 /** Frames requested per shutter press; the ring shrinks this if the heap cannot hold it. */
 private const val DESIRED_BURST = 12
+
+/** How long a refused or released raw ring waits before it is tried again. */
+private const val RING_RETRY_MILLIS = 30_000L
 
 /** Side of the focus reticle, in pixels. */
 private const val RETICLE_PX = 180f
@@ -212,9 +216,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
     var surfaceRequest by remember { mutableStateOf<SurfaceRequest?>(null) }
     var status by remember { mutableStateOf("") }
-    var mergeEnabled by remember { mutableStateOf(restored.mergeEnabled) }
-    var abMode by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showPro by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var showGallery by remember { mutableStateOf(false) }
     var showHistogram by remember { mutableStateOf(restored.histogram) }
@@ -237,7 +240,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var provider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
     var cameraId by remember { mutableStateOf<String?>(null) }
     var zslDecision by remember { mutableStateOf<ZslDecision?>(null) }
-    var zslWanted by remember { mutableStateOf(restored.zslEnabled) }
+    // The ring is the engine, not a setting: wanted from the first frame, on
+    // every mode, and false only while the hardware or the memory has refused
+    // it -- in which case the sequential path is the camera until it is tried
+    // again. There is no switch for it anywhere a user can reach.
+    var zslWanted by remember { mutableStateOf(true) }
     var zslSurface by remember { mutableStateOf<Surface?>(null) }
     var zslStream by remember { mutableStateOf<ZslRawStream?>(null) }
 
@@ -256,7 +263,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // nothing on a scene that does not need it.
     var highlightGuard by remember { mutableStateOf(restored.highlightGuard) }
     var guardPull by remember { mutableFloatStateOf(0f) }
-    var dcgEnabled by remember { mutableStateOf(restored.dcgEnabled) }
+    var dngEnabled by remember { mutableStateOf(restored.dngEnabled) }
     var superRes by remember { mutableStateOf(restored.superRes) }
     var localTone by remember { mutableStateOf(restored.localTone) }
     var outputFormat by remember { mutableStateOf(restored.outputFormat) }
@@ -302,9 +309,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // mosaic records when it is wider than the capture lens, and the lens to
     // return to on leaving.
     var mosaicReturnLens by remember { mutableStateOf<Lens?>(null) }
-    // The ring setting as the user left it, while Super Res holds the ring on
-    // over it; null when the mode is not holding it.
-    var zslBeforeSuperRes by remember { mutableStateOf<Boolean?>(null) }
     var mosaicPreset by remember {
         // The drawn-region preset is not offered on the pill; a saved one
         // falls back to the smaller grid.
@@ -448,9 +452,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         // not worth holding while the system is struggling.
                         NativeMerge.releaseScratch()
                         if (zslWanted) {
+                            // Said in the log, not on the viewfinder: what the
+                            // user sees is a camera that keeps working, and it
+                            // tries the ring again shortly.
                             Log.w(TAG, "memory pressure $level: releasing the raw ring")
                             zslWanted = false
-                            status = "raw ring released: the system is short of memory"
                         }
                     }
                 }
@@ -540,11 +546,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         // deadlock: the raw ring cannot open without `caps`, `lens` and
         // `cameraId`, and only this path ever sets them.
         //
-        // It is reachable from a cold start, because the setting persists and
-        // `AppSettings.zslEnabled` defaults to true -- so a fresh install hit
-        // it on first launch. The app came up with a black viewfinder, no lens
-        // strip and no way out, since the control that would have switched ZSL
-        // off is itself gated on capabilities that were never read.
+        // It is reachable from every cold start, because the ring is always
+        // wanted -- and before it was always wanted it was a setting that
+        // defaulted on, and a fresh install hit exactly this: a black
+        // viewfinder, no lens strip and no way out, since the control that
+        // would have switched the ring off was itself gated on capabilities
+        // that were never read.
         //
         // So the first pass always binds, discovers, and hands the camera over
         // at the end. It costs one bind and unbind on a launch that wanted the
@@ -830,10 +837,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         if (depth >= RawRingBudget.MIN_CAPACITY &&
             !MemoryPressure.canAffordRing(memory.availMem, required)
         ) {
+            // Refused, in the log; the viewfinder shows a camera that works,
+            // and the ring is tried again shortly.
             zslWanted = false
-            status = "not enough free memory for a %.0f MB ring".format(
-                required / (1024.0 * 1024.0),
-            )
             Log.w(
                 TAG,
                 "ZSL declined: ${memory.availMem / (1024 * 1024)}MB free, " +
@@ -843,7 +849,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
         if (depth < RawRingBudget.MIN_CAPACITY) {
                     zslWanted = false
-                    status = "not enough free memory for a raw ring"
                     Log.w(TAG, "ZSL declined: ${memory.availMem / (1024 * 1024)}MB free")
                     return@withLock
                 }
@@ -861,16 +866,21 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
                 if (opened == null) {
                     // Falling back is a decision, not a crash: the sequential
-                    // path is still a working camera.
+                    // path is still a working camera, and says nothing about it.
                     zslWanted = false
-                    status = "raw stream unavailable, back to sequential capture"
+                    Log.w(TAG, "raw stream unavailable, back to sequential capture")
                 } else {
                     zslStream = opened
                     zslOpenSurface = surface
-                    status = "%s ZSL %s, ring %d (%.0f MB), burst %d".format(
-                        chosen.label, config, opened.ringCapacity,
-                        opened.ringReservedBytes / (1024.0 * 1024.0), opened.maxBurst,
+                    // The ring's shape is the log's business, not the viewfinder's.
+                    Log.i(
+                        TAG,
+                        "%s ZSL %s, ring %d (%.0f MB), burst %d".format(
+                            chosen.label, config, opened.ringCapacity,
+                            opened.ringReservedBytes / (1024.0 * 1024.0), opened.maxBurst,
+                        ),
                     )
+                    if (status.startsWith("engaging") || status.startsWith("switching")) status = ""
                 }
             }
         }
@@ -886,15 +896,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // Push manual settings whenever they change. Camera2Interop.Extender only
     // applies at use-case build time, so live updates go through
     // Camera2CameraControl instead.
-    LaunchedEffect(settings, camera, caps, zslStream, dcgEnabled) {
+    LaunchedEffect(settings, camera, caps, zslStream) {
         val c = caps ?: return@LaunchedEffect
-        zslStream?.let { stream ->
-            stream.applySettings(settings, c)
-            val canBracket = c.supportsBracketing
-            if (stream.dcg != (dcgEnabled && canBracket)) {
-                stream.setDcg(dcgEnabled && canBracket, settings, c)
-            }
-        }
+        zslStream?.let { stream -> stream.applySettings(settings, c) }
         val cam = camera ?: return@LaunchedEffect
         try {
             Camera2CameraControl.from(cam.cameraControl)
@@ -953,54 +957,16 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    // The read-noise profiling, which the user is never told about.
-    //
-    // Runs once per camera per install and takes a second or two of ISO steps
-    // on the repeating request. It is gated on the store rather than on a flag
-    // in memory so that a second launch does not repeat it, and gated on `busy`
-    // so it never overlaps a capture -- it drives the sensitivity, and a burst
-    // taken while it is stepping would be shot at whatever ISO the ladder
-    // happened to be on.
-    //
-    // A failure records nothing, which means the next launch tries again. That
-    // is deliberate: the usual reason to fail is that the phone was moving too
-    // much for the frame pair to cancel, and next time it may not be.
-    LaunchedEffect(zslStream, caps, busy) {
-        val stream = zslStream ?: return@LaunchedEffect
-        val c = caps ?: return@LaunchedEffect
-        if (busy) return@LaunchedEffect
-        if (!c.supportsBracketing) return@LaunchedEffect
-
-        val id = stream.lensId
-        if (DcgCalibrationStore.hasProfiled(context, id)) {
-            // Measured on an earlier launch. The stream is new even though the
-            // finding is not, so it has to be told.
-            stream.setGainThreshold(
-                DcgCalibrationStore.thresholdFor(context, id), settings, c,
-            )
-            return@LaunchedEffect
-        }
-
-        // Let the stream fill and auto-exposure settle before taking the
-        // sensor away from it. Profiling an empty ring measures nothing.
-        kotlinx.coroutines.delay(2500)
-        if (busy) return@LaunchedEffect
-
-        val result = withContext(Dispatchers.Default) {
-            runCatching {
-                DcgProfiler.profile(context, stream, c, settings, id)
-            }.onFailure { Log.w(TAG, "noise profiling failed", it) }.getOrNull()
-        }
-
-        // A measured threshold replaces the software default for this camera.
-        result?.thresholdIso?.let { threshold ->
-            lensProfiles = lensProfiles.mapValues { (cameraId, profile) ->
-                if (cameraId == id) profile.copy(dcgThresholdIso = threshold)
-                else profile
-            }
-            stream.setGainThreshold(threshold, settings, c)
-            Log.i(TAG, "$id brackets at the measured gain switch: ISO $threshold")
-        }
+    // The ring, tried again. A ring the memory refused, or one released
+    // under pressure, is not refused forever: half a minute on, the
+    // sequential path hands back to it, and the attempt is cheap where the
+    // memory is still short -- the budget is checked before anything is
+    // allocated. Nothing about this reaches the viewfinder.
+    LaunchedEffect(zslWanted, zslDecision) {
+        if (zslWanted || zslDecision !is ZslDecision.Stream) return@LaunchedEffect
+        kotlinx.coroutines.delay(RING_RETRY_MILLIS)
+        Log.i(TAG, "trying the raw ring again")
+        zslWanted = true
     }
 
     // The lens Super Res shoots its tiles with: the longest raw rear lens.
@@ -1068,8 +1034,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
     /**
      * Leaves Super Res for [mode], or enters it. Entering switches the lens to
-     * the telephoto and, if the ring is off, turns it on -- the mode needs the
-     * ring and asks nobody to know that. Leaving puts both back.
+     * the telephoto; leaving puts it back.
      */
     val selectMode: (CaptureMode) -> Unit = { mode ->
         if (mode == CaptureMode.SUPER_RES) {
@@ -1078,10 +1043,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 captureMode = mode
                 val capture = mosaicCaptureLens
                 mosaicReturnLens = lens
-                if (!zslWanted) {
-                    zslBeforeSuperRes = zslWanted
-                    zslWanted = true
-                }
+                // The ring is the engine; if it was released, this is the moment to have it back.
+                zslWanted = true
                 if (capture != null && lens?.cameraId != capture.cameraId) {
                     lens = capture
                     status = "switching to ${capture.label}…"
@@ -1092,8 +1055,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 superResPhase = SuperResMachine.apply(superResPhase, SuperResMachine.Event.Deselect)
                 mosaicReturnLens?.let { lens = it }
                 mosaicReturnLens = null
-                zslBeforeSuperRes?.let { zslWanted = it }
-                zslBeforeSuperRes = null
             }
             captureMode = mode
             status = ""
@@ -1232,8 +1193,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // Written whenever anything worth remembering changes. Cheap: a dozen
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(
-        settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, zslBeforeSuperRes, captureMode,
-        timerSeconds, guides, dcgEnabled, superRes, mosaicPreset, localTone, outputFormat, showHistogram,
+        settings, burstFrames, lens, highlightGuard, captureMode, dngEnabled,
+        timerSeconds, guides, superRes, mosaicPreset, localTone, outputFormat, showHistogram,
         mosaicReturnLens,
     ) {
         AppSettings.save(
@@ -1243,15 +1204,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 burstFrames = burstFrames,
                 // What the user chose, not what Super Res is holding for the
                 // moment: the app reopens in an ordinary mode on the lens they
-                // were on, with the ring as they left it.
+                // were on.
                 lensId = (mosaicReturnLens ?: lens)?.cameraId,
-                mergeEnabled = mergeEnabled,
                 highlightGuard = highlightGuard,
-                zslEnabled = zslBeforeSuperRes ?: zslWanted,
+                dngEnabled = dngEnabled,
                 captureMode = if (captureMode == CaptureMode.SUPER_RES) CaptureMode.AUTO else captureMode,
                 timerSeconds = timerSeconds,
                 guides = guides.name,
-                dcgEnabled = dcgEnabled,
                 superRes = superRes,
                 mosaicPreset = mosaicPreset,
                 localTone = localTone,
@@ -1396,7 +1355,19 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
         Guides(mode = guides, attitude = attitude)
 
-        Peaking(mask = peakingMask, maskWidth = PEAK_W, maskHeight = PEAK_H)
+        // Over the picture and only the picture, turned into its orientation.
+        previewBounds?.let { b ->
+            val density = LocalDensity.current
+            Peaking(
+                mask = peakingMask,
+                maskWidth = PEAK_W,
+                maskHeight = PEAK_H,
+                sensorOrientation = caps?.sensorOrientation ?: 90,
+                modifier = Modifier
+                    .offset { IntOffset(b.left.toInt(), b.top.toInt()) }
+                    .size(with(density) { b.width.toDp() }, with(density) { b.height.toDp() }),
+            )
+        }
 
         if (settings.manualFocus) {
             FocusGauge(
@@ -1444,13 +1415,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         val resolvedLabel = capturePlan?.resolved?.label
         val barState = ControlBarState(
             busy = busy,
-            mergeEnabled = mergeEnabled,
             burstFrames = burstFrames,
             timerSeconds = timerSeconds,
             guidesLabel = guides.valueLabel,
             guidesOn = guides != GuideMode.OFF,
             histogramOn = showHistogram,
+            dngOn = dngEnabled,
             settingsOpen = showSettings,
+            proOpen = showPro,
             aboutOpen = showAbout,
             mode = captureMode.label,
             // Say what AUTO settled on, not just that it is AUTO.
@@ -1458,11 +1430,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // Only offered where the hardware said yes. On a camera that stalls
             // on raw the ring is never offered and nothing changes.
             streamOffered = zslDecision is ZslDecision.Stream,
-            zslOn = zslWanted,
+            // The drawer has something to draw where the sensor takes a manual
+            // exposure or the lens a manual focus.
+            manualOffered = caps?.let { it.hasManualSensor || it.hasManualFocus } == true,
             superResOffered = superResOffered,
             superRes = superResPhase,
-            rawBurstOffered = rawCapture != null && characteristics != null,
-            dngOffered = rawCapture != null,
         )
 
         val handleControl: (String) -> Unit = handle@{ id ->
@@ -1471,7 +1443,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // feedback. The actions get one too: the tick is acknowledging the
             // press, and the capture it starts is asynchronous -- nothing is
             // vibrating while the sensor is integrating.
-            if (id != ControlBar.SETTINGS && id != ControlBar.ABOUT) {
+            if (id != ControlBar.SETTINGS && id != ControlBar.ABOUT && id != ControlBar.PRO) {
                 Haptics.segment(view)
             }
             ControlBar.modeOf(id)?.let { mode ->
@@ -1479,17 +1451,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 return@handle
             }
             when (id) {
-                ControlBar.MERGE -> mergeEnabled = !mergeEnabled
                 ControlBar.FRAMES -> {
                     // Only counts the heap-sized ring can actually hold.
                     val ceiling = zslStream?.maxBurst ?: buffer.capacity
                     burstFrames = ControlBar.nextBurst(burstFrames, ceiling)
                 }
-                ControlBar.ZSL -> {
-                    zslWanted = !zslWanted
-                    status = if (zslWanted) "engaging raw ring…"
-                    else "sequential capture"
-                }
+                ControlBar.DNG -> dngEnabled = !dngEnabled
+                ControlBar.PRO -> showPro = !showPro
                 ControlBar.TIMER -> timerSeconds = ControlBar.nextTimer(timerSeconds)
                 ControlBar.GUIDES -> guides = guides.next()
                 ControlBar.HISTOGRAM -> showHistogram = !showHistogram
@@ -1497,59 +1465,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 ControlBar.ABOUT -> showAbout = true
                 ControlBar.STOP -> stopSuperRes()
 
-                ControlBar.RAW_BURST -> {
-                    busy = true
-                    status = "raw burst…"
-                    scope.launch {
-                        val r = withContext(Dispatchers.Default) {
-                            RawBurstCapture.captureAndMerge(
-                                context = context,
-                                imageCapture = rawCapture!!,
-                                characteristics = characteristics!!,
-                                captureResult = lastCaptureResult.get(),
-                                frameCount = burstFrames,
-                                // The equivalent focal length is the
-                                // catalogue's to know, not the capture
-                                // result's.
-                                lens = lens,
-                                lensProfile = lens?.let { lensProfiles[it.cameraId] },
-                                outputFormat = outputFormat,
-                                rotationDegrees = caps?.let {
-                                    orientation.captureRotation(it.sensorOrientation)
-                                } ?: 0,
-                                develop = DevelopParams(
-                                    localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
-                                ),
-                                onProgress = { },
-                            )
-                        }
-                        Log.i(TAG, "raw burst result: $r")
-                        Log.i(
-                            TAG,
-                            ("capture %dms  merge %dms  develop %dms  " +
-                                "write %dms").format(
-                                r.captureMillis, r.mergeMillis,
-                                r.developMillis, r.writeMillis,
-                            ),
-                        )
-                        status = r.stats?.let {
-                            CaptureReadout.of(it.framesMerged, it.meanContribution)
-                        } ?: r.message
-                        busy = false
-                    }
-                }
-
-                ControlBar.DNG -> {
-                    busy = true
-                    status = "DNG + JPEG…"
-                    RawCapture.capture(
-                        imageCapture = rawCapture!!,
-                        context = context,
-                    ) { message ->
-                        status = message
-                        busy = false
-                    }
-                }
             }
         }
 
@@ -1667,16 +1582,34 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 }
             }
 
+            // The manual drawer: exposure, focus and white balance, slid up
+            // over the bottom bar with the picture left whole above it. Its
+            // own ground, with the shutter row's, so the two read as one
+            // surface the controls stand on; nothing of it is drawn until
+            // PRO is touched.
+            val drawerOpen = showPro && caps != null
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .then(if (drawerOpen) Modifier.background(Ink.Panel, PanelShape) else Modifier)
                     .navigationBarsPadding(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                // The captures that are not the shutter. Squared off rather than
-                // pilled, and here rather than in the row at the top, because every
-                // one of them writes a photograph the moment it is touched and the
-                // things up there do not.
+                AnimatedVisibility(
+                    visible = drawerOpen,
+                    enter = expandVertically(expandFrom = Alignment.Bottom),
+                    exit = shrinkVertically(shrinkTowards = Alignment.Bottom),
+                ) {
+                    ManualPanel(
+                        settings = settings,
+                        caps = caps,
+                        onChange = { settings = it },
+                    )
+                }
+
+                // The one action that is not the shutter: STOP, while a Super
+                // Res runs. Squared off rather than pilled, because it ends a
+                // capture the moment it is touched.
                 ActionStrip(
                     specs = ControlBar.actions(barState),
                     onControl = handleControl,
@@ -1797,6 +1730,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                             develop = DevelopParams(
                                                 localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
                                             ),
+                                            writeDng = dngEnabled,
                                         )
                                     }
                                     Log.i(TAG, "ZSL result: $r")
@@ -1821,49 +1755,75 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 return@ShutterButton
                             }
 
+                            // Without a ring -- the hardware refused one, or the
+                            // memory did -- the sequential path is the camera.
+                            // The merge is not a choice here either: a raw
+                            // burst through CameraX where the device delivers
+                            // raw, and the analysis stream's merge where it
+                            // does not.
                             busy = true
-                            status = if (abMode) "A/B capture, $burstFrames frames…"
-                            else "Capturing $burstFrames frames…"
-
+                            status = "capturing $burstFrames frames…"
                             val rotation = caps?.let { orientation.captureRotation(it.sensorOrientation) } ?: 0
+                            val raw = rawCapture
+                            val ch = characteristics
+                            if (raw != null && ch != null) {
+                                scope.launch {
+                                    val r = withContext(Dispatchers.Default) {
+                                        RawBurstCapture.captureAndMerge(
+                                            context = context,
+                                            imageCapture = raw,
+                                            characteristics = ch,
+                                            captureResult = lastCaptureResult.get(),
+                                            frameCount = burstFrames,
+                                            // The equivalent focal length is the
+                                            // catalogue's to know, not the capture
+                                            // result's.
+                                            lens = lens,
+                                            lensProfile = lens?.let { lensProfiles[it.cameraId] },
+                                            outputFormat = outputFormat,
+                                            rotationDegrees = rotation,
+                                            develop = DevelopParams(
+                                                localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
+                                            ),
+                                            writeDng = dngEnabled,
+                                            onProgress = { },
+                                        )
+                                    }
+                                    Log.i(TAG, "raw burst result: $r")
+                                    Log.i(
+                                        TAG,
+                                        ("capture %dms  merge %dms  develop %dms  " +
+                                            "write %dms").format(
+                                            r.captureMillis, r.mergeMillis,
+                                            r.developMillis, r.writeMillis,
+                                        ),
+                                    )
+                                    status = r.stats?.let {
+                                        CaptureReadout.of(it.framesMerged, it.meanContribution)
+                                    } ?: r.message
+                                    busy = false
+                                }
+                                return@ShutterButton
+                            }
 
                             scope.launch {
-                                val label = if (abMode) "ab" else if (mergeEnabled) "merged" else "single"
                                 val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
                                     .format(System.currentTimeMillis())
 
                                 val result = withContext(Dispatchers.Default) {
-                                    // One snapshot drives every output, so an A/B pair is
-                                    // guaranteed to be the same scene at the same instant.
-                                    val frames = buffer.snapshot(
-                                        if (mergeEnabled || abMode) {
-                                            burstFrames.coerceAtMost(buffer.capacity)
-                                        } else 1
-                                    )
+                                    val frames = buffer.snapshot(burstFrames.coerceAtMost(buffer.capacity))
                                     if (frames.isEmpty()) return@withContext null
-
-                                    fun save(mergeIt: Boolean, suffix: String): Pair<Any?, Any?> {
-                                        val out = Merger.process(frames, mergeIt)
-                                        val bmp = OrientationTracker.rotate(out.bitmap, rotation)
-                                        val uri = ImageSaver.saveJpeg(
-                                            context, bmp, "MF_${stamp}_$suffix.jpg",
-                                        )
-                                        bmp.recycle()
-                                        return out.stats to uri
-                                    }
-
-                                    if (abMode) {
-                                        save(false, "ab_single")
-                                        save(true, "ab_merged")
-                                    } else {
-                                        save(mergeEnabled, label)
-                                    }
+                                    val out = Merger.process(frames, mergeEnabled = true)
+                                    val bmp = OrientationTracker.rotate(out.bitmap, rotation)
+                                    val uri = ImageSaver.saveJpeg(context, bmp, "MF_${stamp}_merged.jpg")
+                                    bmp.recycle()
+                                    out.stats to uri
                                 }
 
                                 status = if (result == null) {
                                     "No frames buffered yet"
                                 } else {
-                                    val stats = result.first as dev.multiframe.camera.pipeline.MergeStats
+                                    val stats = result.first
                                     // The engineering detail stays in the log, where it
                                     // has always been read from. What reaches the screen
                                     // is what the merge bought, which is the one thing
@@ -1879,6 +1839,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 busy = false
                             }
                         },
+                    )
+                    // PRO, opposite the thumbnail: the manual drawer's opener,
+                    // beside the shutter where a camera puts its manual dial.
+                    ChromeOpeners(
+                        specs = ControlBar.pro(barState),
+                        onControl = handleControl,
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 24.dp),
                     )
                 }
 
@@ -2012,9 +1981,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             }
         }
 
-        // Everything set once, on a screen of its own over the viewfinder.
-        // The chips are the same objects the top row used to draw, and the
-        // manual panel is the one the PRO chip used to slide up.
+        // Everything set once, on a screen of its own over the viewfinder:
+        // the capture chips and the rendering choices. The manual controls
+        // are not here; they are in the drawer, where the picture is.
         if (showSettings) {
             SettingsScreen(
                 chips = ControlBar.settings(barState),
@@ -2024,16 +1993,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     showSettings = false
                 },
             ) {
-                ControlsPanel(
-                    settings = settings,
+                SetOncePanel(
                     caps = caps,
-                    onChange = { settings = it },
-                    abMode = abMode,
-                    onAbMode = { if (!busy) abMode = it },
                     highlightGuard = if (zslStream != null) highlightGuard else null,
                     onHighlightGuard = { if (!busy) highlightGuard = it },
-                    dcgEnabled = if (caps?.supportsBracketing == true) dcgEnabled else null,
-                    onDcgEnabled = { if (!busy) dcgEnabled = it },
                     // Only with a stream to accumulate from: the 2x path is
                     // a property of the ZSL burst.
                     superRes = if (caps?.supportsSuperRes == true && zslStream != null) superRes else null,
@@ -2049,14 +2012,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         val fresh = AppSettings()
                         settings = fresh.manual
                         burstFrames = fresh.burstFrames
-                        mergeEnabled = fresh.mergeEnabled
                         highlightGuard = fresh.highlightGuard
-                        if (!superResPhase.selected) zslWanted = fresh.zslEnabled else zslBeforeSuperRes = fresh.zslEnabled
+                        dngEnabled = fresh.dngEnabled
                         if (superResPhase.controlsEnabled) selectMode(fresh.captureMode)
                         timerSeconds = fresh.timerSeconds
                         guides = GuideMode.OFF
-                        abMode = false
-                        dcgEnabled = fresh.dcgEnabled
                         superRes = fresh.superRes
                         mosaicPreset = fresh.mosaicPreset
                         localTone = fresh.localTone
@@ -2090,6 +2050,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             aboutOpen = showAbout,
             galleryOpen = showGallery,
             settingsOpen = showSettings,
+            proOpen = showPro,
             superRes = superResPhase,
         )
         BackHandler(enabled = BackNavigation.intercepts(backScreen)) {
@@ -2097,6 +2058,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 BackNavigation.Action.CLOSE_ABOUT -> showAbout = false
                 BackNavigation.Action.CLOSE_GALLERY -> showGallery = false
                 BackNavigation.Action.CLOSE_SETTINGS -> showSettings = false
+                BackNavigation.Action.CLOSE_PRO -> showPro = false
                 BackNavigation.Action.STOP_SUPER_RES -> {
                     Haptics.segment(view)
                     stopSuperRes()
@@ -2114,6 +2076,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
 /** Every lens chip is this circle. See [LensChip]. */
 private val LensChipSize = 72.dp
+
+/** The manual drawer's top corners, and the only place the radius is stated. */
+private val PanelShape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
 
 /**
  * The last shot, which is also the way into the gallery.

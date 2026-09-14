@@ -34,10 +34,17 @@ import kotlin.math.sqrt
  * display pixels as `(f · x / -z, -f · y / -z)`. Roll comes for free: it is a
  * rotation like any other.
  *
- * Yaw from the game rotation vector drifts slowly -- it has no magnetometer
- * to hold it -- so a [correction], in canvas pixels, absorbs the difference
- * each time a tile is registered: where the attitude said the burst was
- * against where its pixels say it was.
+ * ### The targets are static
+ *
+ * Nothing moves a node once it is anchored. A version corrected every dot by
+ * each tile's registration residual, to absorb the yaw drift of a rotation
+ * vector with no magnetometer; every correction was a jump of every dot, and
+ * a dot that jumps is a target to chase. The drift over a capture is a
+ * fraction of a degree -- a few percent of a tile, well inside the thirty
+ * percent overlap -- and the tiles are placed by their pixels regardless. So
+ * a node is a direction in the world, fixed at the anchor, and it stays over
+ * the doorknob it was laid on. [predictedOffset] reports the residual for
+ * the log and for judging a registration; it moves nothing.
  *
  * Pure. Every function here is arithmetic on floats, and the tests turn the
  * phone by known angles and read the dots.
@@ -66,12 +73,6 @@ class ImuGuidance(
     private var nodeDirections: List<FloatArray> = emptyList()
     private var cornerDirections: List<FloatArray> = emptyList()
 
-    /** Canvas pixels added to every reticle position, from registration against the tiles. */
-    var correctionX = 0f
-        private set
-    var correctionY = 0f
-        private set
-
     val anchored: Boolean get() = anchor != null
 
     /** Fixes the anchor: the device's rotation matrix at the moment the anchor frame was taken. */
@@ -85,14 +86,6 @@ class ImuGuidance(
         val ch = plan.canvasHeight.toFloat()
         cornerDirections = listOf(0f to 0f, cw to 0f, cw to ch, 0f to ch)
             .map { (x, y) -> worldDirectionOfCanvas(r, x, y, cx, cy) }
-        correctionX = 0f
-        correctionY = 0f
-    }
-
-    /** Applies what a registered tile said: its centre was at ([actualX], [actualY]) and the attitude said ([predictedX], [predictedY]). */
-    fun correct(predictedX: Float, predictedY: Float, actualX: Float, actualY: Float) {
-        correctionX += actualX - predictedX
-        correctionY += actualY - predictedY
     }
 
     /**
@@ -107,8 +100,8 @@ class ImuGuidance(
         val inAnchor = mulTransposed(r0, axisWorld)
         val disp = projectToDisplay(inAnchor) ?: return null
         val (sx, sy) = displayOffsetToSensor(disp.first, disp.second)
-        return (plan.canvasWidth / 2f + sx * plan.tileScale + correctionX) to
-            (plan.canvasHeight / 2f + sy * plan.tileScale + correctionY)
+        return (plan.canvasWidth / 2f + sx * plan.tileScale) to
+            (plan.canvasHeight / 2f + sy * plan.tileScale)
     }
 
     /** Each node's position in the current frame, as sensor-frame fractions, or null where it is behind the camera. */
@@ -124,11 +117,7 @@ class ImuGuidance(
     private fun inFrame(rotation: FloatArray, world: FloatArray): Pair<Float, Float>? {
         val v = mulTransposed(rotation, world)
         val disp = projectToDisplay(v) ?: return null
-        // The correction moved the canvas under the reticle; the same shift,
-        // in the frame's own pixels, moves the dots the other way.
-        val (cx, cy) = displayOffsetToSensor(disp.first, disp.second)
-        val sx = cx - correctionX / plan.tileScale
-        val sy = cy - correctionY / plan.tileScale
+        val (sx, sy) = displayOffsetToSensor(disp.first, disp.second)
         return (0.5f + sx / sensorW) to (0.5f + sy / sensorH)
     }
 

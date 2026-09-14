@@ -15,14 +15,14 @@ data class AppSettings(
     val burstFrames: Int = 8,
     /** Physical camera id of the chosen lens, or null to use the default. */
     val lensId: String? = null,
-    val mergeEnabled: Boolean = true,
     val highlightGuard: Boolean = true,
     /**
-     * On by default. Zero shutter lag is the headline of this camera -- the
-     * frames already exist when the button is pressed -- and defaulting it off
-     * made the app feel slower than it is, for no benefit but a smaller ring.
+     * Whether every capture writes the merged raw as a DNG beside the JPEG.
+     * On by default: the DNG is the same merged data the JPEG was developed
+     * from, and is what makes the capture a photograph rather than a
+     * rendering. Off for the photographer who wants the space back.
      */
-    val zslEnabled: Boolean = true,
+    val dngEnabled: Boolean = true,
     /**
      * The mode the viewfinder opens in. Never [CaptureMode.SUPER_RES]: that
      * mode holds the telephoto and the ring while it is selected, and an app
@@ -34,7 +34,6 @@ data class AppSettings(
     val timerSeconds: Int = 0,
     /** Which composition guides are drawn, by [dev.multiframe.camera.ui.GuideMode] name. */
     val guides: String = "OFF",
-    val dcgEnabled: Boolean = false,
     /**
      * Whether a shutter press asks for the 2x sub-pixel canvas.
      *
@@ -95,16 +94,14 @@ data class AppSettings(
         KEY_EV to manual.evIndex.toString(),
         KEY_SUPPRESS_ISP to manual.suppressIspProcessing.toString(),
         KEY_BURST to burstFrames.toString(),
-        KEY_MERGE to mergeEnabled.toString(),
         KEY_GUARD to highlightGuard.toString(),
-        KEY_ZSL to zslEnabled.toString(),
+        KEY_DNG to dngEnabled.toString(),
         KEY_SUPER_RES to superRes.toString(),
         KEY_MOSAIC_PRESET to mosaicPreset.name,
         KEY_LOCAL_TONE to localTone.toString(),
         KEY_MODE to captureMode.name,
         KEY_TIMER to timerSeconds.toString(),
         KEY_GUIDES to guides,
-        KEY_DCG to dcgEnabled.toString(),
         KEY_FORMAT to outputFormat.name,
         KEY_HISTOGRAM to histogram.toString(),
     ) + (lensId?.let { mapOf(KEY_LENS to it) } ?: emptyMap())
@@ -120,13 +117,11 @@ data class AppSettings(
         const val KEY_SUPPRESS_ISP = "suppressIsp"
         const val KEY_BURST = "burst"
         const val KEY_LENS = "lens"
-        const val KEY_MERGE = "merge"
         const val KEY_GUARD = "guard"
-        const val KEY_ZSL = "zsl"
+        const val KEY_DNG = "dng"
         const val KEY_MODE = "mode"
         const val KEY_TIMER = "timer"
         const val KEY_GUIDES = "guides"
-        const val KEY_DCG = "dcg"
         const val KEY_SUPER_RES = "superRes"
         const val KEY_MOSAIC_PRESET = "mosaicPreset"
         const val KEY_LOCAL_TONE = "localTone"
@@ -170,9 +165,8 @@ data class AppSettings(
                 ),
                 burstFrames = int(KEY_BURST, defaults.burstFrames).coerceIn(1, 32),
                 lensId = stored[KEY_LENS]?.takeIf { it.isNotBlank() },
-                mergeEnabled = bool(KEY_MERGE, defaults.mergeEnabled),
                 highlightGuard = bool(KEY_GUARD, defaults.highlightGuard),
-                zslEnabled = bool(KEY_ZSL, defaults.zslEnabled),
+                dngEnabled = bool(KEY_DNG, defaults.dngEnabled),
                 // An unrecognised mode name -- from an older or newer version --
                 // costs the mode rather than the whole configuration.
                 captureMode = stored[KEY_MODE]?.let { name ->
@@ -185,7 +179,6 @@ data class AppSettings(
                 timerSeconds = int(KEY_TIMER, defaults.timerSeconds)
                     .takeIf { it in TIMER_DELAYS } ?: defaults.timerSeconds,
                 guides = stored[KEY_GUIDES]?.takeIf { it.isNotBlank() } ?: defaults.guides,
-                dcgEnabled = bool(KEY_DCG, defaults.dcgEnabled),
                 superRes = bool(KEY_SUPER_RES, defaults.superRes),
                 // The key was "sweepPreset" for one release; a phone that
                 // stored it under that name keeps its choice.
@@ -215,7 +208,6 @@ data class AppSettings(
                     else CameraMetadata.CONTROL_AWB_MODE_AUTO,
                     evIndex = manual.effectiveEvIndex(caps),
                 ),
-                dcgEnabled = dcgEnabled && caps.supportsBracketing,
                 superRes = superRes && caps.supportsSuperRes,
             )
         }

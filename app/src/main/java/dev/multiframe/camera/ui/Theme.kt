@@ -101,18 +101,21 @@ object Ink {
     val GuideBright = Color(0xCCFFFFFF)
 
     /**
-     * The two exceptions to "nothing coloured sits on the photograph", written
+     * The three exceptions to "nothing coloured sits on the photograph", written
      * down here so they are decisions rather than drift.
      *
-     * Both are states the camera has to shout about, and both are conventions
-     * older than any phone: a level that has arrived, and a highlight that has
-     * gone. Neither is decoration and neither is persistent -- they appear when
-     * the thing is true and vanish when it stops being true, which is what
-     * keeps them from doing what a saturated hue in the corner of the eye
-     * otherwise does to the colours judged under it.
+     * All three are states the camera has to shout about, and all three are
+     * conventions older than any phone: a level that has arrived, a highlight
+     * that has gone, and -- on every camera with a focus ring and a screen --
+     * the edges that are resolving, in a hue no scene is. None is decoration
+     * and none is persistent: they appear when the thing is true and vanish
+     * when it stops being true, which is what keeps them from doing what a
+     * saturated hue in the corner of the eye otherwise does to the colours
+     * judged under it. [Peaking] is shown only while manual focus is engaged.
      */
     val Level = Color(0xFF6FE39A)
     val Clipping = Color(0xFFFF6B6B)
+    val Peaking = Color(0xFF3DF2FF)
 
     /**
      * Semantic colours for states outside the viewfinder. These never appear

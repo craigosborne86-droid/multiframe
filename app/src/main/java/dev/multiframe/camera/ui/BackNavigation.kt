@@ -14,8 +14,8 @@ import dev.multiframe.camera.pipeline.SuperResMachine
  * quit the app with the stream locked and the canvas unsaved.
  *
  * The rule is a stack, innermost first: a sheet over the gallery closes
- * before the gallery, the gallery before the settings, and Super Res is
- * stopped or left before the app is. Only on the bare viewfinder, in an
+ * before the gallery, the gallery before the settings, the settings before
+ * the manual drawer, and Super Res is stopped or left before the app is. Only on the bare viewfinder, in an
  * ordinary mode, does back reach the system and leave. Pure, so that the
  * order is a test rather than a thing to remember.
  */
@@ -26,6 +26,8 @@ object BackNavigation {
         val aboutOpen: Boolean = false,
         val galleryOpen: Boolean = false,
         val settingsOpen: Boolean = false,
+        /** The manual drawer over the bottom bar. */
+        val proOpen: Boolean = false,
         val superRes: SuperResMachine.Phase = SuperResMachine.Phase.IDLE,
     )
 
@@ -38,6 +40,9 @@ object BackNavigation {
 
         /** The settings screen closes. */
         CLOSE_SETTINGS,
+
+        /** The manual drawer slides away. */
+        CLOSE_PRO,
 
         /** A running Super Res is stopped, keeping what was taken; the mode stays selected. */
         STOP_SUPER_RES,
@@ -56,6 +61,7 @@ object BackNavigation {
         screen.aboutOpen -> Action.CLOSE_ABOUT
         screen.galleryOpen -> Action.CLOSE_GALLERY
         screen.settingsOpen -> Action.CLOSE_SETTINGS
+        screen.proOpen -> Action.CLOSE_PRO
         screen.superRes == SuperResMachine.Phase.RUNNING -> Action.STOP_SUPER_RES
         screen.superRes == SuperResMachine.Phase.STOPPING -> Action.WAIT
         screen.superRes == SuperResMachine.Phase.ARMED -> Action.LEAVE_SUPER_RES

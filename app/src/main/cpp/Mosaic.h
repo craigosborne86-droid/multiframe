@@ -131,6 +131,18 @@ public:
     bool CoveredBounds(int* x, int* y, int* w, int* h) const;
 
     /**
+     * The largest axis-aligned rectangle every pixel of which is covered.
+     *
+     * The covered bounding box still frames black: nine hand-held tiles are
+     * nine slightly turned rectangles, and their union has corners nothing
+     * reached, which the box includes and JPEG paints black. This is the
+     * rectangle inside the union -- the picture with no hole in it. The
+     * classic maximal-rectangle pass: a running column-height histogram and a
+     * stack, one visit per pixel. Returns false when nothing was covered.
+     */
+    bool CoveredInterior(int* x, int* y, int* w, int* h) const;
+
+    /**
      * Collapses the region [x,y,w,h] into packed RGBA8888 at the start of the
      * canvas's own memory, consuming the accumulator.
      *

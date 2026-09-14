@@ -100,7 +100,8 @@ sealed interface MosaicEvent {
  * photograph, corrected for the lens, and composited at the place its
  * reference frame *registers* to against the tiles already placed. The node
  * says where to point, the attitude says where the phone points, and the
- * frame's own pixels say where the tile actually is.
+ * frame's own pixels say where the tile actually is -- and the attitude, in
+ * turn, is what a registration has to agree with to be believed.
  *
  * ### Why the guidance is inertial and the placement is visual
  *
@@ -109,10 +110,14 @@ sealed interface MosaicEvent {
  * features out of the frame and the registration fails or clings; the dots
  * swam, stuck and vanished, and a hand cannot follow a dot that does that.
  * The attitude never fails to answer -- it does not look at the scene -- and
- * it answers in a millisecond. It drifts, slowly, in yaw; each tile's
- * registration measures the drift, as the difference between where the
- * attitude said the burst was and where its pixels say, and the guidance
- * absorbs it. Nothing about where a tile is placed comes from the attitude.
+ * it answers in a millisecond. The dots it places are static: directions in
+ * the world, fixed at the anchor, never moved by anything that happens
+ * afterwards. Nothing about where a tile is placed comes from the attitude
+ * -- but a registration that puts a tile far from where the attitude says the
+ * phone was pointing is a wrong registration, not a wrong attitude, and is
+ * refused: the field test's ghosts and holes were tiles a weak fit had put in
+ * the wrong place, and a refused tile is captured again while a misplaced one
+ * ruins the canvas.
  *
  * ### Why only bursts are developed
  *
@@ -231,6 +236,11 @@ object MosaicCapture {
         // that decides how still a hand has to be.
         val exposureNs = stream.latestExposure()?.second ?: 0L
         val pixelsPerRadian = pixelsPerRadian(stream)
+        Log.i(TAG, "guidance focal length: %.0f px/rad (%s)".format(
+            pixelsPerRadian,
+            if (stream.characteristics.get(android.hardware.camera2.CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)?.getOrNull(0)?.let { it > 0f } == true) "intrinsic calibration"
+            else "focal length over sensor pitch",
+        ))
         val maxSpeed = StabilityGate.maxAngularSpeed(exposureNs, pixelsPerRadian)
         Log.i(
             TAG,
@@ -326,13 +336,12 @@ object MosaicCapture {
                     lastGateLog = now
                     Log.i(
                         TAG,
-                        "gate: reticle %s, gyro peak %.4f rad/s of %.4f, %s%s, hold %.2f, correction (%.0f, %.0f)".format(
+                        "gate: reticle %s, gyro peak %.4f rad/s of %.4f, %s%s, hold %.2f".format(
                             reticle?.let { "(%.0f, %.0f)".format(it.first, it.second) } ?: "off-canvas",
                             peak, guide.maxAngularSpeed,
                             if (guide.steady) "steady" else "unsteady",
                             guide.unsteadyReason?.let { " ($it)" } ?: "",
                             guide.holdProgress(now),
-                            imu.correctionX, imu.correctionY,
                         ),
                     )
                 }
@@ -512,12 +521,25 @@ object MosaicCapture {
         return stream.controlsConverged() == true
     }
 
-    /** The lens's focal length in pixels, from what the camera publishes about itself. */
-    private fun pixelsPerRadian(stream: ZslRawStream): Float {
+    /**
+     * The lens's focal length in the frame's pixels, from what the camera
+     * publishes about itself, most calibrated source first: the intrinsic
+     * calibration's `f_x`, in active-array pixels, scaled to the frame; then
+     * the focal length in millimetres over the sensor's physical pitch; then
+     * the 35mm equivalent. This is the `f` of `f · tan(Δyaw)`: one pixel of
+     * it wrong is one pixel the dot lands off the doorknob at a degree.
+     */
+    internal fun pixelsPerRadian(stream: ZslRawStream): Float {
         val c = stream.characteristics
+        val array = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        val intrinsics = c.get(android.hardware.camera2.CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
+        if (intrinsics != null && intrinsics.size >= 2 && array != null && array.width() > 0 && intrinsics[0] > 0f) {
+            // [f_x, f_y, c_x, c_y, s] in active-array pixels; the frame is
+            // the active array at the stream's size.
+            return intrinsics[0] * (stream.config.width.toFloat() / array.width())
+        }
         val focal = c.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
         val physical = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-        val array = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
         // The physical size is of the whole sensor and the frame is the active
         // array; the ratio scales the width the frame actually spans.
         val fullPx = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)?.width ?: array?.width() ?: 0
@@ -536,9 +558,9 @@ object MosaicCapture {
     /**
      * Takes the burst for a node: the ring's newest [frames], merged, developed
      * with the mosaic's locked colour, corrected for the lens, and composited at
-     * the place the burst's reference frame registered to. Where the frame
-     * registered, against where the attitude said it was, is the guidance's
-     * drift, and is handed back to it.
+     * the place the burst's reference frame registered to -- if that place is
+     * where the attitude says the phone was pointing, to within
+     * [MAX_ATTITUDE_DISAGREEMENT] of a tile, and the fit is a tile's size.
      *
      * Returns null on success, or the reason it could not be used.
      */
@@ -597,15 +619,33 @@ object MosaicCapture {
             val located = session.locate(small, proxyScale)
             if (located == null) return@use "could not register the burst"
 
-            // The drift: the attitude at the reference frame's exposure put
-            // the reticle here, and its pixels put it there. The guidance
-            // absorbs the difference for every dot from now on.
+            // The registration has to agree with the attitude. Where the
+            // attitude at the reference frame's exposure put the reticle,
+            // against where the frame's pixels put it: a residual of a few
+            // percent of a tile is drift and timing and is fine; a residual of
+            // a quarter of a tile is a fit onto the wrong features, and the
+            // tile it would place is the field test's ghost. And the fit has
+            // to be a tile's size: a homography that shrinks or stretches the
+            // frame by more than a sixth has fitted noise.
+            val w = stream.config.width.toFloat()
+            val h = stream.config.height.toFloat()
+            val actual = located.transform.apply(w / 2f, h / 2f)
             val predicted = frameRotation(motion, referenceResult, realtimeStamps)?.let { imu.reticleOnCanvas(it) }
+            val plan = session.plan
             if (predicted != null) {
-                val actual = located.transform.apply(stream.config.width / 2f, stream.config.height / 2f)
-                imu.correct(predicted.first, predicted.second, actual[0], actual[1])
-                Log.i(TAG, "tile registered %.0f px from where the attitude put it".format(
-                    kotlin.math.hypot(actual[0] - predicted.first, actual[1] - predicted.second)))
+                val residual = kotlin.math.hypot(actual[0] - predicted.first, actual[1] - predicted.second)
+                Log.i(TAG, "tile registered %.0f px from where the attitude put it (%d inliers)".format(residual, located.inliers))
+                if (residual > plan.placedTileWidth * MAX_ATTITUDE_DISAGREEMENT) {
+                    return@use "registration %.0f px from where the phone pointed".format(residual)
+                }
+            }
+            val fittedWidth = kotlin.math.hypot(
+                located.transform.apply(w, h / 2f)[0] - located.transform.apply(0f, h / 2f)[0],
+                located.transform.apply(w, h / 2f)[1] - located.transform.apply(0f, h / 2f)[1],
+            )
+            val scaleError = fittedWidth / plan.placedTileWidth
+            if (scaleError < 1f - MAX_SCALE_ERROR || scaleError > 1f + MAX_SCALE_ERROR) {
+                return@use "registration fitted the tile at %.2fx its size".format(scaleError)
             }
 
             val (merged, _) = m.finish()
@@ -636,6 +676,17 @@ object MosaicCapture {
     }
 
     private const val TILE_TARGET = 32
+
+    /**
+     * How far a registration may put a tile from where the attitude says the
+     * phone was pointing, as a fraction of a placed tile's width. The
+     * attitude's own error over a capture -- drift, the frame's timing, the
+     * anchor -- is a few percent; a quarter is a wrong fit.
+     */
+    const val MAX_ATTITUDE_DISAGREEMENT = 0.25f
+
+    /** How far a registration's fitted tile width may differ from a tile's. */
+    const val MAX_SCALE_ERROR = 0.17f
 
     /** ISO times exposure, the sensor's own measure of how much light a frame gathered. */
     private fun exposureProduct(result: android.hardware.camera2.TotalCaptureResult?): Double {

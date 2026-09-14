@@ -100,7 +100,9 @@ to tell the user this in the interface rather than let them discover it.
 | Match verification | Done | Brown-Lowe criterion; refuses noise and repeated patterns |
 | Capture planning and geometry | Done | 12 unit tests; presets 2x2, 3x3 and a drawn region, 7 more |
 | Native compositing canvas, three-band blending | Done | One tile is identical to the byte in one band and three; two tiles a quarter-stop and a pixel apart keep their texture and lose their step (`MosaicBlendDeviceTest`) |
-| Reticle and dot guidance, from the attitude, with a stability gate | Done, revised after two field tests | 18 unit tests on the lock rule against scripted pans, including a hand still settling, a gyroscope veto and the magnet; 7 on the attitude geometry, turning the phone by known angles and reading the dots; the overlay draws the canvas outline and each node where the attitude puts it |
+| Reticle and dot guidance, from the attitude, with a stability gate | Done, revised after three field tests | 18 unit tests on the lock rule against scripted pans, including a hand still settling and a gyroscope veto; 8 on the attitude geometry, turning the phone by known angles and reading the dots -- `f · tan` to a twentieth of a pixel, and a node that stays where the world put it; the overlay draws the canvas outline and each node where the attitude puts it, and nothing moves a dot |
+| Angular grid at thirty percent overlap, hole-free write | Done | The planner's `gridGeometry`: 4 unit tests on the step, the canvas reach and the seventy-degree limit; the canvas writes the largest fully covered rectangle, read back with no black pixel (`MosaicCanvasTest`) |
+| Registration judged against the attitude | Done | A fit more than a quarter of a tile from where the phone pointed, or a sixth off a tile's size, is refused and the node re-taken |
 | The mode's lifecycle and the back gesture | Done, after the second field test's deadlock | `SuperResMachine` walked stop → re-arm → run by 7 unit tests; `BackNavigation` as a rule (6) and as plumbing on the device (2) |
 | The shutter floor | Done | 1/250 s at 105mm, scaled by focal length, ISO raised to keep the light; 3 unit tests |
 | Burst per node, merged and lens-corrected | Done | The same merge as a shutter press, the Phase 2 optics before the homography |
@@ -133,25 +135,33 @@ right way to test the algorithm.
 3. A reticle sits at the centre of the viewfinder and a dot is drawn at each
    node, where the phone's attitude says that direction now falls in the
    frame -- thirty times a second, from the rotation vector, whatever the
-   scene shows. The user pans the reticle onto a dot and holds *still*: the
-   dot snaps to the reticle, the ring around it fills over 170 ms and empties
-   the moment the gyroscope reads more than six degrees a second or the
-   reticle drifts more than that would move it. Still for the settle time --
-   longer than the burst, so the burst is the hold -- fires it: the burst is
-   taken from the ring, then a haptic. Pan too fast and the phone says so.
-   STOP, or the back gesture, ends the capture keeping what was taken.
+   scene shows. The dots are static targets in the world, as a panorama's
+   are: a dot laid over a doorknob stays on the doorknob as the phone pans,
+   and nothing that happens afterwards moves it. The user pans the reticle
+   onto a dot and holds *still*: the ring around the dot fills over 170 ms
+   and empties the moment the gyroscope reads more than six degrees a second
+   or the reticle drifts more than that would move it. Still for the settle
+   time -- longer than the burst, so the burst is the hold -- fires it: the
+   burst is taken from the ring, then a haptic. Pan too fast and the phone
+   says so. STOP, or the back gesture, ends the capture keeping what was
+   taken.
 4. Each burst is merged like any other photograph, developed with the anchor's
    colour and gain (the gain scaled by its own ISO and exposure), corrected
    for the lens's geometry, and composited where its reference frame
-   registered -- against the anchor and every tile so far, not chained. Where
-   it registered, against where the attitude said it was, is the attitude's
-   drift, and the dots are corrected by it from then on.
+   registered -- against the anchor and every tile so far, not chained. The
+   registration is judged against the attitude: a fit that puts the tile more
+   than a quarter of a tile from where the phone was pointing, or at more
+   than a sixth off a tile's size, has fitted the wrong features and is
+   refused; the node goes back to pending and the tile is taken again.
 5. Compositing is in three frequency bands: the fine detail is handed from
    one tile to the next along the line where they are equally deep, the broad
    differences between them are spread over six hundred pixels, so the texture
    is kept and the step is hidden.
 6. The count reads "3 of 9 nodes". Every node captured is the mosaic complete;
-   stopping early keeps what was taken, cropped to what was shot.
+   stopping early keeps what was taken. The file is the largest rectangle
+   with no hole in it -- nine hand-held tiles are nine slightly turned
+   rectangles, and the box around their union has corners nothing reached,
+   which a JPEG would paint black.
 
 Bundle adjustment -- jointly refining every tile's transform against every
 overlap -- stays where it was: not built, because a 3x3 registered against all

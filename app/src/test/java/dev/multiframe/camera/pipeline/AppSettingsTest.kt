@@ -46,9 +46,8 @@ class AppSettingsTest {
             ),
             burstFrames = 16,
             lensId = "4",
-            mergeEnabled = false,
             highlightGuard = false,
-            zslEnabled = true,
+            dngEnabled = false,
             captureMode = CaptureMode.NIGHT,
         )
 
@@ -83,16 +82,19 @@ class AppSettingsTest {
     }
 
     /**
-     * Zero shutter lag is the headline of this camera; defaulting it off made
-     * the app feel slower than it is.
+     * The ring is the engine, not a setting: there is nothing to remember
+     * about it, and a stored "zsl" from an older build is ignored like any
+     * other unknown key. The DNG beside every JPEG is a setting, on by default.
      */
     @Test
-    fun `zero shutter lag is on out of the box`() {
-        assertThat(AppSettings().zslEnabled).isTrue()
-        assertThat(AppSettings.decode(emptyMap()).zslEnabled).isTrue()
-        // And a stored preference still wins over the default.
-        assertThat(AppSettings.decode(mapOf(AppSettings.KEY_ZSL to "false")).zslEnabled)
-            .isFalse()
+    fun `the ring is not a setting and the dng is`() {
+        assertThat(AppSettings().dngEnabled).isTrue()
+        assertThat(AppSettings.decode(emptyMap()).dngEnabled).isTrue()
+        assertThat(AppSettings.decode(mapOf(AppSettings.KEY_DNG to "false")).dngEnabled).isFalse()
+        // Older keys are ignored rather than fatal.
+        val old = AppSettings.decode(mapOf("zsl" to "false", "merge" to "false", "dcg" to "true"))
+        assertThat(old).isEqualTo(AppSettings())
+        assertThat(AppSettings().encode().keys).containsNoneOf("zsl", "merge", "dcg")
     }
 
     @Test
@@ -217,33 +219,6 @@ class AppSettingsTest {
         val wanted = AppSettings(manual = ManualSettings(evIndex = -30))
 
         assertThat(wanted.reconcile(narrow, lenses).manual.evIndex).isAtLeast(-2)
-    }
-
-    @Test
-    fun `dcg survives a round trip`() {
-        val on = AppSettings(dcgEnabled = true)
-        assertThat(AppSettings.decode(on.encode()).dcgEnabled).isTrue()
-        val off = AppSettings(dcgEnabled = false)
-        assertThat(AppSettings.decode(off.encode()).dcgEnabled).isFalse()
-    }
-
-    @Test
-    fun `dcg is off out of the box`() {
-        assertThat(AppSettings().dcgEnabled).isFalse()
-        assertThat(AppSettings.decode(emptyMap()).dcgEnabled).isFalse()
-    }
-
-    @Test
-    fun `dcg is forced off when the camera cannot bracket`() {
-        val noBracketing = caps.copy(hasManualSensor = false)
-        val wanted = AppSettings(dcgEnabled = true)
-        assertThat(wanted.reconcile(noBracketing, lenses).dcgEnabled).isFalse()
-    }
-
-    @Test
-    fun `dcg is kept when the camera can bracket`() {
-        assertThat(caps.supportsBracketing).isTrue()
-        assertThat(AppSettings(dcgEnabled = true).reconcile(caps, lenses).dcgEnabled).isTrue()
     }
 
     @Test

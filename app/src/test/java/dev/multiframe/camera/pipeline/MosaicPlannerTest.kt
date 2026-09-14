@@ -183,18 +183,25 @@ class MosaicPlannerTest {
         val plan = MosaicPlanner.planGrid(main, tele, tileW, tileH, columns = 2, rows = 2)!!
         assertThat(plan.columns).isEqualTo(2)
         assertThat(plan.rows).isEqualTo(2)
-        // Two tiles at the default overlap span 1 + 0.65 tile widths.
-        val expectedW = tileW * (1.0 + 0.65)
+        // The canvas reaches the outer tiles' far edges on the plane, with
+        // the margin: f * tan(step/2 + FOV/2), where the two nodes sit half a
+        // step either side of the centre.
+        val g = MosaicPlanner.gridGeometry(tele, tileW, tileH, 2, 2)!!
+        val expectedW = 2 * g.focalPx * kotlin.math.tan(g.stepYaw / 2 + g.fovH / 2) * (1 + MosaicPlanner.CANVAS_MARGIN)
         assertThat(plan.canvasWidth.toDouble()).isWithin(2.0).of(kotlin.math.ceil(expectedW))
+        // Which is more than a tile and a step: a tile at an angle is wider on
+        // the plane than a tile at the centre, and the first version, which
+        // sized the canvas as a tile plus a pixel step, clipped it.
+        assertThat(plan.canvasWidth.toDouble()).isGreaterThan(tileW * (1.0 + (1 - plan.overlap)))
         assertThat(plan.capped).isFalse()
         assertThat(plan.tileScale).isWithin(1e-6f).of(1f)
-        // Twenty-odd megapixels, which is what the PRD promised for Detail Boost.
-        assertThat(plan.megapixels).isGreaterThan(15.0)
-        assertThat(plan.megapixels).isLessThan(40.0)
+        // Thirty-odd megapixels for Detail Boost on this sensor.
+        assertThat(plan.megapixels).isGreaterThan(25.0)
+        assertThat(plan.megapixels).isLessThan(45.0)
     }
 
     @Test
-    fun `the nodes are the tile centres, laid out around the canvas centre`() {
+    fun `the nodes are directions a fixed angle apart, projected onto the canvas`() {
         val plan = MosaicPlanner.planGrid(main, tele, tileW, tileH, columns = 3, rows = 3)!!
         assertThat(plan.nodes).hasSize(9)
         val centre = plan.nodes[4]
@@ -202,17 +209,52 @@ class MosaicPlannerTest {
         assertThat(centre.row).isEqualTo(1)
         assertThat(centre.canvasX).isWithin(0.5f).of(plan.canvasWidth / 2f)
         assertThat(centre.canvasY).isWithin(0.5f).of(plan.canvasHeight / 2f)
-        // Neighbours a step apart, and a step is a tile less its overlap.
+        // The right-hand neighbour is one angular step away: seventy percent
+        // of the field of view, at f * tan on the plane.
+        val g = MosaicPlanner.gridGeometry(tele, tileW, tileH, 3, 3)!!
         val right = plan.nodes[5]
-        assertThat(right.canvasX - centre.canvasX).isWithin(0.5f).of(tileW * (1f - plan.overlap))
+        assertThat(g.stepYaw).isWithin(1e-6).of(g.fovH * 0.7)
+        assertThat((right.canvasX - centre.canvasX).toDouble()).isWithin(0.5).of(g.focalPx * kotlin.math.tan(g.stepYaw) * plan.tileScale)
         assertThat(right.canvasY).isWithin(0.5f).of(centre.canvasY)
         // Row-major, top-left first.
         assertThat(plan.nodes[0].canvasX).isLessThan(plan.nodes[1].canvasX)
         assertThat(plan.nodes[0].canvasY).isLessThan(plan.nodes[3].canvasY)
-        // And a tile centred on the corner node still lies on the canvas.
+        // And a tile aimed at the corner node lies on the canvas, its far
+        // edge included: the canvas reaches f * tan(theta + FOV/2).
         val corner = plan.nodes[0]
-        assertThat(corner.canvasX - tileW / 2f).isAtLeast(-1f)
-        assertThat(corner.canvasY - tileH / 2f).isAtLeast(-1f)
+        val farEdge = g.focalPx * kotlin.math.tan(g.stepYaw + g.fovH / 2) * plan.tileScale
+        assertThat(plan.canvasWidth / 2f - farEdge.toFloat()).isAtLeast(0f)
+        assertThat(corner.canvasX).isGreaterThan(plan.placedTileWidth / 2f)
+    }
+
+    /**
+     * Thirty percent of the field, as an angle: the direction a tile's edge
+     * points, less the direction its neighbour's opposite edge points, is
+     * thirty percent of the field of view -- on every lens, at every grid.
+     */
+    @Test
+    fun `adjacent tiles share thirty percent of the field of view`() {
+        for (lens in listOf(tele, main)) {
+            for (side in 2..3) {
+                val g = MosaicPlanner.gridGeometry(lens, tileW, tileH, side, side) ?: continue
+                val overlapH = g.fovH - g.stepYaw
+                val overlapV = g.fovV - g.stepPitch
+                assertThat(overlapH / g.fovH).isWithin(1e-6).of(0.30)
+                assertThat(overlapV / g.fovV).isWithin(1e-6).of(0.30)
+            }
+        }
+        // The vertical field follows from the sensor's aspect, not a 3:2 negative.
+        val g = MosaicPlanner.gridGeometry(tele, tileW, tileH, 3, 3)!!
+        assertThat(kotlin.math.tan(g.fovV / 2) / kotlin.math.tan(g.fovH / 2)).isWithin(1e-6).of(tileH.toDouble() / tileW)
+    }
+
+    @Test
+    fun `a grid that would reach past seventy degrees is not a picture`() {
+        // A 3x3 on a 12mm-equivalent lens reaches past ninety; refused.
+        val ultrawide = Lens("5", true, 2.2f, 12, 0.5f, true, 1.7f, 70f)
+        assertThat(MosaicPlanner.planGrid(null, ultrawide, tileW, tileH, 3, 3)).isNull()
+        // A 2x2 on the 24mm main lens fits.
+        assertThat(MosaicPlanner.planGrid(null, main, tileW, tileH, 2, 2)).isNotNull()
     }
 
     @Test
@@ -266,8 +308,11 @@ class MosaicPlannerTest {
     fun `a grid is planned from any lens and records the framing it covers`() {
         val fromItself = MosaicPlanner.planGrid(tele, tele, tileW, tileH, 2, 2)!!
         assertThat(fromItself.captureLens).isEqualTo(tele)
-        // 1.65 tiles across at 110mm is a 66mm framing.
-        assertThat(fromItself.targetLens.equivalent35mm).isEqualTo((110 / 1.65).toInt())
+        // The canvas is however many tiles across the angular grid projects
+        // to, and the framing is the capture lens over that.
+        val across = fromItself.canvasWidth.toDouble() / tileW
+        assertThat(fromItself.targetLens.equivalent35mm).isEqualTo((110 / across).toInt())
+        assertThat(fromItself.targetLens.equivalent35mm).isIn(55..70)
         val fromLonger = MosaicPlanner.planGrid(superTele, tele, tileW, tileH, 2, 2)!!
         assertThat(fromLonger.targetLens.equivalent35mm).isEqualTo(fromItself.targetLens.equivalent35mm)
         // From a wider lens, that lens is the framing.

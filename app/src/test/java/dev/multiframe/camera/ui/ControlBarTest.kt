@@ -25,33 +25,30 @@ class ControlBarTest {
 
     private val fullyCapable = ControlBarState(
         streamOffered = true,
+        manualOffered = true,
         superResOffered = true,
-        rawBurstOffered = true,
-        dngOffered = true,
     )
 
     private fun ids(specs: List<ControlSpec>) = specs.map { it.id }
 
     /** Everything that is not an action, over every place it is drawn. */
     private fun toggles(state: ControlBarState) =
-        ControlBar.settings(state) + ControlBar.chrome(state) + ControlBar.carousel(state)
+        ControlBar.settings(state) + ControlBar.chrome(state) + ControlBar.carousel(state) + ControlBar.pro(state)
 
     @Test
     fun nothingThatTakesAPhotographAppearsAmongTheToggles() {
-        // Over every combination of the capabilities that gate an action, not
+        // Over every combination of the capabilities that gate a control, not
         // just the one the development phone happens to have.
         for (superRes in listOf(false, true)) {
-            for (raw in listOf(false, true)) {
-                for (dng in listOf(false, true)) {
-                    for (busy in listOf(false, true)) {
-                        for (phase in Phase.entries) {
-                            val state = fullyCapable.copy(
-                                superResOffered = superRes, rawBurstOffered = raw,
-                                dngOffered = dng, busy = busy, superRes = phase,
-                            )
-                            assertThat(toggles(state).map { it.kind })
-                                .doesNotContain(ControlKind.Action)
-                        }
+            for (manual in listOf(false, true)) {
+                for (busy in listOf(false, true)) {
+                    for (phase in Phase.entries) {
+                        val state = fullyCapable.copy(
+                            superResOffered = superRes, manualOffered = manual,
+                            busy = busy, superRes = phase,
+                        )
+                        assertThat(toggles(state).map { it.kind })
+                            .doesNotContain(ControlKind.Action)
                     }
                 }
             }
@@ -60,17 +57,20 @@ class ControlBarTest {
 
     @Test
     fun everyActionIsAnAction() {
-        assertThat(ControlBar.actions(fullyCapable).map { it.kind })
-            .containsExactly(ControlKind.Action, ControlKind.Action)
         assertThat(ControlBar.actions(fullyCapable.copy(superRes = Phase.RUNNING)).map { it.kind })
             .containsExactly(ControlKind.Action)
     }
 
+    /**
+     * The shutter is the only capture. `RAW xN` and `DNG` were squared chips
+     * floating over it; the DNG is a setting beside every JPEG now, and the
+     * sequential burst is a fallback with no chip of its own.
+     */
     @Test
-    fun aCameraWithoutRawOffersNoRawControls() {
-        val noRaw = fullyCapable.copy(rawBurstOffered = false, dngOffered = false)
-        assertThat(ids(ControlBar.actions(noRaw)))
-            .containsNoneOf(ControlBar.RAW_BURST, ControlBar.DNG)
+    fun theShutterBarCarriesNoCaptureButTheShutter() {
+        assertThat(ControlBar.actions(fullyCapable)).isEmpty()
+        assertThat(ControlBar.actions(fullyCapable.copy(superRes = Phase.ARMED))).isEmpty()
+        assertThat(ids(ControlBar.actions(fullyCapable.copy(superRes = Phase.RUNNING)))).containsExactly(ControlBar.STOP)
     }
 
     // --- the chrome ---------------------------------------------------------
@@ -92,33 +92,55 @@ class ControlBarTest {
     // --- the settings screen --------------------------------------------------
 
     @Test
-    fun theSettingsCarryWhatWasOverThePictureAndTheDeveloperSwitches() {
+    fun theSettingsCarryWhatWasOverThePictureAndNothingADeveloperFlips() {
         val settings = ids(ControlBar.settings(fullyCapable))
-        assertThat(settings).containsAtLeast(
-            ControlBar.MERGE, ControlBar.FRAMES, ControlBar.TIMER, ControlBar.ZSL,
+        assertThat(settings).containsExactly(
+            ControlBar.FRAMES, ControlBar.TIMER, ControlBar.DNG,
             ControlBar.GUIDES, ControlBar.HISTOGRAM, ControlBar.ABOUT,
-        )
+        ).inOrder()
         // The capture group first, the display after, the opener last.
-        assertThat(settings.first()).isEqualTo(ControlBar.MERGE)
+        assertThat(settings.first()).isEqualTo(ControlBar.FRAMES)
         assertThat(settings.last()).isEqualTo(ControlBar.ABOUT)
     }
 
-    @Test
-    fun aCameraWithoutAZeroShutterLagStreamOffersNoRingSwitch() {
-        assertThat(ids(ControlBar.settings(bare))).doesNotContain(ControlBar.ZSL)
-    }
-
     /**
-     * Super Res needs the ring and switches it on itself. While the mode is
-     * selected the switch is not the user's to flip: off would pull the ground
-     * from under the mode.
+     * The ring, the merge, the A/B pair, the bracket and the ISP switch were
+     * user-facing once. None is a photograph's decision; each is the engine
+     * or an ablation, and none has a chip anywhere any more.
      */
     @Test
-    fun theRingSwitchIsHeldWhileSuperResIsSelected() {
+    fun noDeveloperSwitchIsUserFacing() {
         for (phase in Phase.entries) {
-            val zsl = ControlBar.settings(fullyCapable.copy(superRes = phase, zslOn = true)).single { it.id == ControlBar.ZSL }
-            assertThat(zsl.enabled).isEqualTo(phase == Phase.IDLE)
+            val state = fullyCapable.copy(superRes = phase)
+            val labels = (toggles(state) + ControlBar.actions(state)).map { it.label.uppercase() }
+            for (word in listOf("ZSL", "MERGE", "A/B", "DCG", "ISP", "RAW")) {
+                assertThat(labels.none { it.contains(word) }).isTrue()
+            }
         }
+    }
+
+    @Test
+    fun theDngIsASettingOnByDefault() {
+        val dng = ControlBar.settings(fullyCapable).single { it.id == ControlBar.DNG }
+        assertThat(dng.kind).isEqualTo(ControlKind.Mode)
+        assertThat(dng.label).isEqualTo("DNG ON")
+        assertThat(dng.active).isTrue()
+        assertThat(ControlBar.settings(fullyCapable.copy(dngOn = false)).single { it.id == ControlBar.DNG }.label).isEqualTo("DNG OFF")
+    }
+
+    // --- the manual drawer --------------------------------------------------------
+
+    @Test
+    fun theProOpenerSitsBesideTheShutterWhereTheHardwareTakesManualControl() {
+        val pro = ControlBar.pro(fullyCapable).single()
+        assertThat(pro.id).isEqualTo(ControlBar.PRO)
+        assertThat(pro.kind).isEqualTo(ControlKind.Opener)
+        assertThat(pro.active).isFalse()
+        assertThat(ControlBar.pro(fullyCapable.copy(proOpen = true)).single().active).isTrue()
+        // A camera with no manual sensor and no focusing lens has no drawer.
+        assertThat(ControlBar.pro(fullyCapable.copy(manualOffered = false))).isEmpty()
+        // And it is not over the picture: the chrome is the settings opener alone.
+        assertThat(ids(ControlBar.chrome(fullyCapable))).doesNotContain(ControlBar.PRO)
     }
 
     @Test
@@ -190,7 +212,7 @@ class ControlBarTest {
         for (mode in CaptureMode.entries) {
             assertThat(ControlBar.modeOf(ControlBar.modeId(mode))).isEqualTo(mode)
         }
-        assertThat(ControlBar.modeOf(ControlBar.MERGE)).isNull()
+        assertThat(ControlBar.modeOf(ControlBar.FRAMES)).isNull()
         assertThat(ControlBar.modeOf("mode.TELEPATHY")).isNull()
     }
 
@@ -218,16 +240,12 @@ class ControlBarTest {
     }
 
     @Test
-    fun withSuperResSelectedTheShutterIsTheOnlyCapture() {
-        assertThat(ControlBar.actions(fullyCapable.copy(superRes = Phase.ARMED))).isEmpty()
-        assertThat(ids(ControlBar.actions(fullyCapable.copy(superRes = Phase.RUNNING)))).containsExactly(ControlBar.STOP)
-        assertThat(ids(ControlBar.actions(fullyCapable))).containsExactly(ControlBar.RAW_BURST, ControlBar.DNG).inOrder()
-    }
-
-    @Test
-    fun everyActionIsRefusedWhileBusyUnlessItIsStoppingASuperRes() {
-        val busy = ControlBar.actions(fullyCapable.copy(busy = true))
-        assertThat(busy.map { it.enabled }).doesNotContain(true)
+    fun theOnlyActionIsStopAndOnlyWhileRunning() {
+        for (phase in Phase.entries) {
+            val actions = ControlBar.actions(fullyCapable.copy(superRes = phase, busy = phase.inFlight))
+            if (phase.inFlight) assertThat(ids(actions)).containsExactly(ControlBar.STOP)
+            else assertThat(actions).isEmpty()
+        }
     }
 
     // --- readings ---------------------------------------------------------------

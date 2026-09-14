@@ -108,9 +108,13 @@ data class MosaicPlan(
     val placedTileWidth: Float get() = tileWidthPx * tileScale
     val placedTileHeight: Float get() = tileHeightPx * tileScale
 
-    /** Distance between neighbouring node centres, in canvas pixels. */
-    val stepX: Float get() = placedTileWidth * (1f - overlap)
-    val stepY: Float get() = placedTileHeight * (1f - overlap)
+    /**
+     * Distance between the two nodes nearest the centre, in canvas pixels: the
+     * grid's step where it is tightest. The steps are angular (see
+     * `MosaicPlanner.planGrid`), so the outer ones are a little longer.
+     */
+    val stepX: Float get() = if (nodes.size >= 2 && columns >= 2) nodes[1].canvasX - nodes[0].canvasX else placedTileWidth * (1f - overlap)
+    val stepY: Float get() = if (nodes.size > columns && rows >= 2) nodes[columns].canvasY - nodes[0].canvasY else placedTileHeight * (1f - overlap)
 
     val megapixels: Double
         get() = canvasWidth.toDouble() * canvasHeight / 1_000_000.0
@@ -145,14 +149,30 @@ object MosaicPlanner {
     private const val FRAME_HEIGHT_MM = 24.0
 
     /**
-     * How much neighbouring tiles must share.
+     * How much neighbouring tiles must share: thirty percent of the field of
+     * view, as an angle.
      *
      * Overlap is not redundancy. Registration needs common features to solve
      * against, blending needs room to hide the seam, and lenses are softest at
      * the edges, so the overlap is where the weaker part of each frame gets
-     * replaced by the stronger part of its neighbour.
+     * replaced by the stronger part of its neighbour. Thirty percent is what
+     * keeps a hand-held tile, aimed to within the lock radius and a little
+     * drift, still overlapping its neighbours enough to register.
      */
-    const val DEFAULT_OVERLAP = 0.35f
+    const val DEFAULT_OVERLAP = 0.30f
+
+    /**
+     * Room around the outermost tiles, as a fraction of the canvas's extent:
+     * a tile aimed a little outside its node still lands on the canvas rather
+     * than being clipped by its edge.
+     */
+    const val CANVAS_MARGIN = 0.05
+
+    /**
+     * The widest half-angle a grid may reach. A rectilinear canvas stretches
+     * without bound toward ninety degrees; past this a grid is not a picture.
+     */
+    const val MAX_HALF_ANGLE_DEGREES = 70.0
 
     /**
      * Ceiling on the canvas.
@@ -251,14 +271,35 @@ object MosaicPlanner {
     /**
      * Plans a mosaic of a fixed [columns] x [rows] grid of [capture] tiles.
      *
-     * The canvas is sized to the grid rather than to a framing: a 2x2 at the
-     * default overlap is 1.65 tiles across, whatever the lenses. So the grid
-     * needs no wider lens to be planned from, and the mode is offered on every
-     * lens: on the telephoto itself the canvas is 1.65 telephoto frames across,
-     * which is a 67mm-equivalent framing at 110mm detail. [target] is the
-     * framing the user was composing with when they asked, recorded in the
-     * file when it is wider than the capture lens; otherwise the plan records
-     * the framing the grid covers, as a lens of that equivalent focal length.
+     * ### The grid is angular
+     *
+     * The nodes are directions, not pixel positions: neighbouring nodes are
+     * `(1 - overlap)` of the lens's field of view apart, horizontally and
+     * vertically --
+     *
+     *     step_yaw   = FOV_h * (1 - overlap)
+     *     step_pitch = FOV_v * (1 - overlap)
+     *
+     * -- so that adjacent tiles share thirty percent of their field whatever
+     * the lens. The canvas is the rectilinear plane those directions project
+     * onto: a node at angle theta is at `f * tan(theta)` canvas pixels from
+     * the centre, with `f` the lens's focal length in tile pixels, and the
+     * canvas reaches to the outermost tile's far edge, `f * tan(theta_max +
+     * FOV/2)`, plus [CANVAS_MARGIN] for aim. The first version stepped in
+     * pixels -- 0.65 of a tile -- and sized the canvas as if a tile at an angle
+     * were still a rectangle of a tile's width; on a 3x3 it came out four
+     * percent short and clipped the outer tiles' far edges.
+     *
+     * The vertical field follows from the sensor's own aspect and the
+     * horizontal field, not from a 3:2 negative: the equivalent focal length
+     * fixes the horizontal field, and the sensor is 4:3.
+     *
+     * The grid needs no wider lens to be planned from, and the mode is offered
+     * on every lens. [target] is the framing the user was composing with when
+     * they asked, recorded in the file when it is wider than the capture lens;
+     * otherwise the plan records the framing the grid covers, as a lens of that
+     * equivalent focal length. Null where the grid would reach past
+     * [MAX_HALF_ANGLE_DEGREES]: a 3x3 on a 24mm lens is not a picture.
      */
     fun planGrid(
         target: Lens?,
@@ -273,10 +314,11 @@ object MosaicPlanner {
         if (capture.equivalent35mm <= 0) return null
         if (tileWidth <= 0 || tileHeight <= 0 || columns <= 0 || rows <= 0) return null
         val clampedOverlap = overlap.coerceIn(0.05f, 0.8f)
-        val step = (1f - clampedOverlap).toDouble()
 
-        val fullWidth = ceil(tileWidth * (1.0 + (columns - 1) * step)).toInt()
-        val fullHeight = ceil(tileHeight * (1.0 + (rows - 1) * step)).toInt()
+        val geometry = gridGeometry(capture, tileWidth, tileHeight, columns, rows, clampedOverlap) ?: return null
+        val fullWidth = geometry.fullWidth
+        val fullHeight = geometry.fullHeight
+
         // The framing the grid covers, as an equivalent focal length: the
         // capture lens's over how many tiles the canvas spans.
         val coverage = fullWidth.toDouble() / tileWidth
@@ -314,6 +356,62 @@ object MosaicPlanner {
             capped = capped,
             tileScale = tileScale,
         ).withNodes(tileWidth, tileHeight)
+    }
+
+    /** The angular geometry of a grid on a lens: see [planGrid]. */
+    class GridGeometry(
+        /** The lens's focal length in tile pixels. */
+        val focalPx: Double,
+        /** The fields of view, in radians. */
+        val fovH: Double,
+        val fovV: Double,
+        /** The angle between neighbouring nodes, in radians. */
+        val stepYaw: Double,
+        val stepPitch: Double,
+        /** The canvas's full extent in tile pixels, margin included. */
+        val fullWidth: Int,
+        val fullHeight: Int,
+    ) {
+        /** A node's offset from the canvas centre, in tile pixels, for its index from the centre. */
+        fun offsetX(fromCentre: Double): Double = focalPx * tan(fromCentre * stepYaw)
+        fun offsetY(fromCentre: Double): Double = focalPx * tan(fromCentre * stepPitch)
+    }
+
+    /**
+     * The focal length, the fields and the canvas extent for a grid, or null
+     * where the grid reaches past [MAX_HALF_ANGLE_DEGREES].
+     */
+    fun gridGeometry(
+        capture: Lens,
+        tileWidth: Int,
+        tileHeight: Int,
+        columns: Int,
+        rows: Int,
+        overlap: Float = DEFAULT_OVERLAP,
+    ): GridGeometry? {
+        if (capture.equivalent35mm <= 0 || tileWidth <= 0 || tileHeight <= 0) return null
+        val fovH = Math.toRadians(horizontalFovDegrees(capture.equivalent35mm))
+        val focalPx = (tileWidth / 2.0) / tan(fovH / 2)
+        val fovV = 2.0 * atan((tileHeight / 2.0) / focalPx)
+        val stepYaw = fovH * (1.0 - overlap)
+        val stepPitch = fovV * (1.0 - overlap)
+        val yawMax = (columns - 1) / 2.0 * stepYaw
+        val pitchMax = (rows - 1) / 2.0 * stepPitch
+        val reachH = yawMax + fovH / 2
+        val reachV = pitchMax + fovV / 2
+        val limit = Math.toRadians(MAX_HALF_ANGLE_DEGREES)
+        if (reachH >= limit || reachV >= limit) return null
+        val halfW = focalPx * tan(reachH) * (1.0 + CANVAS_MARGIN)
+        val halfH = focalPx * tan(reachV) * (1.0 + CANVAS_MARGIN)
+        return GridGeometry(
+            focalPx = focalPx,
+            fovH = fovH,
+            fovV = fovV,
+            stepYaw = stepYaw,
+            stepPitch = stepPitch,
+            fullWidth = ceil(2 * halfW).toInt(),
+            fullHeight = ceil(2 * halfH).toInt(),
+        )
     }
 
     /**
@@ -379,10 +477,14 @@ object MosaicPlanner {
 
     /**
      * The node grid for a plan: tile centres laid out around the canvas centre
-     * at the plan's step, row-major, top-left first.
+     * as the plan's angular steps project onto it, row-major, top-left first.
+     * A node `k` steps from the centre is at `f * tan(k * step)` tile pixels,
+     * scaled to the canvas.
      */
     fun MosaicPlan.withNodes(tileWidth: Int, tileHeight: Int): MosaicPlan {
         val sized = copy(tileWidthPx = tileWidth, tileHeightPx = tileHeight)
+        val geometry = gridGeometry(captureLens, tileWidth, tileHeight, columns, rows, overlap)
+            ?: return sized
         val cx = canvasWidth / 2f
         val cy = canvasHeight / 2f
         val nodes = ArrayList<MosaicNode>(columns * rows)
@@ -393,8 +495,8 @@ object MosaicPlanner {
                         index = nodes.size,
                         column = c,
                         row = r,
-                        canvasX = cx + (c - (columns - 1) / 2f) * sized.stepX,
-                        canvasY = cy + (r - (rows - 1) / 2f) * sized.stepY,
+                        canvasX = cx + (geometry.offsetX(c - (columns - 1) / 2.0) * tileScale).toFloat(),
+                        canvasY = cy + (geometry.offsetY(r - (rows - 1) / 2.0) * tileScale).toFloat(),
                     ),
                 )
             }

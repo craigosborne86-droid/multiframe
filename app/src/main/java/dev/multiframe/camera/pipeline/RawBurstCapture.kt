@@ -124,6 +124,8 @@ object RawBurstCapture {
         outputFormat: OutputFormat = OutputFormat.JPEG,
         /** How the JPEG is rendered; the default is the PRD's global rendering. */
         develop: DevelopParams = DevelopParams(),
+        /** Whether the merged raw is written as a DNG beside the JPEG. */
+        writeDng: Boolean = true,
         onProgress: (String) -> Unit,
     ): RawBurstResult {
         val profile = SensorProfile.from(characteristics)
@@ -208,6 +210,7 @@ object RawBurstCapture {
                 lensProfile = lensProfile,
                 outputFormat = outputFormat,
                 develop = develop,
+                writeDng = writeDng,
             )
         } finally {
             merger?.close()
@@ -240,6 +243,8 @@ object RawBurstCapture {
         streamStats: String? = null,
         dcgActive: Boolean = false,
         develop: DevelopParams = DevelopParams(),
+        /** Whether the merged raw is written as a DNG beside the JPEG. A setting; on by default. */
+        writeDng: Boolean = true,
     ): RawBurstResult {
         val stamp = stamp()
 
@@ -266,7 +271,7 @@ object RawBurstCapture {
         // a cursor even though neither changes a pixel.
         var dngUri: android.net.Uri? = null
         var dngMillis = 0L
-        val dngWriter = if (captureResult != null) {
+        val dngWriter = if (writeDng && captureResult != null) {
             Thread {
                 val started = System.currentTimeMillis()
                 dngUri = writeDng(

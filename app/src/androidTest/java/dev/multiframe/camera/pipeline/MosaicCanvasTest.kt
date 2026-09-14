@@ -261,6 +261,49 @@ class MosaicCanvasTest {
         file.delete()
     }
 
+    /**
+     * The field test's black cutouts: nine hand-held tiles are nine slightly
+     * turned rectangles, and the box around their union has corners nothing
+     * reached. The write is the largest rectangle *inside* the union, so
+     * the picture has no hole in it -- here, two tiles offset diagonally,
+     * whose union is an L and whose box would be a quarter black.
+     */
+    @Test
+    fun theWrittenImageIsTheLargestRectangleWithNoHoleInIt() {
+        val c = MosaicCanvas.create(400, 300)!!
+        canvas = c
+        val red = solidTile(120, 80, Color.rgb(200, 60, 40))
+        val blue = solidTile(120, 80, Color.rgb(40, 60, 200))
+        // Two tiles a step apart horizontally and offset by half a tile
+        // vertically: an L, twenty pixels of overlap.
+        assertThat(c.addTile(red, Homography.translation(100.0, 100.0), feather = 4f)).isGreaterThan(0)
+        assertThat(c.addTile(blue, Homography.translation(200.0, 140.0), feather = 4f)).isGreaterThan(0)
+        red.recycle()
+        blue.recycle()
+
+        val file = scratch("mosaic_interior.jpg")
+        val written = c.writeTo(file)!!
+        Log.i(TAG, "L-shaped union wrote ${written.width}x${written.height}")
+        // The box would be 220x120. The largest hole-free rectangle is the
+        // full width by the forty rows both tiles cover (220x40, 8800), or one
+        // tile (120x80, 9600): the tile wins, so the write is a tile's size
+        // and not the box.
+        assertThat(written.width).isLessThan(200)
+        assertThat(written.width * written.height).isAtLeast(120 * 80 - 400)
+        assertThat(written.width * written.height).isLessThan(220 * 120 / 2)
+
+        // And no black anywhere in it: every pixel is one of the two tiles.
+        val decoded = BitmapFactory.decodeFile(file.absolutePath)!!
+        var black = 0
+        for (y in 0 until decoded.height step 2) for (x in 0 until decoded.width step 2) {
+            val p = decoded.getPixel(x, y)
+            if (Color.red(p) + Color.green(p) + Color.blue(p) < 60) black++
+        }
+        assertThat(black).isEqualTo(0)
+        decoded.recycle()
+        file.delete()
+    }
+
     @Test
     fun anEmptyCanvasWritesNothingRatherThanBlack() {
         // Nothing was ever swept. A file of black pixels would be worse than no

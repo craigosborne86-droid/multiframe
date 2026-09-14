@@ -42,42 +42,33 @@ import kotlin.math.ln
 import kotlin.math.exp
 
 /**
- * The manual controls, and everything else you set once.
+ * The manual controls: exposure, focus and white balance, in a drawer over
+ * the bottom bar.
  *
- * The division against the viewfinder is deliberate: what a photographer
- * changes between shots -- the mode, the lens, the grid -- is on the
- * viewfinder, and this is what they set and leave. `A/B`, `GUARD` and `DCG`
- * live here for that reason: none is touched while composing.
+ * ### The drawer
  *
- * ### The panel does not draw its own ground
+ * These are the controls a photographer reaches for with the picture in
+ * front of them -- a shutter speed is chosen by looking at the viewfinder --
+ * so they are not on the settings screen, which covers it. PRO, beside the
+ * shutter, slides this up over the bottom bar and leaves the viewfinder
+ * whole above it; while manual focus is engaged the viewfinder carries the
+ * focus peaking, so the focus ring is turned against the edges it resolves.
  *
- * It is a section of the settings screen, which supplies the ground; see
- * [SettingsScreen]. The Super Res grid is not here: it is chosen above the
- * shutter, where the outline it changes is in view.
+ * Nothing here is an ablation. The ISP switch that lived in the first row --
+ * noise reduction and edge enhancement off, for measuring the pipeline
+ * against the phone's own -- was a developer's, and is gone from the user's
+ * app with the merge switch, the A/B pair and the bracket; the raw develop
+ * asks the ISP for nothing regardless.
+ *
+ * Draws nothing at all until the camera has reported its capabilities:
+ * a slider for a range that has not been read is a slider with no ends.
  */
 @Composable
-fun ControlsPanel(
+fun ManualPanel(
     settings: ManualSettings,
     caps: CameraCapabilities?,
     onChange: (ManualSettings) -> Unit,
     modifier: Modifier = Modifier,
-    abMode: Boolean = false,
-    onAbMode: (Boolean) -> Unit = {},
-    /** Null where there is no zero-shutter-lag stream to guard highlights for. */
-    highlightGuard: Boolean? = null,
-    onHighlightGuard: (Boolean) -> Unit = {},
-    /** Null where the camera cannot bracket ISO (no manual sensor, ISO range or raw). */
-    dcgEnabled: Boolean? = null,
-    onDcgEnabled: (Boolean) -> Unit = {},
-    /** Null where the device cannot hold a 2x canvas of this sensor, or has no native library. */
-    superRes: Boolean? = null,
-    onSuperRes: (Boolean) -> Unit = {},
-    localTone: Boolean = false,
-    onLocalTone: (Boolean) -> Unit = {},
-    /** Null where the device cannot write HEIF, in which case there is no choice. */
-    outputFormat: OutputFormat? = null,
-    onOutputFormat: (OutputFormat) -> Unit = {},
-    onReset: (() -> Unit)? = null,
 ) {
     if (caps == null) return
 
@@ -98,12 +89,6 @@ fun ControlsPanel(
             if (caps.hasManualFocus) {
                 Toggle("AF ${if (settings.manualFocus) "MAN" else "AUTO"}", settings.manualFocus) {
                     onChange(settings.copy(manualFocus = !settings.manualFocus))
-                }
-            }
-            // Only offered where the ISP's processing can actually be switched off.
-            if (caps.canDisableNoiseReduction() || caps.canDisableEdgeEnhancement()) {
-                Toggle("ISP ${if (settings.suppressIspProcessing) "OFF" else "ON"}", settings.suppressIspProcessing) {
-                    onChange(settings.copy(suppressIspProcessing = !settings.suppressIspProcessing))
                 }
             }
         }
@@ -171,19 +156,49 @@ fun ControlsPanel(
                 }
             }
         }
+    }
+}
 
-        SectionLabel("Set once")
+/**
+ * Everything you set once, on the settings screen: how a capture is
+ * rendered and written, a way back to the defaults, and what this camera
+ * can do.
+ *
+ * Every toggle is a photograph's decision -- protect the highlights, build
+ * the 2x canvas, run the local tone operator, write HEIF -- and none is an
+ * ablation. Each is gated on the hardware where the hardware has a say, and a
+ * control the hardware cannot honour is absent rather than dimmed.
+ */
+@Composable
+fun SetOncePanel(
+    caps: CameraCapabilities?,
+    modifier: Modifier = Modifier,
+    /** Null where there is no zero-shutter-lag stream to guard highlights for. */
+    highlightGuard: Boolean? = null,
+    onHighlightGuard: (Boolean) -> Unit = {},
+    /** Null where the device cannot hold a 2x canvas of this sensor, or has no native library. */
+    superRes: Boolean? = null,
+    onSuperRes: (Boolean) -> Unit = {},
+    localTone: Boolean = false,
+    onLocalTone: (Boolean) -> Unit = {},
+    /** Null where the device cannot write HEIF, in which case there is no choice. */
+    outputFormat: OutputFormat? = null,
+    onOutputFormat: (OutputFormat) -> Unit = {},
+    onReset: (() -> Unit)? = null,
+) {
+    if (caps == null) return
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(top = 6.dp, bottom = 6.dp),
+    ) {
+        SectionLabel("Rendering")
 
         Row {
-            // Writes both the merged and the unmerged version of the same
-            // burst, which is the demonstration of what this camera is for --
-            // and not something anyone changes shot to shot.
-            Toggle("A/B ${if (abMode) "ON" else "OFF"}", abMode) { onAbMode(!abMode) }
             highlightGuard?.let { on ->
                 Toggle("GUARD ${if (on) "ON" else "OFF"}", on) { onHighlightGuard(!on) }
-            }
-            dcgEnabled?.let { on ->
-                Toggle("DCG ${if (on) "ON" else "OFF"}", on) { onDcgEnabled(!on) }
             }
             // The 2x sub-pixel canvas. Asked for, not promised: a burst
             // without the diversity declines to the ordinary merge and the

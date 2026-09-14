@@ -91,7 +91,7 @@ class MosaicGuideTest {
         var t = 0L
         var dx = -r * 0.9f
         var decision: MosaicGuide.Decision = MosaicGuide.Decision.Idle
-        for (i in 0 until 4) {
+        for (i in 0 until 3) {
             decision = s.at(node, dx = dx, t = t)
             assertThat(decision).isEqualTo(MosaicGuide.Decision.Idle)
             assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.LOCKING)
@@ -103,7 +103,9 @@ class MosaicGuideTest {
             t += 100
         }
         assertThat(s.holdProgress(t)).isEqualTo(0f)
-        // Then it stops: the hold begins from the first still poll.
+        // Then it stops, still inside the radius: the hold begins from the
+        // first still poll.
+        assertThat(dx).isLessThan(r)
         assertThat(s.at(node, dx = dx, t = t)).isEqualTo(MosaicGuide.Decision.Idle)          // arrives, moved
         assertThat(s.at(node, dx = dx + 5f, t = t + 100)).isEqualTo(MosaicGuide.Decision.Idle) // steady 1
         assertThat(s.at(node, dx = dx + 8f, t = t + 200)).isEqualTo(MosaicGuide.Decision.Idle) // steady 2
@@ -172,31 +174,25 @@ class MosaicGuideTest {
     }
 
     /**
-     * The magnet. A hand on the dot trembles a few pixels over the radius and
-     * back; the lock has to survive that, or the ring flickers and the hold
-     * restarts on every tremor. It does not survive a real departure.
+     * The radius is the radius. A version gave a locking node a wider radius
+     * to keep its lock -- a magnet -- and, drawn at the reticle, it read as a
+     * target that moved. In and out at one radius, whatever the node was.
      */
     @Test
-    fun `a locked node keeps its lock a little past the radius and loses it past the magnet`() {
+    fun `a locked node loses its lock the moment the reticle leaves the radius`() {
         val s = sweep()
         val node = plan.nodes[0]
         val r = s.lockRadius
         s.at(node, t = 0)
         s.at(node, dx = 2f, t = 100)
         assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.LOCKING)
-        // Over the edge by a fifth: still locking -- and still steady, since
-        // the tremor is small.
-        s.at(node, dx = r * 1.2f, t = 200)
+        // Just inside: still locking.
+        s.at(node, dx = r * 0.95f, t = 200)
         assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.LOCKING)
-        assertThat(s.lockingNodeOrNull).isEqualTo(node)
-        // Well past the magnet's reach: near, and the hold is gone.
-        s.at(node, dx = r * 1.8f, t = 300)
+        // Just over the edge: near, and the hold is gone. No reach past the radius.
+        s.at(node, dx = r * 1.05f, t = 300)
         assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.NEAR)
         assertThat(s.lockingNodeOrNull).isNull()
-        // A node that was not locking does not get the magnet's reach.
-        val other = plan.nodes[1]
-        s.at(other, dx = r * 1.2f, t = 400)
-        assertThat(s.stateOf(other)).isEqualTo(MosaicGuide.NodeState.NEAR)
     }
 
     /**

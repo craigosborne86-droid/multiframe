@@ -608,6 +608,57 @@ bool MosaicCanvas::CoveredBounds(int* x, int* y, int* w, int* h) const {
     return true;
 }
 
+bool MosaicCanvas::CoveredInterior(int* x, int* y, int* w, int* h) const {
+    if (data_ == nullptr || flattened_ || x == nullptr || y == nullptr ||
+        w == nullptr || h == nullptr) {
+        return false;
+    }
+
+    // heights[col]: how many covered rows end at the current row in this
+    // column. The largest rectangle whose bottom edge is the current row is
+    // the largest rectangle under that histogram, found with a stack of
+    // rising columns; over every row that is the largest rectangle anywhere.
+    std::vector<int> heights(static_cast<size_t>(width_), 0);
+    std::vector<int> stack;
+    stack.reserve(static_cast<size_t>(width_) + 1);
+
+    long long bestArea = 0;
+    int bestX = 0, bestY = 0, bestW = 0, bestH = 0;
+    for (int row = 0; row < height_; ++row) {
+        const uint16_t* src = data_ + static_cast<size_t>(row) * width_ * kChannels;
+        for (int col = 0; col < width_; ++col) {
+            heights[col] = src[static_cast<size_t>(col) * kChannels + 3] != 0 ? heights[col] + 1 : 0;
+        }
+        stack.clear();
+        for (int col = 0; col <= width_; ++col) {
+            const int current = col == width_ ? 0 : heights[col];
+            while (!stack.empty() && heights[stack.back()] >= current) {
+                const int top = stack.back();
+                stack.pop_back();
+                const int height = heights[top];
+                const int left = stack.empty() ? 0 : stack.back() + 1;
+                const int width = col - left;
+                const long long area = static_cast<long long>(width) * height;
+                if (area > bestArea) {
+                    bestArea = area;
+                    bestX = left;
+                    bestY = row - height + 1;
+                    bestW = width;
+                    bestH = height;
+                }
+            }
+            stack.push_back(col);
+        }
+    }
+
+    if (bestArea <= 0) return false;
+    *x = bestX;
+    *y = bestY;
+    *w = bestW;
+    *h = bestH;
+    return true;
+}
+
 bool MosaicCanvas::Flatten(int x, int y, int w, int h) {
     if (data_ == nullptr || flattened_) return false;
     if (w <= 0 || h <= 0 || x < 0 || y < 0) return false;
@@ -778,6 +829,13 @@ Java_dev_multiframe_camera_pipeline_MosaicCanvas_nCompressTo(
     if (!canvas->CoveredBounds(&x, &y, &w, &h)) {
         LOGW("nothing covered, no image to write");
         return 0;
+    }
+    // The picture inside what was covered, not the box around it: the box
+    // frames every corner the tiles' turns left unreached in black.
+    int ix = x, iy = y, iw = w, ih = h;
+    if (canvas->CoveredInterior(&ix, &iy, &iw, &ih)) {
+        LOGI("covered %dx%d at %d,%d; interior %dx%d at %d,%d", w, h, x, y, iw, ih, ix, iy);
+        x = ix; y = iy; w = iw; h = ih;
     }
     if (!canvas->Flatten(x, y, w, h)) return -1;
 

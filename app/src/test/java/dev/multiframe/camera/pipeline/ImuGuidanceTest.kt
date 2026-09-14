@@ -98,17 +98,46 @@ class ImuGuidanceTest {
         assertThat(g.cornersInFrame(ImuGuidance.yaw(Math.toRadians(120.0).toFloat()))).isNull()
     }
 
+    /**
+     * The dots are static: a pan out and back puts every dot exactly where it
+     * was, and nothing between -- no registration, no lock -- moves it. A
+     * version corrected the dots by each tile's residual, and they jumped.
+     */
     @Test
-    fun `a registration correction moves the reticle and the dots the other way`() {
+    fun `a node stays where the world put it, whatever happens in between`() {
         val g = guidance()
-        val before = g.reticleOnCanvas(ImuGuidance.IDENTITY)!!
-        val node = g.nodesInFrame(ImuGuidance.IDENTITY)[4]!!
-        // The attitude said the burst was here; its pixels said 100 canvas px right.
-        g.correct(before.first, before.second, before.first + 100f, before.second)
-        val after = g.reticleOnCanvas(ImuGuidance.IDENTITY)!!
-        assertThat(after.first - before.first).isWithin(0.01f).of(100f)
-        val nodeAfter = g.nodesInFrame(ImuGuidance.IDENTITY)[4]!!
-        assertThat((nodeAfter.first - node.first) * 4080 * plan.tileScale).isWithin(0.5f).of(-100f)
+        val before = g.nodesInFrame(ImuGuidance.IDENTITY)
+        val away = ImuGuidance.times(ImuGuidance.yaw(0.2f), ImuGuidance.pitch(-0.1f))
+        val moved = g.nodesInFrame(away)
+        assertThat(moved[4]!!.first).isNotWithin(0.01f).of(before[4]!!.first)
+        val back = g.nodesInFrame(ImuGuidance.IDENTITY)
+        for (i in before.indices) {
+            assertThat(back[i]!!.first).isWithin(1e-6f).of(before[i]!!.first)
+            assertThat(back[i]!!.second).isWithin(1e-6f).of(before[i]!!.second)
+        }
+    }
+
+    /**
+     * The projection is the one the reference states: a node's displacement
+     * from the reticle is `f * tan(delta yaw)` horizontally and `f * tan(delta
+     * pitch)` vertically, in the lens's own pixels, one to one with the
+     * sensor's movement.
+     */
+    @Test
+    fun `a pan moves the dots by f times the tangent of the angle`() {
+        val g = guidance()
+        for (degrees in listOf(1.0, 3.0, 6.0)) {
+            val a = Math.toRadians(degrees).toFloat()
+            // Turning the camera right by a: the centre node moves left in the frame.
+            val centre = g.nodesInFrame(ImuGuidance.yaw(-a))[4]!!
+            val dxPx = (centre.first - 0.5f) * 4080
+            assertThat(dxPx).isWithin(0.05f).of(-f * kotlin.math.tan(a))
+            assertThat(centre.second).isWithin(1e-4f).of(0.5f)
+            // Tilting up by a: it moves down.
+            val tilted = g.nodesInFrame(ImuGuidance.pitch(a))[4]!!
+            val dyPx = (tilted.second - 0.5f) * 3072
+            assertThat(dyPx).isWithin(0.05f).of(f * kotlin.math.tan(a))
+        }
     }
 
     @Test

@@ -42,11 +42,20 @@ class BackNavigationTest {
         assertThat(BackNavigation.resolve(Screen())).isEqualTo(Action.EXIT)
         assertThat(BackNavigation.intercepts(Screen())).isFalse()
         // Anything open, in any combination, intercepts.
-        for (about in listOf(false, true)) for (gallery in listOf(false, true)) for (settings in listOf(false, true)) for (phase in Phase.entries) {
-            val screen = Screen(about, gallery, settings, phase)
-            val bare = !about && !gallery && !settings && phase == Phase.IDLE
-            assertThat(BackNavigation.intercepts(screen)).isEqualTo(!bare)
-        }
+        for (about in listOf(false, true)) for (gallery in listOf(false, true)) for (settings in listOf(false, true))
+            for (pro in listOf(false, true)) for (phase in Phase.entries) {
+                val screen = Screen(about, gallery, settings, pro, phase)
+                val bare = !about && !gallery && !settings && !pro && phase == Phase.IDLE
+                assertThat(BackNavigation.intercepts(screen)).isEqualTo(!bare)
+            }
+    }
+
+    @Test
+    fun `back closes the manual drawer before it touches super res`() {
+        assertThat(BackNavigation.resolve(Screen(proOpen = true))).isEqualTo(Action.CLOSE_PRO)
+        assertThat(BackNavigation.resolve(Screen(proOpen = true, superRes = Phase.RUNNING))).isEqualTo(Action.CLOSE_PRO)
+        // The settings screen covers the drawer, so it closes first.
+        assertThat(BackNavigation.resolve(Screen(settingsOpen = true, proOpen = true))).isEqualTo(Action.CLOSE_SETTINGS)
     }
 
     @Test

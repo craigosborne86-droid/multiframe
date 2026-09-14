@@ -64,9 +64,10 @@ picture, the sensor saw it in the scene."
 
 ## Palette Rules (The Ink System)
 
-1. **Nothing coloured sits on top of the photograph.** The two documented
-   exceptions are `Ink.Level` (green level gauge) and `Ink.Clipping` (red
-   highlight warning). Both are transient states about the photograph, not the
+1. **Nothing coloured sits on top of the photograph.** The three documented
+   exceptions are `Ink.Level` (green level gauge), `Ink.Clipping` (red
+   highlight warning) and `Ink.Peaking` (cyan focus peaking while manual
+   focus is engaged). All are transient states about the photograph, not the
    interface.
 2. **Selection is shown by weight, not hue.** Active = `Bone` fill. Inactive =
    `Pane` background + `Hairline` border.

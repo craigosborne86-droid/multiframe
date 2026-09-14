@@ -99,13 +99,14 @@ data class ControlSpec(
  */
 data class ControlBarState(
     val busy: Boolean = false,
-    val mergeEnabled: Boolean = true,
     val burstFrames: Int = 4,
     val timerSeconds: Int = 0,
     val guidesLabel: String = "OFF",
     val guidesOn: Boolean = false,
     val histogramOn: Boolean = false,
+    val dngOn: Boolean = true,
     val settingsOpen: Boolean = false,
+    val proOpen: Boolean = false,
     val aboutOpen: Boolean = false,
     /** The selected capture mode, by label. */
     val mode: String = "AUTO",
@@ -113,16 +114,16 @@ data class ControlBarState(
     val resolvedMode: String? = null,
     /**
      * Whether this camera can run the zero-shutter-lag raw ring at all. The
-     * burst modes and Super Res are plans for the ring, so without it there
-     * is only AUTO.
+     * ring is the engine, not a setting -- it is on wherever the hardware
+     * allows it -- and the burst modes and Super Res are plans for it, so
+     * without it there is only AUTO.
      */
     val streamOffered: Boolean = false,
-    val zslOn: Boolean = false,
+    /** Whether the manual controls can be offered: a sensor that takes them, or a lens that focuses. */
+    val manualOffered: Boolean = false,
     /** Whether Super Res is offered: a longer raw lens, a ring, and an attitude sensor. */
     val superResOffered: Boolean = false,
     val superRes: SuperResMachine.Phase = SuperResMachine.Phase.IDLE,
-    val rawBurstOffered: Boolean = false,
-    val dngOffered: Boolean = false,
 )
 
 /**
@@ -176,18 +177,16 @@ object Detents {
 
 object ControlBar {
 
-    const val MERGE = "merge"
     const val FRAMES = "frames"
-    const val ZSL = "zsl"
     const val TIMER = "timer"
     const val GUIDES = "guides"
     const val HISTOGRAM = "histogram"
+    const val DNG = "dng"
     const val SETTINGS = "settings"
+    const val PRO = "pro"
     const val ABOUT = "about"
 
     const val STOP = "stop"
-    const val RAW_BURST = "rawBurst"
-    const val DNG = "dng"
 
     /** The id of a mode carousel entry, and the mode it stands for. */
     private const val MODE_PREFIX = "mode."
@@ -239,27 +238,40 @@ object ControlBar {
     )
 
     /**
-     * The settings screen's chips: what the next capture will be, then what
+     * The manual opener beside the shutter: PRO slides the manual drawer up
+     * over the bottom bar, with the viewfinder left whole above it. Offered
+     * only where the sensor takes a manual exposure or the lens a manual
+     * focus; a camera with neither has nothing to draw in the drawer.
+     */
+    fun pro(state: ControlBarState): List<ControlSpec> = buildList {
+        if (!state.manualOffered) return@buildList
+        add(
+            ControlSpec(
+                id = PRO,
+                label = "PRO",
+                kind = ControlKind.Opener,
+                active = state.proOpen,
+                enabled = true,
+            )
+        )
+    }
+
+    /**
+     * The settings screen's chips: what the next capture writes, then what
      * is drawn over it, then the one opener that leads further.
      *
-     * The capture group first, because it is what a photographer sets; the
-     * ring is a developer's switch and comes after; the display last. Every
-     * one is gated on the hardware where the hardware has a say.
+     * Nothing here is a developer's switch. The ring, the merge, the A/B
+     * pair, the bracket and the ISP were all chips once; a photographer never
+     * touched one and a developer touched each once. The ring and the merge
+     * are the engine and are always on; the rest is reachable from a test and
+     * from nowhere else. Every chip is gated on the hardware where the
+     * hardware has a say.
      */
     fun settings(state: ControlBarState): List<ControlSpec> = buildList {
         // Nothing here may change while a capture is in flight: these are read
         // by the capture that is already running.
         val settled = !state.busy && !state.superRes.inFlight
 
-        add(
-            ControlSpec(
-                id = MERGE,
-                label = if (state.mergeEnabled) "MERGE ON" else "MERGE OFF",
-                kind = ControlKind.Mode,
-                active = state.mergeEnabled,
-                enabled = settled,
-            )
-        )
         add(
             ControlSpec(
                 id = FRAMES,
@@ -281,19 +293,15 @@ object ControlBar {
                 enabled = settled,
             )
         )
-        if (state.streamOffered) {
-            add(
-                ControlSpec(
-                    id = ZSL,
-                    label = if (state.zslOn) "ZSL ON" else "ZSL OFF",
-                    kind = ControlKind.Mode,
-                    active = state.zslOn,
-                    // Super Res needs the ring and switches it on itself; while
-                    // the mode is selected the switch is not the user's.
-                    enabled = settled && !state.superRes.selected,
-                )
+        add(
+            ControlSpec(
+                id = DNG,
+                label = if (state.dngOn) "DNG ON" else "DNG OFF",
+                kind = ControlKind.Mode,
+                active = state.dngOn,
+                enabled = settled,
             )
-        }
+        )
         add(
             ControlSpec(
                 id = GUIDES,
@@ -364,15 +372,15 @@ object ControlBar {
     }
 
     /**
-     * The strip beside the shutter: the things that take a photograph, and
-     * the one that stops taking one.
+     * The strip beside the shutter: the one thing that stops a capture.
      *
-     * All of these write a file the moment they are touched, which is why they
-     * are not among the settings. Every one is gated on the hardware having
-     * said yes -- a phone that cannot deliver raw offers no raw control at all,
-     * rather than a control that sends a request the camera will reject. With
-     * Super Res selected the shutter is the only capture, and the strip is
-     * STOP while one runs and nothing otherwise.
+     * The shutter is the only capture. `RAW xN` and `DNG` were actions here
+     * once -- the sequential path's burst and a single DNG -- and they were
+     * two squared chips floating over the shutter for a photographer who
+     * takes photographs with the shutter; the DNG is a setting now, written
+     * beside every JPEG, and the sequential path is the fallback for a phone
+     * without a ring. What is left is STOP, while a Super Res runs, and
+     * nothing otherwise.
      */
     fun actions(state: ControlBarState): List<ControlSpec> = buildList {
         val phase = state.superRes
@@ -387,28 +395,6 @@ object ControlBar {
                     kind = ControlKind.Action,
                     active = true,
                     enabled = phase == SuperResMachine.Phase.RUNNING,
-                )
-            )
-        }
-        if (phase.selected) return@buildList
-        if (state.rawBurstOffered) {
-            add(
-                ControlSpec(
-                    id = RAW_BURST,
-                    label = "RAW",
-                    kind = ControlKind.Action,
-                    value = "×${state.burstFrames}",
-                    enabled = !state.busy,
-                )
-            )
-        }
-        if (state.dngOffered) {
-            add(
-                ControlSpec(
-                    id = DNG,
-                    label = "DNG",
-                    kind = ControlKind.Action,
-                    enabled = !state.busy,
                 )
             )
         }
