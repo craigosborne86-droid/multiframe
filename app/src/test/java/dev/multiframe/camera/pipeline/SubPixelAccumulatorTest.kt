@@ -442,6 +442,53 @@ class SubPixelAccumulatorTest {
     }
 
     /**
+     * A defective site in the reference would otherwise survive at full
+     * weight -- every alternate disagrees with it and is rejected -- and the
+     * canvas is the wrong place to find it once the kernel has spread it. So
+     * it is caught on the sensor grid before it is placed, by the same rule
+     * the CFA develop applies.
+     */
+    @Test
+    fun aHotSiteInTheReferenceIsSuppressedBeforeItIsPlaced() {
+        val s = scene()
+        val ref = bayerFrame(s, 0f, 0f)
+        val hx = sensorW / 2
+        val hy = sensorH / 2
+        val neighbours = listOf(
+            ref.data[hy * sensorW + hx - 2], ref.data[hy * sensorW + hx + 2],
+            ref.data[(hy - 2) * sensorW + hx], ref.data[(hy + 2) * sensorW + hx],
+        ).map { it.toInt() and 0xFFFF }
+        ref.data[hy * sensorW + hx] = 1023.toShort()
+
+        // Reference alone, so the cell at the site is exactly what was placed.
+        val acc = SubPixelAccumulator(sensorW, sensorH, profile)
+        acc.setReference(ref)
+        val c = Demosaic.colourAt(profile, hx, hy)
+        val got = acc.finish().rgb[((2 * hy) * canvasW + 2 * hx) * 3 + c]
+        assertThat(got).isWithin(0.5f).of(neighbours.max().toFloat())
+
+        // And with the threshold off, the defect is placed as read.
+        val raw = SubPixelAccumulator(sensorW, sensorH, profile, hotPixelThreshold = 0f)
+        raw.setReference(ref)
+        assertThat(raw.finish().rgb[((2 * hy) * canvasW + 2 * hx) * 3 + c]).isWithin(0.5f).of(1023f)
+    }
+
+    /** The same rule, and a genuine highlight shared with a neighbour survives it. */
+    @Test
+    fun aHighlightSharedWithANeighbourIsNotADefect() {
+        val s = scene()
+        val ref = bayerFrame(s, 0f, 0f)
+        val hx = sensorW / 2
+        val hy = sensorH / 2
+        ref.data[hy * sensorW + hx] = 1000.toShort()
+        ref.data[hy * sensorW + hx + 2] = 990.toShort()
+        val acc = SubPixelAccumulator(sensorW, sensorH, profile)
+        acc.setReference(ref)
+        val c = Demosaic.colourAt(profile, hx, hy)
+        assertThat(acc.finish().rgb[((2 * hy) * canvasW + 2 * hx) * 3 + c]).isWithin(0.5f).of(1000f)
+    }
+
+    /**
      * Gain normalisation, as in the ordinary merge. A frame at four times the
      * ISO reads four times the value; divided by its gainScale it lands on the
      * reference's scale and the merge sees one exposure.

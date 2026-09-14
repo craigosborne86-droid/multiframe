@@ -242,6 +242,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var highlightGuard by remember { mutableStateOf(restored.highlightGuard) }
     var guardPull by remember { mutableFloatStateOf(0f) }
     var dcgEnabled by remember { mutableStateOf(restored.dcgEnabled) }
+    var superRes by remember { mutableStateOf(restored.superRes) }
     var outputFormat by remember { mutableStateOf(restored.outputFormat) }
 
     // What the user is photographing. The right settings for a night scene and
@@ -1035,7 +1036,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(
         settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, captureMode,
-        timerSeconds, guides, dcgEnabled, outputFormat,
+        timerSeconds, guides, dcgEnabled, superRes, outputFormat,
     ) {
         AppSettings.save(
             context,
@@ -1050,6 +1051,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 timerSeconds = timerSeconds,
                 guides = guides.name,
                 dcgEnabled = dcgEnabled,
+                superRes = superRes,
                 outputFormat = outputFormat,
             ),
         )
@@ -1505,6 +1507,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         onHighlightGuard = { if (!busy) highlightGuard = it },
                         dcgEnabled = if (caps?.supportsBracketing == true) dcgEnabled else null,
                         onDcgEnabled = { if (!busy) dcgEnabled = it },
+                        // Only with a stream to accumulate from: the 2x path is
+                        // a property of the ZSL burst.
+                        superRes = if (caps?.supportsSuperRes == true && zslStream != null) superRes else null,
+                        onSuperRes = { if (!busy) superRes = it },
                         outputFormat = if (HeifEncoder.isAvailable) outputFormat else null,
                         onOutputFormat = { if (!busy) outputFormat = it },
                         onReset = {
@@ -1522,6 +1528,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             guides = GuideMode.OFF
                             abMode = false
                             dcgEnabled = fresh.dcgEnabled
+                            superRes = fresh.superRes
                             outputFormat = fresh.outputFormat
                             status = "settings reset"
                         },
@@ -1622,6 +1629,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                             context, stream, frames, rot,
                                             lensProfile = lensProfiles[stream.lensId],
                                             outputFormat = outputFormat,
+                                            superRes = superRes && caps?.supportsSuperRes == true,
                                         )
                                     }
                                     Log.i(TAG, "ZSL result: $r")
@@ -1638,6 +1646,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                         CaptureReadout.of(
                                             it.framesMerged, it.meanContribution,
                                             dcgActive = r.dcgActive,
+                                            superRes = r.superRes,
                                         )
                                     } ?: r.message
                                     busy = false

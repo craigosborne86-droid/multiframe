@@ -202,7 +202,8 @@ int64_t tileCost(const Plane& ref, const Plane& alt, int x0, int y0,
 /**
  * The fractional offset of a minimum, from three costs a pixel apart.
  *
- * Matches `Aligner.subPixelOffset` exactly, including the three cases that
+ * Matches `Aligner.subPixelOffset` exactly -- the equiangular fit, and the
+ * reasons it replaced the parabola are there -- including the three cases that
  * return zero: a flat or inverted curvature, a vertex outside +-0.5, and the
  * INT64_MAX sentinel an early-exit cost reads as. Computed in double for the
  * same reason -- the costs run to millions and their difference is the number
@@ -210,11 +211,13 @@ int64_t tileCost(const Plane& ref, const Plane& alt, int x0, int y0,
  */
 inline float subPixelOffset(int64_t before, int64_t at, int64_t after) {
     if (before == INT64_MAX || at == INT64_MAX || after == INT64_MAX) return 0.0f;
-    const double denom = static_cast<double>(before) - 2.0 * static_cast<double>(at) +
-                         static_cast<double>(after);
-    if (denom <= 0.0) return 0.0f;
-    const double vertex = (static_cast<double>(before) - static_cast<double>(after)) /
-                          (2.0 * denom);
+    const double b = static_cast<double>(before);
+    const double a = static_cast<double>(at);
+    const double c = static_cast<double>(after);
+    if (b - 2.0 * a + c <= 0.0) return 0.0f;
+    const double steep = std::max(b, c) - a;
+    if (steep <= 0.0) return 0.0f;
+    const double vertex = (b - c) / (2.0 * steep);
     if (vertex < -0.5 || vertex > 0.5) return 0.0f;
     return static_cast<float>(vertex);
 }

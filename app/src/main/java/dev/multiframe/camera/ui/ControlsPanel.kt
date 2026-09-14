@@ -71,6 +71,9 @@ fun ControlsPanel(
     /** Null where the camera cannot bracket ISO (no manual sensor, ISO range or raw). */
     dcgEnabled: Boolean? = null,
     onDcgEnabled: (Boolean) -> Unit = {},
+    /** Null where the device cannot hold a 2x canvas of this sensor, or has no native library. */
+    superRes: Boolean? = null,
+    onSuperRes: (Boolean) -> Unit = {},
     /** Null where the device cannot write HEIF, in which case there is no choice. */
     outputFormat: OutputFormat? = null,
     onOutputFormat: (OutputFormat) -> Unit = {},
@@ -181,6 +184,13 @@ fun ControlsPanel(
             }
             dcgEnabled?.let { on ->
                 Toggle("DCG ${if (on) "ON" else "OFF"}", on) { onDcgEnabled(!on) }
+            }
+            // The 2x sub-pixel canvas. Asked for, not promised: a burst
+            // without the diversity declines to the ordinary merge and the
+            // readout says so. A choice about output size and develop time
+            // rather than about the shot, hence set once.
+            superRes?.let { on ->
+                Toggle("2X ${if (on) "ON" else "OFF"}", on) { onSuperRes(!on) }
             }
             // Only where the device can actually write one. A control that
             // silently produces JPEGs is worse than no control.

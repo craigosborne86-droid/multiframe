@@ -34,6 +34,12 @@ data class CameraCapabilities(
     val supportsRaw: Boolean,
     /** Output formats CameraX can actually deliver on this camera. */
     val supportedOutputFormats: Set<Int>,
+    /**
+     * The active array, in pixels, or zero where the camera did not say. What
+     * a raw frame's size will be, and so what a 2x canvas of it would cost.
+     */
+    val rawWidth: Int = 0,
+    val rawHeight: Int = 0,
 ) {
 
     /**
@@ -75,6 +81,20 @@ data class CameraCapabilities(
 
     val supportsBracketing: Boolean
         get() = hasManualSensor && hasIsoRange && supportsRaw
+
+    /**
+     * Whether the 2x sub-pixel canvas can be offered.
+     *
+     * Raw frames, because the accumulation is in the sensor's own domain; the
+     * native library, because the canvas and its develop exist only there;
+     * and the memory for a canvas of this sensor at twice its resolution, six
+     * bytes a cell, judged against physical memory the way the allocation
+     * itself will judge it. A device that fails any of these never sees the
+     * control.
+     */
+    val supportsSuperRes: Boolean
+        get() = supportsRaw && NativeMerge.isAvailable() &&
+            MemoryBudget.canHoldCanvas(rawWidth, rawHeight)
 
     fun summary(): String = buildString {
         append(if (hasManualSensor) "Manual" else "Auto only")
@@ -142,6 +162,10 @@ data class CameraCapabilities(
             val awb = ints(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
                 .ifEmpty { listOf(CameraMetadata.CONTROL_AWB_MODE_AUTO) }
 
+            val activeArray = c2.getCameraCharacteristic(
+                CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE
+            )
+
             return CameraCapabilities(
                 hasManualSensor = caps.contains(
                     CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR
@@ -172,6 +196,8 @@ data class CameraCapabilities(
                     ImageCapture.getImageCaptureCapabilities(cameraInfo)
                         .supportedOutputFormats
                 }.getOrDefault(emptySet()),
+                rawWidth = activeArray?.width() ?: 0,
+                rawHeight = activeArray?.height() ?: 0,
             )
         }
     }

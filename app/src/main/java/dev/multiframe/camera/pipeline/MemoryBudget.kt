@@ -42,6 +42,38 @@ object MemoryBudget {
     private const val USABLE_FRACTION = 0.55
 
     /**
+     * Whether a 2x canvas of a sensor this size can be held.
+     *
+     * Native memory, not heap: the canvas is an anonymous mapping of six bytes
+     * a cell at four cells per sensor pixel, and the develop that follows is
+     * half that again but consumes the canvas as it goes. The rule is the one
+     * `SubPixel.cpp` and `Mosaic.cpp` apply at allocation -- no more than half
+     * of physical memory -- with the develop's output and the ring's frames
+     * counted alongside, so the answer here and the answer there agree.
+     */
+    fun canHoldCanvas(
+        sensorWidth: Int,
+        sensorHeight: Int,
+        physicalBytes: Long = physicalMemoryBytes(),
+    ): Boolean {
+        if (sensorWidth <= 0 || sensorHeight <= 0 || physicalBytes <= 0) return false
+        val cells = 4L * sensorWidth * sensorHeight
+        val canvas = cells * 6L
+        val developed = cells * 3L
+        return canvas + developed <= physicalBytes / 2
+    }
+
+    /** Physical memory as the kernel reports it, or zero where it cannot be read. */
+    fun physicalMemoryBytes(): Long = try {
+        java.io.File("/proc/meminfo").useLines { lines ->
+            lines.firstOrNull { it.startsWith("MemTotal:") }
+                ?.split(Regex("\\s+"))?.getOrNull(1)?.toLongOrNull()?.times(1024L) ?: 0L
+        }
+    } catch (e: Exception) {
+        0L
+    }
+
+    /**
      * Memory sets the ceiling, but alignment and merge cost scales with pixel
      * count, so latency caps it independently. At this size a burst takes a few
      * seconds; four times the pixels would take four times as long.

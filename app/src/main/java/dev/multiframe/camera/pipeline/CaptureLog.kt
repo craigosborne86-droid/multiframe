@@ -57,6 +57,9 @@ data class CaptureRecord(
 
     /** How the shot was taken, read off the name the pipeline chose. */
     val description: String get() = RecentCapture.describe(baseName)
+
+    /** Whether the developed image is a 2x accumulation, which the grid badges. */
+    val isSuperRes: Boolean get() = RecentCapture.isSuperRes(baseName)
 }
 
 /**

@@ -30,6 +30,14 @@ data class AppSettings(
     val guides: String = "OFF",
     val dcgEnabled: Boolean = false,
     /**
+     * Whether a shutter press asks for the 2x sub-pixel canvas.
+     *
+     * Asks: the burst has to have earned it, and the readout says whether it
+     * did. Off by default because it doubles the develop and writes a file
+     * four times the size, which is a trade to choose rather than inherit.
+     */
+    val superRes: Boolean = false,
+    /**
      * What the developed image is written as. The DNG is unaffected.
      *
      * JPEG by default, for the compatibility reason in [OutputFormat].
@@ -58,6 +66,7 @@ data class AppSettings(
         KEY_MERGE to mergeEnabled.toString(),
         KEY_GUARD to highlightGuard.toString(),
         KEY_ZSL to zslEnabled.toString(),
+        KEY_SUPER_RES to superRes.toString(),
         KEY_MODE to captureMode.name,
         KEY_TIMER to timerSeconds.toString(),
         KEY_GUIDES to guides,
@@ -83,6 +92,7 @@ data class AppSettings(
         const val KEY_TIMER = "timer"
         const val KEY_GUIDES = "guides"
         const val KEY_DCG = "dcg"
+        const val KEY_SUPER_RES = "superRes"
         const val KEY_FORMAT = "outputFormat"
 
         private const val PREFERENCES = "multiframe.settings"
@@ -138,6 +148,7 @@ data class AppSettings(
                     .takeIf { it in TIMER_DELAYS } ?: defaults.timerSeconds,
                 guides = stored[KEY_GUIDES]?.takeIf { it.isNotBlank() } ?: defaults.guides,
                 dcgEnabled = bool(KEY_DCG, defaults.dcgEnabled),
+                superRes = bool(KEY_SUPER_RES, defaults.superRes),
                 outputFormat = OutputFormat.named(stored[KEY_FORMAT]),
             )
         }
@@ -162,6 +173,7 @@ data class AppSettings(
                     evIndex = manual.effectiveEvIndex(caps),
                 ),
                 dcgEnabled = dcgEnabled && caps.supportsBracketing,
+                superRes = superRes && caps.supportsSuperRes,
             )
         }
 

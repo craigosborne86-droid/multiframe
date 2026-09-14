@@ -538,15 +538,50 @@ For each level, coarsest first:
      81 evaluations per tile per level. At level 3 this covers ±32 proxy
      pixels, ±64 sensor pixels -- far beyond burst hand tremor.
   4. At level 0 only: sub-pixel refinement. Four more evaluations at the
-     winner's cardinal neighbours, and a parabola through each axis's three
-     costs gives the fractional offset of the minimum. Bounded to ±0.5; a
-     vertex outside that means the integer search was wrong by a pixel and
-     no parabola fixes it, so zero is returned rather than a clamp.
+     winner's cardinal neighbours, and an equiangular fit through each
+     axis's three costs gives the fractional offset of the minimum:
+         t = (before - after) / (2 * (max(before, after) - at))
+     Bounded to ±0.5; a vertex outside that means the integer search was
+     wrong by a pixel and no fit fixes it, so zero is returned rather than
+     a clamp.
 
 Output: AlignmentField(tilesX, tilesY, dx[], dy[], fracDx[], fracDy[])
   dx, dy      integer winners, proxy pixels
   fracDx, dy  refinement, proxy pixels, zero where not refined
 ```
+
+**Why the equiangular fit and not the parabola.** The first version fitted a
+parabola through the three costs -- the textbook refinement, and correct for a
+cost that is quadratic near its minimum. A sum of absolute differences is not:
+shift a textured image by t and its SAD against the unshifted one grows as |t|.
+Three samples of a V do not lie on the parabola that has its vertex at the V's,
+and the parabola through them puts its vertex at `t / (2 (1 - t))` -- a bias
+toward zero of nearly half. Measured before it was reasoned, on the real proxy
+and search at the sensor's full width (`SubPixelBiasDeviceTest`, true shift in
+sensor pixels against the recovered):
+
+| True | Parabola | Equiangular |
+|---|---|---|
+| 0.30 | 0.12 | 0.21 |
+| 0.50 | 0.26 | 0.41 |
+| 0.70 | 0.43 | 0.60 |
+| 1.00 | 0.81 | 0.90 |
+
+The equiangular fit is the vertex of the V through the three points and is
+exact for one. Its residual -- a slope of one with a tenth of a pixel of
+offset -- is the other axis's unrefined fraction leaking in through diagonal
+texture, which a separable three-point refinement cannot see. This matters more
+for the 2x canvas (§3.6) than for the merge: the merge blends samples over a
+tile and a quarter-pixel error softens nothing visible, but the canvas *places*
+each sample by this fraction, and a quarter of a sensor pixel is half a canvas
+cell, the kernel's whole sigma, on every sample of every frame.
+
+A tile whose content is a pure grating at the sensor's Nyquist cannot be
+refined at all: on the 2x2-binned proxy that grating is at the proxy's Nyquist,
+where a shift changes its contrast rather than its phase. Samples such a tile
+places by a wrong offset disagree with the reference and are rejected, and the
+canvas there is the reference's. That is the honest answer, and the hole fill
+is what makes it a picture.
 
 The two merges spend the field differently. The Bayer-domain merge (§3.2)
 doubles `dx`, `dy` and uses nothing else: an offset in the CFA domain must be
@@ -881,6 +916,34 @@ would have supplied diversity is infeasible (see §2.3.6's measured actuator
 timing), so the hole fraction is the signal to decline this path and shoot the
 ordinary merge.
 
+**The hole fraction is predicted before anything is accumulated.** The
+geometry that produces it is in the alignment fields. A frame's samples land at
+`2 * ax - 4 * (dx + fracDx)`: four canvas cells per proxy pixel, so the integer
+part moves a sample by a multiple of the period of every channel's pattern and
+changes nothing about which cells are reached. Only the fraction does.
+`SubPixelCoverage.predict` takes, per tile and per channel, the positions
+modulo four of the reference's sites and every frame's shifted sites, and
+counts the sixteen positions of a period that lie within the kernel's reach
+(Euclidean distance ≤ 1, where the kernel's weight is 0.135 against the 0.05
+hole threshold) of none of them. On a burst whose frames agree with the
+reference this is the measured fraction exactly; `SubPixelCoverageTest` holds
+it to the accumulator on the tripod and quad-shift cases, and on the
+full-size synthetic burst of `SuperResDeviceTest` the prediction was R 19.6%,
+G 0.7%, B 19.6% against a measurement of 19.8 / 0.8 / 19.7.
+
+The decision is per channel, because the channels are not alike:
+
+| Channel | Sites per period | Bound on interior holes | Why |
+|---|---|---|---|
+| Green | 2 of 4 | **2%** | Carries the resolution claim. A handheld burst of eight leaves about one cell in fifty; a tripod burst six in sixteen. |
+| Red, blue | 1 of 4 | **25%** | Each frame reaches a quarter of what green reaches; eight frames at random offsets leave about a fifth for the fill. The ordinary develop *interpolates* red at three sites in four from neighbours four cells away, so a canvas with a fifth of its red cells filled from within three is still three times the measured chroma. A quarter is where that stops being true. |
+
+Both bounds are checked twice: on the prediction, which is the reason not to
+run; and on the measurement, which is the confirmation, since a sample the
+robustness weight rejects contributes less than the geometry promised. A
+canvas that fails either is closed and the ordinary merge -- which ran anyway,
+see §3.6.5 -- is what the user gets, with the reason in the readout.
+
 #### 3.6.4 Memory
 
 This is the constraint that shapes the implementation.
@@ -900,6 +963,35 @@ after correctness: a burst of 32 frames accumulating into a 10-bit mantissa is
 close enough to the precision floor that it needs a parity test against the
 `float32` version rather than an assumption.
 
+**As built and measured** (`SuperResDeviceTest`, 8 frames of 4080×3072 on the
+Pixel 11 Pro): the canvas is a 287 MB anonymous mapping of 16-bit RGB; the
+strip accumulators are two 49 MB planes (weighted sum and weight) for a 256-row
+strip with a three-row halo, resolved in place so no third plane exists; and
+the develop that follows (§3.6.5) releases the canvas's pages strip by strip as
+it consumes them, so its 150 MB of 8-bit output grows as the canvas shrinks and
+the footprint never exceeds the canvas. Resident memory across the run: 257 MB
+before the frames, 451 MB with eight synthetic frames held, **734 MB at the
+peak** with the canvas resolved, 462 MB after the develop with the frames still
+held. Nothing of image size touches the Java heap at any point.
+
+**The sweep is memory-bound, and its shape follows from that.** One thread
+places a sample in about 45 ns. Eight threads over full-width row bands managed
+1.6× that, not 8×: each sample's nine taps are read-modify-writes into planes
+of fifty megabytes, and eight cores doing that at once are eight cores waiting
+on the same DRAM. The sweep is therefore done in **tiles** of the accumulator,
+32 canvas rows by 256 columns -- under 200 KB across both planes and three
+channels, resident in a little core's L2 for the whole of the tile's sweep
+across every frame -- claimed dynamically because the cores are not alike. A
+tile is swept by every sensor row and column whose samples can reach it, its
+own extent plus the alignment's reach, and a tile's own cells are the only
+ones it writes, so the tiles are bit-identical to the single sweep they
+replaced. Measured interleaved on one burst: full-width bands of 8 rows
+771 ms, of 32 rows 1271 ms; tiles of 64×512 661 ms, 128×1024 722 ms, 32×256
+**534 ms**, against 1140 ms single-threaded. The Gaussian is a 4096-entry
+table on the squared distance, interpolated, in place of nine hundred million
+calls to `exp`; the interpolation error is a few parts in 10⁸ and the parity
+test's bound is one 16-bit count.
+
 #### 3.6.5 What This Does to the Develop Chain
 
 For bursts taking this path, §3.1 changes:
@@ -907,28 +999,78 @@ For bursts taking this path, §3.1 changes:
 ```
 Merged CFA -> black -> hot pixel -> shading -> white balance
   -> DEMOSAIC                                    <-- removed
-  -> colour matrix -> tone curve -> ...
+  -> colour matrix -> tone curve -> sRGB gamma -> sharpen
 ```
 
 becomes
 
 ```
-Aligned raw samples -> black -> hot pixel -> shading -> white balance
-  -> SUB-PIXEL ACCUMULATION (this section)       <-- replaces demosaic,
-                                                     and outputs at 2x
-  -> colour matrix -> tone curve -> ...
+Reference CFA -> hot pixel                       <-- on the reference, before placement
+  -> SUB-PIXEL ACCUMULATION (this section)       <-- replaces demosaic, outputs
+                                                     16-bit RGB at 2x in sensor counts
+  -> black -> shading -> white balance           <-- per channel, on the canvas
+  -> colour matrix -> tone curve -> sRGB gamma -> sharpen
+  -> JPEG                                        <-- from native memory to the descriptor
 ```
 
-The preparatory passes move ahead of accumulation because they are per-sample
-corrections and must be applied to a sample before it is placed. Everything
-downstream of the colour matrix is unchanged and simply receives a larger,
-full-colour buffer.
+**Where the preparatory passes sit, and why.** An earlier draft of this section
+put black, shading and white balance ahead of the accumulation. As built they
+follow it, and the reasons are exact rather than convenient. Black subtraction
+is a per-channel constant offset and a weighted mean of `(v - b)` is
+`(mean v) - b`; the two greens' levels differ by the sensor's green imbalance
+and are averaged. White balance is a per-channel constant gain and commutes
+with the mean for the same reason. Shading varies smoothly across the sensor
+and is evaluated at the canvas cell's own sensor position, which is within one
+sensor pixel of where any sample that reached it was taken -- a difference of
+a few thousandths of a percent in gain, below the map's own resolution. Moving
+them after the accumulation also means the accumulator has one job and one
+parity test.
 
-**This does not replace the existing merge.** A single frame, a burst with no
-measurable sub-pixel diversity that dither could not supply, or a device short
-of memory all still take the §3.2 path and demosaic normally. The two coexist,
-and which one ran is recorded in the capture readout — a 2x output is a
-different claim about the photograph and should say so.
+**Hot pixels are the exception and stay ahead.** A defective site in the
+reference survives the robustness weighting at full weight -- every alternate
+disagrees with it and is rejected -- and once the kernel has spread it into a
+blob three cells across no same-colour-neighbour test on the canvas recognises
+it. So the rule of §3.1 (a site beyond the range of its four same-colour
+neighbours by the threshold is replaced by the nearest of them) is applied to
+each reference sample as it is placed, on the sensor grid. Alternates need no
+such treatment: their defects disagree with the reference and are rejected.
+Defringe is absent because the canvas was built from aligned measured samples
+rather than interpolated across colour planes, and has no demosaic fringes.
+
+**The develop is native, from the canvas's pages to the file.** A 50 MP canvas
+developed to RGBA is 200 MB, which cannot be a Bitmap beside a 256 MB heap
+already holding a ring of raw frames. `LinearDevelop.cpp` develops the canvas
+in strips into three-byte RGB in a second anonymous mapping, releasing each
+strip of the canvas with `madvise(MADV_DONTNEED)` as it is consumed; sharpens
+that in place with the §3.1 operator on a band-local luma; and hands it to the
+strip JPEG encoder (`Jpeg.h`), which writes to the descriptor `ImageSaver`
+opened. The pixels are written in the sensor's orientation and the EXIF
+orientation tag says which way is up, because turning fifty megapixels is a
+second copy of them. Everything from the colour matrix onward is `Tone.h`, the
+same functions the CFA develop runs, so a 2x photograph and its ordinary
+sibling render the same tone; `LinearDeveloper.kt` is the Kotlin reference and
+`LinearDevelopParityTest` holds the native path to it within two codes, one
+with the sharpen off. On the full-size synthetic burst the develop took 850 ms,
+the sharpen 150 ms and the encode 220 ms.
+
+**The DNG beside it is the ordinary merge's.** A DNG is the sensor's CFA;
+`DngCreator` writes nothing else, and the canvas is not that. So the 2x path
+runs the ordinary merge as well -- the same frames placed by the same
+alignment fields, accumulated the §3.2 way -- and writes its DNG under the
+same name as the 2x JPEG. That DNG is a raw file that is true, and it is also
+what is developed when the canvas declines at any of its three gates
+(prediction, allocation, measurement), so a decline costs the user nothing but
+the resolution they asked for. The pair carry one name and one gallery entry.
+
+**This does not replace the existing merge.** A single frame, a burst without
+the diversity, a device short of memory, or a user who has not asked all take
+the §3.2 path. The 2x path is asked for by a setting (`AppSettings.superRes`,
+the `2X` toggle, shown only where `CameraCapabilities.supportsSuperRes` holds),
+and which one ran is recorded in the readout as `· 2X` or `· 2X declined`,
+in the file name as `_sr2x_`, in the EXIF description as "accumulated at 2x",
+and in the gallery as a `SUPER-RES 2X` badge -- because a 2x output is a
+different claim about the photograph and should say so everywhere the
+photograph is.
 
 #### 3.6.6 Verification
 
@@ -937,8 +1079,12 @@ different claim about the photograph and should say so.
 | A/A null | A burst of one frame, accumulated, must match that frame demosaiced to within the kernel's known softening. It cannot invent detail from a single sample set. |
 | Synthetic ground truth | Render a known high-resolution target, sample it through a simulated Bayer grid at known sub-pixel offsets, accumulate, and compare against the original. The recovered detail is measurable rather than a matter of opinion. |
 | Native/Kotlin parity | As `MergeParityTest` does for §3.2 — a reference implementation in Kotlin, bit-comparable to the NEON path within the `-ffast-math` bound of 1e-5. |
-| Hole fraction | Recorded per capture and asserted near zero on a dithered tripod burst; a rise is the signal that dither has stopped working. |
-| No-diversity guard | A burst captured rigidly with dither disabled must decline this path rather than produce a 2x output built from interpolation. |
+| Hole fraction | Recorded per capture, per channel; predicted from the alignment before the accumulation and held to the measurement (`SubPixelCoverageTest` exactly on agreeing frames; `SuperResDeviceTest` within a point at full size). |
+| No-diversity guard | A tripod burst predicts 11/16 red and 6/16 green holes and is declined before anything is allocated (`SubPixelCoverageTest.aTripodBurstIsPredictedExactly`). |
+| Sub-pixel bias | The recovered fraction swept against a known shift at the sensor's full width (`SubPixelBiasDeviceTest`); the curve is the finding, see §3.3.1. |
+| Linear develop parity | Native against `LinearDeveloper` on a canvas the native accumulator built, every stage on: two codes with the sharpen off, four with it on and fewer than one value in a thousand past two (`LinearDevelopParityTest`). |
+| Tone equality | A flat field through the canvas and the linear develop is the same grey as through the CFA develop, to one code (`LinearDeveloperTest.aFlatFieldRendersTheSameToneAsTheCfaDevelop`). |
+| End to end | Eight full-size frames to a decodable 8160×6144 JPEG with the orientation in the tag, timings and resident memory logged (`SuperResDeviceTest`). |
 
 ---
 
@@ -949,7 +1095,8 @@ different claim about the photograph and should say so.
 | Subsystem | Files |
 |---|---|
 | **Capture & ZSL** | `ZslRawStream.kt`, `ZslCapture.kt`, `ZslPolicy.kt`, `RawRing.kt`, `BurstBuffer.kt`, `RawCapture.kt`, `RawBurstCapture.kt` |
-| **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt`, `SubPixelAccumulator.kt`, `NativeSubPixel.kt` |
+| **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt` |
+| **2x canvas** | `SubPixelAccumulator.kt` (reference), `NativeSubPixel.kt` (strips, and the develop entry points), `SubPixelCoverage.kt` (the prediction and its bounds), `LinearDeveloper.kt` (the linear develop, reference), `SuperResCapture.kt` (the outputs) |
 | **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
 | **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` |
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt` |
@@ -966,13 +1113,15 @@ different claim about the photograph and should say so.
 
 | File | Purpose |
 |---|---|
-| `bayer_merge.cpp` | NEON-vectorized merge accumulation, noise estimation, shading correction, prepass. |
-| `SubPixel.cpp` | Sub-pixel kernel accumulation onto a 2x canvas, strip-major over an mmap output (§3.6). Held to `SubPixelAccumulator.kt` within one 16-bit count. |
-| `Align.cpp` | Native 4-level pyramid tile alignment with parabolic sub-pixel refinement at the finest level (§3.3.1). Held to `Aligner.kt` at zero differing tiles. |
+| `bayer_merge.cpp` | NEON-vectorized merge accumulation, noise estimation, shading correction, prepass, the CFA develop. |
+| `Tone.h` | The tone chain shared by both develops: gamma and display tables, the shoulder table, `renderLinear`, shading interpolation, the band scheduler. Header-only. |
+| `SubPixel.cpp` | Sub-pixel kernel accumulation onto a 2x canvas, strip-major over an mmap output, tiled for cache residency (§3.6). Held to `SubPixelAccumulator.kt` within one 16-bit count. Also the JNI for the canvas's develop. |
+| `LinearDevelop.cpp` / `.h` | The develop for the 2x canvas: black, shading, white balance, matrix and tone from `Tone.h`, sharpen on band-local luma, into three-byte RGB with the canvas released strip by strip, then the strip encoder (§3.6.5). Held to `LinearDeveloper.kt`. |
+| `Align.cpp` | Native 4-level pyramid tile alignment with equiangular sub-pixel refinement at the finest level (§3.3.1). Held to `Aligner.kt` at zero differing tiles. |
 | `RingBuffer.cpp` / `.h` | mmap-backed AHardwareBuffer ring buffer |
 | `Mosaic.cpp` / `.h` | Native mosaic tile compositing |
 | `Rotate.cpp` | NEON-accelerated image rotation |
-| `Jpeg.cpp` | libjpeg-turbo JNI bridge (parallel striped encoding) |
+| `Jpeg.cpp` / `.h` | libjpeg-turbo strip encoder, parallel; the header exposes it to the linear develop for RGB from native memory |
 | `GpuCrossing.cpp` | Vulkan crossing cost benchmark (not production) |
 
 ### UI (app/src/main/java/dev/multiframe/camera/ui/)

@@ -82,6 +82,26 @@ class ShadingMap(
      */
     fun channelFor(x: Int, y: Int): Int = (y and 1) * 2 + (x and 1)
 
+    /**
+     * The map with three gains per cell rather than four, for an image whose
+     * pixels are colours rather than sites.
+     *
+     * The camera reports the four channels in the order red, green on even
+     * rows, green on odd rows, blue. The sub-pixel canvas has folded both greens
+     * into one channel, so the green gain is their mean -- they differ by the
+     * sensor's green imbalance, which is a fraction of a percent and well below
+     * what shading correction is for.
+     */
+    fun rgbGrid(): FloatArray {
+        val out = FloatArray(columns * rows * 3)
+        for (cell in 0 until columns * rows) {
+            out[cell * 3] = gains[cell * 4]
+            out[cell * 3 + 1] = 0.5f * (gains[cell * 4 + 1] + gains[cell * 4 + 2])
+            out[cell * 3 + 2] = gains[cell * 4 + 3]
+        }
+        return out
+    }
+
     /** Largest gain anywhere, which is how strong the vignetting is. */
     val peakGain: Float get() = gains.max()
 
@@ -94,6 +114,29 @@ class ShadingMap(
         }
 
     companion object {
+        /**
+         * [gainAt] on a three-channel grid from [rgbGrid]. The same arithmetic
+         * as the four-channel version, and the reference the native linear
+         * develop's shadingGain3 is held to.
+         */
+        fun rgbGainAt(
+            grid: FloatArray, columns: Int, rows: Int,
+            x: Int, y: Int, width: Int, height: Int, channel: Int,
+        ): Float {
+            if (columns <= 0 || rows <= 0 || width <= 1 || height <= 1) return 1f
+            val fx = (x.toFloat() / (width - 1)) * (columns - 1)
+            val fy = (y.toFloat() / (height - 1)) * (rows - 1)
+            val x0 = fx.toInt().coerceIn(0, columns - 1)
+            val y0 = fy.toInt().coerceIn(0, rows - 1)
+            val x1 = minOf(x0 + 1, columns - 1)
+            val y1 = minOf(y0 + 1, rows - 1)
+            val tx = (fx - x0).coerceIn(0f, 1f)
+            val ty = (fy - y0).coerceIn(0f, 1f)
+            fun cell(c: Int, r: Int) = grid[(r * columns + c) * 3 + channel]
+            val top = cell(x0, y0) * (1f - tx) + cell(x1, y0) * tx
+            val bottom = cell(x0, y1) * (1f - tx) + cell(x1, y1) * tx
+            return top * (1f - ty) + bottom * ty
+        }
 
         /** A map that changes nothing, for devices that report none. */
         fun identity(columns: Int = 3, rows: Int = 3) =

@@ -49,5 +49,16 @@ class RecentCaptureTest {
         assertThat(RecentCapture.describe("MF_1_raw.dng")).isEqualTo("single frame")
         assertThat(RecentCapture.describe("MF_1_ab_merged.jpg")).isEqualTo("A/B comparison")
         assertThat(RecentCapture.describe("MF_1_something.jpg")).isEqualTo("capture")
+        assertThat(RecentCapture.describe("MF_1_sr2x_8f.jpg")).isEqualTo("super-res 2x")
+    }
+
+    @Test
+    fun `a 2x capture is recognised by its tag`() {
+        // The tag is the one record of how the picture was made that travels
+        // with the file, and the gallery badge reads it.
+        assertThat(RecentCapture.isSuperRes("MF_20260914_020000_sr2x_8f.jpg")).isTrue()
+        assertThat(RecentCapture.isSuperRes("MF_20260914_020000_sr2x_8f.dng")).isTrue()
+        assertThat(RecentCapture.isSuperRes("MF_20260914_020000_zsl_8f.jpg")).isFalse()
+        assertThat(RecentCapture.SUPER_RES_TAG).isEqualTo("_sr2x_")
     }
 }

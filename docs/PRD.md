@@ -562,7 +562,7 @@ described is not yet built. This is what those numbers mean.
 |---|---|---|
 | 1 | Foundation & Hardware Truth | **Delivered.** Design tokens, haptic vocabulary, decoupled viewfinder HUD, `LensProfile` discovery, non-invasive DCG noise profiling, gallery and review surface. |
 | 2 | Lens Corrections & Develop Quality | Geometric distortion correction from `LensProfile`, lateral chromatic aberration correction, dual-illuminant colour matrix, HEIF output. |
-| 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel parabolic alignment refinement; sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native strips, parity-verified); IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. Not yet integrated into the capture path — see §5.2. |
+| 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel alignment refinement (equiangular, after the parabola was measured biased); sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native tiled strips, parity-verified); coverage prediction from the alignment; the linear develop of the canvas to a JPEG from native memory; the `2X` control, readout and gallery badge; IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. See §5.2. |
 | 4 | GPU Develop & Local Tone Mapping | Vulkan compute develop, bilateral-grid local tone mapping. |
 | 5 | Super-Res UX & Responsive UI | Sweep mode with reticle guidance, configurable tile matrices, responsive layout, accessibility pass. |
 | 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
@@ -603,14 +603,53 @@ device that differs is recognised.
 - OIS seeding — no lens reports OIS data. `REFERENCE.md` §3.3.2.
 - Haptic micro-dither — 30 ms onset against a 25 ms window. §2.3.6 above.
 
-**Not yet done — the integration.** The accumulator produces a 2× linear RGB16
-canvas (300 MB for a 12.5 MP sensor). Reaching a saved photograph from it needs
-a develop path that takes linear RGB rather than CFA — colour matrix, tone
-curve, gamma, sharpen on a 50 MP buffer that cannot become a `Bitmap` on a
-256 MB heap and must be encoded from native memory as the mosaic is. It also
-needs the capture path to choose this route only when the burst's hole fraction
-says it earned it, and the readout to say a 2× output is a different claim
-about the photograph. That is the next block of Phase 3 work.
+**The integration, since built.** The canvas reaches the gallery. The path a
+shutter press takes with `2X` on:
+
+1. The ordinary merge runs as it always has — proxies, alignment, accumulation
+   — and its alignment fields are kept.
+2. `SubPixelCoverage.predict` reads the fractions off those fields and says,
+   per channel, what fraction of the canvas would be holes. Green over 2% or
+   red or blue over 25% declines here, before a byte is allocated. A tripod
+   burst declines here.
+3. The canvas is allocated (287 MB, anonymous, refused on a device without the
+   memory), the reference is placed with hot pixels suppressed on the way in,
+   the frames are placed by their fractions, and the measured holes are held
+   to the same bounds. A burst whose samples were rejected beyond what the
+   geometry promised declines here.
+4. The canvas is developed in native memory — black, shading, white balance,
+   the colour matrix and the same tone chain as every other photograph, the
+   demosaic removed because there is nothing to demosaic — straight to the
+   JPEG's descriptor, the canvas released strip by strip as it goes. The
+   ordinary merge's DNG is written beside it under the same name, because a
+   DNG is the sensor's CFA and the canvas is not.
+5. The readout says `· 2X`, or `· 2X declined` with the reason; the file is
+   `MF_<stamp>_sr2x_<n>f.jpg`; the EXIF description says "accumulated at 2x";
+   the gallery cell wears `SUPER-RES 2X`.
+
+Measured on the Pixel 11 Pro with eight synthetic frames at the sensor's size
+(`SuperResDeviceTest`): alignment 480–700 ms, accumulation about 4 s on a warm
+phone, develop and encode 1.0–1.6 s; an 8160×6144 JPEG of 9.9 MB; resident
+memory peaking at 734 MB with nothing of image size on the Java heap. A decline
+costs the shutter press nothing beyond the ordinary merge.
+
+**What the integration found.** Two things the accumulator's own tests could
+not have, because both only appear at the sensor's real size on real search
+costs. The parabolic sub-pixel fit was biased toward zero by nearly half —
+0.26 recovered for a true 0.50 — because a sum of absolute differences is a V
+near its minimum and not a parabola; the equiangular fit replaced it, and the
+measured curve is in `REFERENCE.md` §3.3.1. And the strip sweep was bound by
+memory rather than arithmetic, eight cores reaching 1.6× one, until it was
+tiled to fit a cache; `REFERENCE.md` §3.6.4 has the measurements.
+
+**Still open.** The chroma channels of an eight-frame handheld burst leave
+about a fifth of their cells to the fill; a longer burst closes them and the
+frame-count control already exists, but nothing yet suggests it when a capture
+declines on chroma. The optics correction (§2.2) does not run on the 2x path —
+the fused gather is written against a Bitmap, and the canvas is not one. And a
+2x capture takes several seconds to process where the ordinary merge takes
+one; the sweep's remaining cost is memory traffic and the next saving is a
+`float16` accumulator, which needs its own parity test first.
 
 ---
 

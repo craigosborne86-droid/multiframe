@@ -97,4 +97,26 @@ class MemoryBudgetTest {
         )
         assertThat(uncapped.width).isGreaterThan(MemoryBudget.LATENCY_CAP.width)
     }
+
+    // --- the 2x canvas -----------------------------------------------------
+
+    @Test
+    fun theCanvasRuleIsHalfOfPhysicalMemory() {
+        // A 12.5 MP sensor: 50 M cells at six bytes is 300 MB, and the develop
+        // that follows is 150 MB more. 900 MB of physical memory is the line.
+        val w = 4080
+        val h = 3072
+        val need = 4L * w * h * 9L
+        assertThat(MemoryBudget.canHoldCanvas(w, h, physicalBytes = need * 2)).isTrue()
+        assertThat(MemoryBudget.canHoldCanvas(w, h, physicalBytes = need * 2 - 1)).isFalse()
+        // A phone with 12 GB has room to spare; one with 512 MB does not.
+        assertThat(MemoryBudget.canHoldCanvas(w, h, physicalBytes = 12L shl 30)).isTrue()
+        assertThat(MemoryBudget.canHoldCanvas(w, h, physicalBytes = 1L shl 29)).isFalse()
+    }
+
+    @Test
+    fun anUnknownSensorOrMemoryCannotHoldACanvas() {
+        assertThat(MemoryBudget.canHoldCanvas(0, 0, physicalBytes = 12L shl 30)).isFalse()
+        assertThat(MemoryBudget.canHoldCanvas(4080, 3072, physicalBytes = 0L)).isFalse()
+    }
 }

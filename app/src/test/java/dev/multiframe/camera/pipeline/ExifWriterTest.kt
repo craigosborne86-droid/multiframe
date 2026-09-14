@@ -102,6 +102,29 @@ class ExifWriterTest {
     }
 
     @Test
+    fun `a 2x accumulation says so, and says its frame count`() {
+        val described = ExifWriter.describeCapture(
+            metadata(frames = 8).copy(kind = CaptureKind.SUPER_RES),
+        )
+        assertThat(described).contains("8 frames accumulated at 2x")
+        assertThat(described).doesNotContain("merged")
+    }
+
+    @Test
+    fun `the orientation tag asks for the turn the pixels still need`() {
+        // Every other path turns the pixels and says "normal". The 2x path
+        // leaves fifty megapixels the way the sensor wrote them and says
+        // which way is up instead, so the tag must mean a clockwise turn.
+        assertThat(ExifWriter.orientationTag(0)).isEqualTo(1)   // ORIENTATION_NORMAL
+        assertThat(ExifWriter.orientationTag(90)).isEqualTo(6)  // ORIENTATION_ROTATE_90
+        assertThat(ExifWriter.orientationTag(180)).isEqualTo(3) // ORIENTATION_ROTATE_180
+        assertThat(ExifWriter.orientationTag(270)).isEqualTo(8) // ORIENTATION_ROTATE_270
+        assertThat(ExifWriter.orientationTag(-90)).isEqualTo(8)
+        assertThat(ExifWriter.orientationTag(450)).isEqualTo(6)
+        assertThat(metadata().rotationDegrees).isEqualTo(0)
+    }
+
+    @Test
     fun `a single frame says so`() {
         assertThat(ExifWriter.describeCapture(metadata(frames = 1)))
             .contains("single frame")

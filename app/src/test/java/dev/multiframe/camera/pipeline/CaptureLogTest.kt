@@ -204,4 +204,16 @@ class CaptureLogTest {
         assertThat(CaptureLog.pair(listOf(file("MF_a_raw.dng", 1L)))
             .single().description).isEqualTo("single frame")
     }
+
+    @Test
+    fun aTwoXPhotographWearsItsBadge() {
+        val records = CaptureLog.pair(
+            listOf(file("MF_1_sr2x_8f.jpg", 10), file("MF_1_sr2x_8f.dng", 11), file("MF_2_zsl_8f.jpg", 5)),
+        )
+        assertThat(records).hasSize(2)
+        assertThat(records[0].isSuperRes).isTrue()
+        assertThat(records[0].hasRaw).isTrue()
+        assertThat(records[0].description).isEqualTo("super-res 2x")
+        assertThat(records[1].isSuperRes).isFalse()
+    }
 }

@@ -228,6 +228,23 @@ class AppSettingsTest {
     }
 
     @Test
+    fun `the 2x request survives a round trip and is off out of the box`() {
+        assertThat(AppSettings().superRes).isFalse()
+        assertThat(AppSettings.decode(emptyMap()).superRes).isFalse()
+        assertThat(AppSettings.decode(AppSettings(superRes = true).encode()).superRes).isTrue()
+        assertThat(AppSettings.decode(AppSettings(superRes = false).encode()).superRes).isFalse()
+    }
+
+    @Test
+    fun `the 2x request is dropped where the device cannot hold the canvas`() {
+        // On the JVM there is no native library and no /proc/meminfo, so the
+        // capability is false here whatever the sensor -- which is exactly the
+        // case the gate exists for.
+        assertThat(caps.supportsSuperRes).isFalse()
+        assertThat(AppSettings(superRes = true).reconcile(caps, lenses).superRes).isFalse()
+    }
+
+    @Test
     fun `reconciling settings that are already valid changes nothing`() {
         val fine = AppSettings(
             manual = ManualSettings(

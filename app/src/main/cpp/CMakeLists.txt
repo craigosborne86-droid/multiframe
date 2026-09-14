@@ -174,6 +174,7 @@ add_library(multiframe SHARED
     Rotate.cpp
     Optics.cpp
     SubPixel.cpp
+    LinearDevelop.cpp
     Jpeg.cpp
     GpuCrossing.cpp
 )

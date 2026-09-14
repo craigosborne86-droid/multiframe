@@ -22,7 +22,7 @@ private const val TAG = "Multiframe"
  * across many. Calling a sweep's tiles "merged" would describe the wrong
  * photograph.
  */
-enum class CaptureKind { MERGE, MOSAIC }
+enum class CaptureKind { MERGE, MOSAIC, SUPER_RES }
 
 /** What the camera recorded about a capture, in a form EXIF understands. */
 data class CaptureMetadata(
@@ -35,6 +35,15 @@ data class CaptureMetadata(
     val takenAtMillis: Long,
     val lensLabel: String?,
     val kind: CaptureKind = CaptureKind.MERGE,
+    /**
+     * Clockwise turn the pixels still need to be upright, in degrees.
+     *
+     * Zero for every path that rotates the pixels before writing them. The
+     * 2x path does not: turning a fifty-megapixel image is a second copy of
+     * it, and the orientation tag exists so that a file can say which way up
+     * it is instead. Every viewer honours it.
+     */
+    val rotationDegrees: Int = 0,
 )
 
 /**
@@ -68,6 +77,7 @@ object ExifWriter {
         frames: Int,
         takenAtMillis: Long = System.currentTimeMillis(),
         kind: CaptureKind = CaptureKind.MERGE,
+        rotationDegrees: Int = 0,
     ): CaptureMetadata = CaptureMetadata(
         exposureTimeNs = result?.get(CaptureResult.SENSOR_EXPOSURE_TIME),
         iso = result?.get(CaptureResult.SENSOR_SENSITIVITY),
@@ -81,6 +91,7 @@ object ExifWriter {
         takenAtMillis = takenAtMillis,
         lensLabel = lens?.label,
         kind = kind,
+        rotationDegrees = rotationDegrees,
     )
 
     /**
@@ -163,6 +174,8 @@ object ExifWriter {
         when {
             metadata.kind == CaptureKind.MOSAIC ->
                 append(": $n ${if (n == 1) "tile" else "tiles"} stitched")
+            metadata.kind == CaptureKind.SUPER_RES ->
+                append(": $n frames accumulated at 2x")
             n > 1 -> append(": $n frames merged")
             else -> append(": single frame")
         }
@@ -220,12 +233,22 @@ object ExifWriter {
             exif.setAttribute(ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM, it.toString())
         }
 
-        // The pixels are rotated upright before the file is written, so the
-        // orientation tag has to say "normal". Recording the device's rotation
-        // here as well would turn the picture a second time in every viewer.
+        // Most paths rotate the pixels upright before the file is written, so
+        // the orientation tag has to say "normal" for them -- recording the
+        // device's rotation as well would turn the picture a second time in
+        // every viewer. The 2x path leaves its pixels in sensor orientation
+        // and says so here instead.
         exif.setAttribute(
             ExifInterface.TAG_ORIENTATION,
-            ExifInterface.ORIENTATION_NORMAL.toString(),
+            orientationTag(metadata.rotationDegrees).toString(),
         )
+    }
+
+    /** The EXIF orientation that asks a viewer for a clockwise turn of [degrees]. */
+    fun orientationTag(degrees: Int): Int = when (((degrees % 360) + 360) % 360) {
+        90 -> ExifInterface.ORIENTATION_ROTATE_90
+        180 -> ExifInterface.ORIENTATION_ROTATE_180
+        270 -> ExifInterface.ORIENTATION_ROTATE_270
+        else -> ExifInterface.ORIENTATION_NORMAL
     }
 }

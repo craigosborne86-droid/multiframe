@@ -52,6 +52,30 @@ data class RawBurstResult(
     val publishMillis: Long = 0,
     /** Whether the burst alternated ISO levels for dual conversion gain. */
     val dcgActive: Boolean = false,
+    /**
+     * What the 2x path did with this burst, or null if it was not asked.
+     *
+     * A 2x output is a different claim about the photograph from a merge and
+     * the readout says which was made; a decline is recorded with its reason
+     * so the user learns why the picture they asked for is the ordinary one.
+     */
+    val superRes: SuperResOutcome? = null,
+)
+
+/** The 2x path's account of itself. See [SuperResCapture]. */
+data class SuperResOutcome(
+    /** True when the JPEG written is the 2x canvas. */
+    val produced: Boolean,
+    /** Predicted interior holes per channel, red, green, blue, from the alignment. */
+    val predictedHoles: FloatArray,
+    /** Measured interior holes per channel once accumulated, or null if it never ran. */
+    val measuredHoles: FloatArray?,
+    /** Why it declined, or null if it did not. */
+    val reason: String?,
+    /** The accumulation, in milliseconds, when it ran. */
+    val accumulateMillis: Long = 0,
+    /** The linear develop and encode, when they ran. */
+    val developMillis: Long = 0,
 )
 
 /**
@@ -439,7 +463,7 @@ object RawBurstCapture {
      * Writes the merged CFA straight from the native buffer. DngCreator takes a
      * ByteBuffer, so the raw payload never needs a Java-side copy.
      */
-    private fun writeDng(
+    internal fun writeDng(
         context: Context,
         merged: java.nio.ByteBuffer,
         width: Int,

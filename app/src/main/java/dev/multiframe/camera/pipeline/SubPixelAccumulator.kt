@@ -30,6 +30,13 @@ class SubPixelResult(
     /** Mean robustness weight over every placed alt sample. */
     val meanContribution: Float,
     val framesMerged: Int,
+    /**
+     * [interiorHoleFraction] per channel, red, green, blue. The channels are
+     * not alike: green is sampled twice as densely as either of the others and
+     * carries the resolution claim, so the decision whether a canvas earned
+     * its 2x is made per channel -- see [SubPixelCoverage].
+     */
+    val interiorHolesPerChannel: FloatArray = FloatArray(3) { interiorHoleFraction },
 ) {
     companion object {
         const val INTERIOR_MARGIN = 4
@@ -84,6 +91,12 @@ class SubPixelAccumulator(
     private val sensorHeight: Int,
     private val profile: SensorProfile,
     private val params: BayerMergeParams = BayerMergeParams(),
+    /**
+     * How far a reference site must sit beyond its same-colour neighbours to
+     * be replaced before it is placed. Zero leaves defects in. See
+     * [setReference] for why this applies to the reference alone.
+     */
+    private val hotPixelThreshold: Float = HotPixels.DEFAULT_THRESHOLD,
 ) {
     val width = sensorWidth * 2
     val height = sensorHeight * 2
@@ -109,18 +122,58 @@ class SubPixelAccumulator(
     /**
      * The reference frame. Every sample lands at exactly twice its sensor
      * position with weight one: this is the guaranteed contribution.
+     *
+     * ### Defective sites, and why only the reference's are treated
+     *
+     * The ordinary develop suppresses hot pixels on the merged CFA before it
+     * demosaics. This path has no merged CFA: the canvas is full colour, and a
+     * hot site has already been spread by the kernel into a blob three cells
+     * across that no same-colour-neighbour test on the canvas would recognise.
+     * So the test is made here, on the sensor grid, before the sample is
+     * placed -- which is where §3.6.5 of the reference puts it.
+     *
+     * It is made on the reference alone because that is the only frame whose
+     * defects survive. An alternate's hot site is compared against the
+     * reference at that point, disagrees by far more than the noise, and is
+     * rejected by the robustness weight. A hot site *in* the reference is the
+     * other way round: every alternate disagrees with it, every alternate is
+     * rejected, and the cell resolves to the defect at full weight. The same
+     * rule as [HotPixels.suppressInFrame], applied to a sample rather than a
+     * frame.
      */
     fun setReference(frame: BayerFrame) {
         require(frame.width == sensorWidth && frame.height == sensorHeight)
         reference = frame
+        val data = frame.data
+        val margin = if (hotPixelThreshold > 0f) (hotPixelThreshold * profile.range).toInt() else -1
         for (y in 0 until sensorHeight) {
+            val row = y * sensorWidth
+            val interiorRow = y >= 2 && y < sensorHeight - 2
             for (x in 0 until sensorWidth) {
                 val c = Demosaic.colourAt(profile, x, y)
-                val v = (frame.data[y * sensorWidth + x].toInt() and 0xFFFF).toFloat()
-                splat(c, 2f * x, 2f * y, v, 1f)
+                var raw = data[row + x].toInt() and 0xFFFF
+                if (margin >= 0 && interiorRow && x >= 2 && x < sensorWidth - 2) {
+                    raw = suppressedReference(data, row, x, raw, margin)
+                }
+                splat(c, 2f * x, 2f * y, raw.toFloat(), 1f)
             }
         }
         merged = 1
+    }
+
+    /** One site of the reference, clamped to the range of its same-colour neighbours. */
+    private fun suppressedReference(data: ShortArray, row: Int, x: Int, here: Int, margin: Int): Int {
+        val a = data[row + x - 2].toInt() and 0xFFFF
+        val b = data[row + x + 2].toInt() and 0xFFFF
+        val c = data[row - 2 * sensorWidth + x].toInt() and 0xFFFF
+        val d = data[row + 2 * sensorWidth + x].toInt() and 0xFFFF
+        val highest = maxOf(maxOf(a, b), maxOf(c, d))
+        val lowest = minOf(minOf(a, b), minOf(c, d))
+        return when {
+            here > highest + margin -> highest
+            here < lowest - margin -> lowest
+            else -> here
+        }
     }
 
     /**
@@ -327,6 +380,7 @@ class SubPixelAccumulator(
         val rgb = FloatArray(width * height * 3)
         var holes = 0L
         var interiorHoles = 0L
+        val interiorByChannel = LongArray(3)
         val cells = width.toLong() * height
         val m = SubPixelResult.INTERIOR_MARGIN
         val interiorCells = (width - 2L * m).coerceAtLeast(0) * (height - 2L * m).coerceAtLeast(0)
@@ -343,7 +397,10 @@ class SubPixelAccumulator(
                     } else {
                         rgb[cell * 3 + c] = Float.NaN
                         holes++
-                        if (inside && i >= m && i < width - m) interiorHoles++
+                        if (inside && i >= m && i < width - m) {
+                            interiorHoles++
+                            interiorByChannel[c]++
+                        }
                     }
                 }
             }
@@ -381,6 +438,9 @@ class SubPixelAccumulator(
             } else 0f,
             meanContribution = mean,
             framesMerged = merged,
+            interiorHolesPerChannel = FloatArray(3) { c ->
+                if (interiorCells > 0) (interiorByChannel[c].toDouble() / interiorCells).toFloat() else 0f
+            },
         )
     }
 

@@ -41,6 +41,8 @@ extern "C" {
 #include <jpeglib.h>
 }
 
+#include "Jpeg.h"
+
 #define LOG_TAG "MultiframeNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
@@ -75,7 +77,7 @@ struct Strip {
 };
 
 /** Encodes one strip as a standalone JPEG in memory. */
-void encodeStrip(Strip& strip, int width, size_t stride, int quality,
+void encodeStrip(Strip& strip, int width, size_t stride, int components, int quality,
                  unsigned int restartInterval) {
     jpeg_compress_struct cinfo{};
     ErrorMgr err{};
@@ -92,10 +94,11 @@ void encodeStrip(Strip& strip, int width, size_t stride, int quality,
 
     cinfo.image_width = static_cast<JDIMENSION>(width);
     cinfo.image_height = static_cast<JDIMENSION>(strip.height);
-    // Straight from the Bitmap's own pixels. libjpeg-turbo converts RGBA to
-    // YCbCr itself, with NEON, so nothing has to repack the image first.
-    cinfo.input_components = 4;
-    cinfo.in_color_space = JCS_EXT_RGBA;
+    // Straight from the pixels as they sit. libjpeg-turbo converts either
+    // layout to YCbCr itself, with NEON, so nothing has to repack the image
+    // first: a Bitmap's RGBA, or the three-byte RGB the linear develop writes.
+    cinfo.input_components = components;
+    cinfo.in_color_space = components == 3 ? JCS_RGB : JCS_EXT_RGBA;
 
     jpeg_set_defaults(&cinfo);
     jpeg_set_quality(&cinfo, quality, TRUE);
@@ -169,6 +172,11 @@ void freeStrips(std::vector<Strip>& strips) {
     }
 }
 
+}  // namespace
+
+namespace multiframe {
+namespace jpeg {
+
 /**
  * Encodes [pixels] and hands the finished file to [sink].
  *
@@ -176,10 +184,11 @@ void freeStrips(std::vector<Strip>& strips) {
  * each strip's entropy data is written straight out of the buffer libjpeg
  * produced it in.
  */
-bool encode(const uint8_t* pixels, int width, int height, size_t stride,
+bool encode(const uint8_t* pixels, int width, int height, size_t stride, int components,
             int quality, int threadsWanted,
             const std::function<bool(const unsigned char*, size_t)>& sink) {
     if (width <= 0 || height <= 0) return false;
+    if (components != 3 && components != 4) return false;
 
     const int mcuCols = (width + kMcu - 1) / kMcu;
     const int mcuRows = (height + kMcu - 1) / kMcu;
@@ -204,18 +213,18 @@ bool encode(const uint8_t* pixels, int width, int height, size_t stride,
     }
 
     if (strips == 1) {
-        encodeStrip(parts[0], width, stride, quality, 0);
+        encodeStrip(parts[0], width, stride, components, quality, 0);
     } else {
         std::vector<std::thread> pool;
         pool.reserve(static_cast<size_t>(strips - 1));
         for (int k = 1; k < strips; ++k) {
-            pool.emplace_back([&parts, k, width, stride, quality, restartInterval]() {
-                encodeStrip(parts[static_cast<size_t>(k)], width, stride, quality,
+            pool.emplace_back([&parts, k, width, stride, components, quality, restartInterval]() {
+                encodeStrip(parts[static_cast<size_t>(k)], width, stride, components, quality,
                             restartInterval);
             });
         }
         // The calling thread takes the first strip rather than waiting.
-        encodeStrip(parts[0], width, stride, quality, restartInterval);
+        encodeStrip(parts[0], width, stride, components, quality, restartInterval);
         for (auto& t : pool) t.join();
     }
 
@@ -266,6 +275,15 @@ bool encode(const uint8_t* pixels, int width, int height, size_t stride,
     return ok;
 }
 
+bool writeAll(int fd, const unsigned char* data, size_t n) { return ::writeAll(fd, data, n); }
+
+}  // namespace jpeg
+}  // namespace multiframe
+
+namespace {
+
+using multiframe::jpeg::encode;
+
 /** Locks a Bitmap's pixels and checks they are the eight-bit RGBA this expects. */
 struct LockedBitmap {
     JNIEnv* env;
@@ -301,7 +319,7 @@ Java_dev_multiframe_camera_pipeline_NativeJpeg_nEncodeToFd(
     const bool ok = encode(
         static_cast<const uint8_t*>(locked.pixels),
         static_cast<int>(locked.info.width), static_cast<int>(locked.info.height),
-        locked.info.stride, quality, threads,
+        locked.info.stride, 4, quality, threads,
         [fd](const unsigned char* p, size_t n) { return writeAll(fd, p, n); });
     return ok ? JNI_TRUE : JNI_FALSE;
 }
@@ -318,7 +336,7 @@ Java_dev_multiframe_camera_pipeline_NativeJpeg_nEncodeToArray(
     const bool ok = encode(
         static_cast<const uint8_t*>(locked.pixels),
         static_cast<int>(locked.info.width), static_cast<int>(locked.info.height),
-        locked.info.stride, quality, threads,
+        locked.info.stride, 4, quality, threads,
         [&buffer](const unsigned char* p, size_t n) {
             buffer.insert(buffer.end(), p, p + n);
             return true;

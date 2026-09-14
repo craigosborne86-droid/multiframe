@@ -31,6 +31,13 @@ object ZslCapture {
         /** Optical calibration for the streaming lens, where the device has any. */
         lensProfile: LensProfile? = null,
         outputFormat: OutputFormat = OutputFormat.JPEG,
+        /**
+         * Whether to attempt the 2x canvas. Attempted is the word: the burst
+         * has to have earned it, see [SubPixelCoverage], and the ordinary
+         * merge runs regardless -- for the DNG, and as what is written when
+         * the canvas declines.
+         */
+        superRes: Boolean = false,
         onProgress: (String) -> Unit = {},
     ): RawBurstResult {
         val profile = SensorProfile.from(stream.characteristics)
@@ -58,6 +65,10 @@ object ZslCapture {
         )
 
         var merger: NativeMerge? = null
+        // The 2x canvas, when one is built. Closed in the finally below as
+        // well as on its own path, because close is idempotent and a canvas
+        // left open is 300 MB.
+        var canvas: NativeSubPixel? = null
         var mergeMillis = 0L
         var captured = 0
 
@@ -115,6 +126,10 @@ object ZslCapture {
             var alignNanos = 0L
             var accumulateNanos = 0L
 
+            // Kept for the 2x path, which decides from them whether to run
+            // and then places every frame by them. Aligned once, used twice.
+            val aligned = ArrayList<AlignedFrame>(burst.count)
+
             for (i in 0 until burst.count) {
                 if (i == refIndex) continue
                 onProgress("merging ${captured + 1}/${burst.count}")
@@ -143,9 +158,23 @@ object ZslCapture {
                 m.addFrame(buffer, stride, field, gainScale)
                 accumulateNanos += System.nanoTime() - mark
 
+                aligned.add(AlignedFrame(buffer, field, gainScale))
                 captured++
             }
             mergeMillis = System.currentTimeMillis() - t0
+
+            // The 2x canvas, if asked for and if the burst earned it. Before
+            // the burst is closed, because the accumulator reads the frames in
+            // place and sweeps them once per strip.
+            var outcome: SuperResOutcome? = null
+            if (superRes) {
+                val decision = accumulateCanvas(
+                    stream, profile, refBuffer, stride, aligned, onProgress,
+                )
+                canvas = decision.first
+                outcome = decision.second
+                Log.i(TAG, "2x: ${outcome.reason ?: "canvas accepted"}")
+            }
 
             Log.i(
                 TAG,
@@ -166,6 +195,51 @@ object ZslCapture {
             mergeMillis += System.currentTimeMillis() - t1
 
             val statsAfter = stream.stats()
+
+            val built = canvas
+            if (built != null && outcome != null) {
+                val tOut = System.currentTimeMillis()
+                val written = try {
+                    SuperResCapture.finishOutputs(
+                        context = context,
+                        canvas = built,
+                        mergedBuffer = mergedBuffer,
+                        mergedWidth = m.width,
+                        mergedHeight = m.height,
+                        profile = profile,
+                        characteristics = stream.characteristics,
+                        captureResult = burst.results[refIndex] ?: burst.referenceResult,
+                        rotationDegrees = rotationDegrees,
+                        captured = captured,
+                        lens = stream.lens,
+                    )
+                } finally {
+                    built.close()
+                }
+                if (written != null) {
+                    val developMillis = System.currentTimeMillis() - tOut
+                    Log.i(
+                        TAG,
+                        "2x outputs: %dx%d JPEG %dms, DNG %dms".format(
+                            written.width, written.height, written.jpegMillis, written.dngMillis,
+                        ),
+                    )
+                    return RawBurstResult(
+                        frameCount, captured, stats, 0, mergeMillis,
+                        developMillis, written.dngMillis,
+                        written.dngName, written.jpegName,
+                        "2x accumulation -> JPEG${if (written.dngName != null) " + DNG" else ""}, $captured frames",
+                        handoverMicros, spanMillis, statsAfter.toString(),
+                        dcgActive = stream.dcg,
+                        superRes = outcome.copy(produced = true, developMillis = developMillis),
+                    )
+                }
+                // The develop declined after the canvas was built. The merged
+                // buffer is still here, so the ordinary outputs are written
+                // and the result says why they are ordinary.
+                outcome = outcome.copy(produced = false, reason = "2x develop declined")
+            }
+
             return RawBurstCapture.finishOutputs(
                 context = context,
                 merger = m,
@@ -189,7 +263,7 @@ object ZslCapture {
                 burstSpanMillis = spanMillis,
                 streamStats = statsAfter.toString(),
                 dcgActive = stream.dcg,
-            )
+            ).copy(superRes = outcome)
         } catch (e: Exception) {
             Log.e(TAG, "ZSL merge failed", e)
             burst.close()
@@ -199,7 +273,119 @@ object ZslCapture {
                 handoverMicros, 0, statsBefore.toString(),
             )
         } finally {
+            canvas?.close()
             merger?.close()
+        }
+    }
+
+    /** One alternate frame, aligned onto the reference, ready to be placed. */
+    private class AlignedFrame(
+        val buffer: java.nio.ByteBuffer,
+        val field: AlignmentField,
+        val gainScale: Float,
+    )
+
+    /**
+     * Builds the 2x canvas from the aligned burst, or explains why not.
+     *
+     * Three gates, in order of cost. The alignment predicts the coverage
+     * before anything is allocated; the allocation itself can decline on a
+     * device short of memory; and the finished canvas's measured holes have
+     * to honour the same bounds the prediction was made against. A canvas
+     * that fails the last gate is closed here and the ordinary merge is what
+     * the user gets, with the reason.
+     */
+    private fun accumulateCanvas(
+        stream: ZslRawStream,
+        profile: SensorProfile,
+        refBuffer: java.nio.ByteBuffer,
+        stride: Int,
+        aligned: List<AlignedFrame>,
+        onProgress: (String) -> Unit,
+    ): Pair<NativeSubPixel?, SuperResOutcome> {
+        val prediction = SubPixelCoverage.predict(aligned.map { it.field }, profile.cfaPattern)
+        Log.i(
+            TAG,
+            "2x coverage predicted from %d frames: holes R %.1f%% G %.1f%% B %.1f%%".format(
+                prediction.frames, prediction.perChannel[0] * 100,
+                prediction.perChannel[1] * 100, prediction.perChannel[2] * 100,
+            ),
+        )
+        if (!prediction.worthAttempting) {
+            return null to SuperResOutcome(
+                produced = false,
+                predictedHoles = prediction.perChannel,
+                measuredHoles = null,
+                reason = if (prediction.frames < 2) "2x needs more than one frame"
+                else "burst lacks sub-pixel diversity (predicted green holes %.1f%%, chroma %.1f%%)".format(
+                    prediction.perChannel[1] * 100,
+                    maxOf(prediction.perChannel[0], prediction.perChannel[2]) * 100,
+                ),
+            )
+        }
+
+        val canvas = NativeSubPixel.create(stream.config.width, stream.config.height, profile)
+            ?: return null to SuperResOutcome(
+                produced = false,
+                predictedHoles = prediction.perChannel,
+                measuredHoles = null,
+                reason = "2x canvas could not be allocated",
+            )
+
+        val t0 = System.currentTimeMillis()
+        try {
+            canvas.setReference(refBuffer, stride)
+            for ((i, f) in aligned.withIndex()) {
+                onProgress("placing ${i + 2}/${aligned.size + 1} at 2x")
+                canvas.addFrame(f.buffer, stride, f.field, f.gainScale)
+            }
+            onProgress("resolving 2x canvas")
+            val result = canvas.finish()
+            val accumulateMillis = System.currentTimeMillis() - t0
+            if (result == null) {
+                canvas.close()
+                return null to SuperResOutcome(
+                    produced = false, predictedHoles = prediction.perChannel,
+                    measuredHoles = null, reason = "2x accumulation failed",
+                    accumulateMillis = accumulateMillis,
+                )
+            }
+            Log.i(
+                TAG,
+                ("2x accumulated %d frames in %dms: holes R %.1f%% G %.1f%% B %.1f%% " +
+                    "(interior %.2f%%, all %.2f%%), mean contribution %.2f").format(
+                    result.framesMerged, accumulateMillis,
+                    result.interiorHolesPerChannel[0] * 100, result.interiorHolesPerChannel[1] * 100,
+                    result.interiorHolesPerChannel[2] * 100,
+                    result.interiorHoleFraction * 100, result.holeFraction * 100,
+                    result.meanContribution,
+                ),
+            )
+            if (!result.acceptable) {
+                canvas.close()
+                return null to SuperResOutcome(
+                    produced = false, predictedHoles = prediction.perChannel,
+                    measuredHoles = result.interiorHolesPerChannel,
+                    reason = "measured holes exceeded the bound (green %.1f%%, chroma %.1f%%)".format(
+                        result.interiorHolesPerChannel[1] * 100,
+                        maxOf(result.interiorHolesPerChannel[0], result.interiorHolesPerChannel[2]) * 100,
+                    ),
+                    accumulateMillis = accumulateMillis,
+                )
+            }
+            return canvas to SuperResOutcome(
+                produced = false, predictedHoles = prediction.perChannel,
+                measuredHoles = result.interiorHolesPerChannel, reason = null,
+                accumulateMillis = accumulateMillis,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "2x accumulation failed", e)
+            canvas.close()
+            return null to SuperResOutcome(
+                produced = false, predictedHoles = prediction.perChannel,
+                measuredHoles = null, reason = "2x accumulation failed: ${e.message}",
+                accumulateMillis = System.currentTimeMillis() - t0,
+            )
         }
     }
 }

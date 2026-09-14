@@ -262,8 +262,23 @@ private fun GalleryCell(
             )
         }
 
-        // The badge says a DNG exists, which is the one thing about a cell that
-        // is not visible in the picture it shows.
+        // The badges say what a thumbnail cannot: that a DNG exists beside
+        // the JPEG, and that the JPEG is a 2x accumulation -- a picture whose
+        // resolution is a claim about the burst rather than the sensor, and
+        // which a cell this size cannot show. Weight, not hue: same fill as
+        // every other readout on a photograph.
+        if (record.isSuperRes) {
+            Text(
+                text = "SUPER-RES 2X",
+                style = Type.Label,
+                color = Ink.Bone,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(5.dp)
+                    .background(Ink.Readout, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            )
+        }
         if (record.hasRaw) {
             Text(
                 text = "DNG",
@@ -431,9 +446,15 @@ private fun ReviewChrome(
                     .background(Ink.Readout, RoundedCornerShape(6.dp))
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
-            if (record.hasRaw) {
+            if (record.hasRaw || record.isSuperRes) {
                 Text(
-                    text = "JPEG + DNG",
+                    text = buildString {
+                        if (record.isSuperRes) append("SUPER-RES 2X")
+                        if (record.hasRaw) {
+                            if (isNotEmpty()) append(" · ")
+                            append("JPEG + DNG")
+                        }
+                    },
                     style = Type.Label,
                     modifier = Modifier.padding(top = 8.dp),
                 )

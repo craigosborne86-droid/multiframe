@@ -113,9 +113,22 @@ object RecentCapture {
         displayName.startsWith("MF_") &&
             (displayName.endsWith(".jpg", true) || displayName.endsWith(".dng", true))
 
+    /**
+     * Whether a name is a 2x sub-pixel accumulation.
+     *
+     * Read off the name, like everything else here, because the name is the
+     * one record of the capture that travels with the file. The tag is what
+     * `SuperResCapture` writes.
+     */
+    fun isSuperRes(displayName: String): Boolean = displayName.contains(SUPER_RES_TAG)
+
+    /** The name segment that marks a 2x capture: `MF_<stamp>_sr2x_<n>f.jpg`. */
+    const val SUPER_RES_TAG = "_sr2x_"
+
     /** What a name says about how the shot was taken. */
     fun describe(displayName: String): String = when {
         displayName.contains("_mosaic_") -> "mosaic"
+        isSuperRes(displayName) -> "super-res 2x"
         displayName.contains("_zsl_") -> "zero shutter lag"
         displayName.contains("_merged_") -> "merged burst"
         displayName.contains("_raw") -> "single frame"

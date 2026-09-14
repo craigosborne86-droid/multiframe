@@ -29,16 +29,37 @@ class SubPixelAlignmentTest {
 
     /**
      * Lower cost to the right means the true minimum is to the right. The
-     * vertex of the parabola through (-1, 100), (0, 50), (+1, 60) is at
-     * (100 - 60) / (2 * (100 - 100 + 60)) = 40 / 120 = 1/3.
+     * equiangular fit through (-1, 100), (0, 50), (+1, 60) meets at
+     * (100 - 60) / (2 * (max(100, 60) - 50)) = 40 / 100 = 0.4.
      */
     @Test
     fun anAsymmetricMinimumLeansTowardTheLowerNeighbour() {
         val right = Aligner.subPixelOffset(100, 50, 60)
-        assertThat(right).isWithin(1e-6f).of(1f / 3f)
+        assertThat(right).isWithin(1e-6f).of(0.4f)
 
         val left = Aligner.subPixelOffset(60, 50, 100)
-        assertThat(left).isWithin(1e-6f).of(-1f / 3f)
+        assertThat(left).isWithin(1e-6f).of(-0.4f)
+    }
+
+    /**
+     * The reason for the equiangular fit. A sum of absolute differences grows
+     * as |t| away from its minimum, so three samples of one a pixel apart lie
+     * on a V; the fit must return the V's vertex exactly, where a parabola
+     * through the same three points would return t / (2 * (1 - t)) -- 0.2 for
+     * a true 0.3, 0.25 for 0.5. Measured on the phone as well, see
+     * SubPixelBiasDeviceTest.
+     */
+    @Test
+    fun theVertexOfAnLOneCostIsRecoveredExactly() {
+        // A V with slope a and vertex at t: costs a(1+t), a t, a(1-t).
+        for (t in floatArrayOf(0.1f, 0.3f, 0.5f)) {
+            val a = 1000.0
+            val before = Math.round(a * (1 + t))
+            val at = Math.round(a * t)
+            val after = Math.round(a * (1 - t))
+            assertThat(Aligner.subPixelOffset(before, at, after)).isWithin(1e-3f).of(t)
+            assertThat(Aligner.subPixelOffset(after, at, before)).isWithin(1e-3f).of(-t)
+        }
     }
 
     /** A flat curve does not describe a minimum; the fit says nothing. */
@@ -56,18 +77,17 @@ class SubPixelAlignmentTest {
 
     /**
      * A vertex past half a pixel means the integer search was off by at least
-     * one, and a parabola through these three points cannot fix that. Declining
+     * one, and a fit through these three points cannot fix that. Declining
      * is more honest than clamping to +-0.5, which would assert a precision the
      * fit does not have.
      */
     @Test
     fun aVertexBeyondHalfAPixelIsDeclined() {
-        // (100 - 51) / (2 * (100 - 100 + 51)) = 49 / 102 = 0.48: just inside.
-        assertThat(Aligner.subPixelOffset(100, 50, 51)).isWithin(1e-6f).of(49f / 102f)
-        // (100 - 50) / (2 * (100 - 100 + 50)) = 50 / 100 = 0.5: on the edge, kept.
+        // (100 - 51) / (2 * (100 - 50)) = 49 / 100 = 0.49: just inside.
+        assertThat(Aligner.subPixelOffset(100, 50, 51)).isWithin(1e-6f).of(0.49f)
+        // (100 - 50) / (2 * (100 - 50)) = 50 / 100 = 0.5: on the edge, kept.
         assertThat(Aligner.subPixelOffset(100, 50, 50)).isWithin(1e-6f).of(0.5f)
-        // (1000 - 51) / (2 * (1000 - 100 + 51)) = 949 / 1902 = 0.499: inside.
-        // (100 - 49) / (2 * (100 - 100 + 49)) = 51 / 98 = 0.52: outside, declined.
+        // (100 - 49) / (2 * (100 - 50)) = 51 / 100 = 0.51: outside, declined.
         assertThat(Aligner.subPixelOffset(100, 50, 49)).isEqualTo(0f)
     }
 
@@ -88,8 +108,8 @@ class SubPixelAlignmentTest {
     fun theFitHoldsAtTheMagnitudeRealCostsReach() {
         val base = 4_000_000L
         val v = Aligner.subPixelOffset(base + 900, base, base + 300)
-        // (900 - 300) / (2 * (900 + 300)) = 600 / 2400 = 0.25
-        assertThat(v).isWithin(1e-6f).of(0.25f)
+        // (900 - 300) / (2 * 900) = 600 / 1800 = 1/3
+        assertThat(v).isWithin(1e-6f).of(1f / 3f)
     }
 
     // --- on an image --------------------------------------------------------

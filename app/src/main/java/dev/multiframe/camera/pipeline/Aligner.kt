@@ -216,11 +216,34 @@ object Aligner {
     /**
      * The fractional offset of a minimum, from three costs a pixel apart.
      *
-     * A parabola through (-1, [before]), (0, [at]) and (+1, [after]) has its
-     * vertex at `(before - after) / (2 * (before - 2*at + after))`. The cost
-     * surface is not a parabola, but close to a minimum it is well described by
-     * one, and this is the standard refinement -- it recovers most of the
-     * sub-pixel truth for one extra evaluation per axis.
+     * ### The equiangular fit, and why not the parabola
+     *
+     * The first version fitted a parabola through (-1, [before]), (0, [at])
+     * and (+1, [after]) and took its vertex, `(before - after) / (2 * (before
+     * - 2*at + after))` -- the textbook refinement, and the right one for a
+     * cost that is quadratic near its minimum. A sum of absolute differences
+     * is not. Shift a textured image by t and the SAD against the unshifted
+     * one grows as |t|, not t²: it is a V, and a parabola through three
+     * points of a V puts its vertex at `t / (2 * (1 - t))` rather than at t.
+     * That is a bias toward zero of nearly half, and it was measured before
+     * it was reasoned: `SubPixelBiasDeviceTest` sweeps a known shift through
+     * the real proxy and search at the sensor's real width, and the parabola
+     * returned 0.26 for a true 0.50 and 0.43 for 0.70.
+     *
+     * The equiangular fit models the V. Its two arms meet where
+     * `(before - after) / (2 * (max(before, after) - at))`, which is exactly
+     * t for a V through the three points and within a few hundredths for
+     * what a real SAD does near its minimum. The same sweep with it: 0.41 for
+     * 0.50, 0.60 for 0.70, 0.90 for 1.00 -- a slope of one with a tenth of a
+     * pixel of offset that comes from the other axis' unrefined fraction
+     * leaking into this one through diagonal texture, which a separable
+     * three-point refinement cannot see. See the test's log for the curve.
+     *
+     * This matters more for the 2x canvas than for the merge. The merge
+     * blends samples over a tile and a quarter-pixel error softens nothing
+     * visible; the canvas *places* each sample by this fraction, and a bias of
+     * a quarter of a sensor pixel is half a canvas cell -- the kernel's whole
+     * sigma -- on every sample of every frame.
      *
      * Three cases return zero rather than a number:
      *
@@ -228,9 +251,8 @@ object Aligner {
      *    a minimum at all -- a tile with no texture, or one where the search
      *    landed on a plateau;
      *  * a vertex outside ±0.5, which means the integer search was wrong by at
-     *    least a pixel and no parabola through these three points can fix
-     *    that -- clamping to the edge would assert a precision the fit does not
-     *    have;
+     *    least a pixel and no fit through these three points can fix that --
+     *    clamping to the edge would assert a precision the fit does not have;
      *  * the sentinel [Long.MAX_VALUE], which is what an early-exit cost reads
      *    as and is not a measurement.
      *
@@ -239,9 +261,13 @@ object Aligner {
      */
     fun subPixelOffset(before: Long, at: Long, after: Long): Float {
         if (before == Long.MAX_VALUE || at == Long.MAX_VALUE || after == Long.MAX_VALUE) return 0f
-        val denom = before.toDouble() - 2.0 * at.toDouble() + after.toDouble()
-        if (denom <= 0.0) return 0f
-        val vertex = (before.toDouble() - after.toDouble()) / (2.0 * denom)
+        val b = before.toDouble()
+        val a = at.toDouble()
+        val c = after.toDouble()
+        if (b - 2.0 * a + c <= 0.0) return 0f
+        val steep = maxOf(b, c) - a
+        if (steep <= 0.0) return 0f
+        val vertex = (b - c) / (2.0 * steep)
         if (vertex < -0.5 || vertex > 0.5) return 0f
         return vertex.toFloat()
     }

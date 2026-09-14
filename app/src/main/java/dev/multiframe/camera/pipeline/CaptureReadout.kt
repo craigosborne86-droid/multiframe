@@ -44,12 +44,30 @@ object CaptureReadout {
         framesMerged: Int,
         meanContribution: Float,
         dcgActive: Boolean = false,
+        /**
+         * What the 2x path did, when it was asked. A 2x output is a different
+         * claim about the photograph and is said outright; a decline is said
+         * too, briefly, because the user asked for one thing and got another.
+         */
+        superRes: SuperResOutcome? = null,
     ): String {
         if (framesMerged <= 1) return "1 frame"
         val kept = (meanContribution.coerceIn(0f, 1f) * 100).roundToInt()
         val dcg = if (dcgActive) " · DCG" else ""
-        return "$framesMerged frames · $kept% kept$dcg"
+        val sr = when {
+            superRes == null -> ""
+            superRes.produced -> " · 2X"
+            else -> " · 2X declined"
+        }
+        return "$framesMerged frames · $kept% kept$dcg$sr"
     }
+
+    /**
+     * Why a 2x request came back ordinary, for the line under the readout.
+     * Null when it did not decline, so the caller shows nothing.
+     */
+    fun superResDecline(outcome: SuperResOutcome?): String? =
+        outcome?.takeIf { !it.produced }?.reason
 
     /**
      * The same, with the effective frame count spelled out.

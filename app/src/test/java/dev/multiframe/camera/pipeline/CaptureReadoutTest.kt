@@ -78,4 +78,40 @@ class CaptureReadoutTest {
         assertThat(CaptureReadout.detailed(12, 0.5f))
             .isEqualTo("12 frames · 50% kept · 6.5 effective")
     }
+
+    // --- the 2x path ------------------------------------------------------
+
+    private fun outcome(produced: Boolean, reason: String? = null) = SuperResOutcome(
+        produced = produced,
+        predictedHoles = floatArrayOf(0.1f, 0.01f, 0.1f),
+        measuredHoles = null,
+        reason = reason,
+    )
+
+    @Test
+    fun aTwoXOutputSaysSo() {
+        // A different claim about the photograph from a merge, and it is said.
+        assertThat(CaptureReadout.of(8, 0.9f, superRes = outcome(produced = true)))
+            .isEqualTo("8 frames · 90% kept · 2X")
+    }
+
+    @Test
+    fun aDeclinedTwoXSaysThatToo() {
+        // The user asked for one thing and got another; the readout does not
+        // pretend otherwise, and the reason is available for the line below.
+        val declined = outcome(produced = false, reason = "burst lacks sub-pixel diversity")
+        assertThat(CaptureReadout.of(8, 0.9f, superRes = declined))
+            .isEqualTo("8 frames · 90% kept · 2X declined")
+        assertThat(CaptureReadout.superResDecline(declined))
+            .isEqualTo("burst lacks sub-pixel diversity")
+        assertThat(CaptureReadout.superResDecline(outcome(produced = true))).isNull()
+        assertThat(CaptureReadout.superResDecline(null)).isNull()
+    }
+
+    @Test
+    fun notAskingForTwoXSaysNothingAboutIt() {
+        assertThat(CaptureReadout.of(8, 0.9f)).doesNotContain("2X")
+        assertThat(CaptureReadout.of(8, 0.9f, dcgActive = true, superRes = outcome(true)))
+            .isEqualTo("8 frames · 90% kept · DCG · 2X")
+    }
 }
