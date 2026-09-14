@@ -128,9 +128,14 @@ class NativeMerge private constructor(
             bitmap.recycle()
             return null
         }
-        // Further passes, because both need each pixel's neighbours and the
-        // develop loop writes one pixel at a time. Defringe first: sharpening a
-        // fringe would make it worse.
+        // Further passes, because each needs its neighbours and the develop
+        // loop writes one pixel at a time. The colour speckle first, before
+        // anything reads chroma; then defringe, since sharpening a fringe
+        // would make it worse; then the sharpen.
+        val tChroma = System.currentTimeMillis()
+        if (params.chroma.enabled) {
+            nChromaSmooth(bitmap, params.chroma.radius, params.chroma.lumaSigma, params.chroma.amount)
+        }
         val tDefringe = System.currentTimeMillis()
         if (params.defringe.enabled) {
             val altered = nDefringe(
@@ -151,9 +156,9 @@ class NativeMerge private constructor(
         Log.i(TAG, "native develop gain=%.2f".format(gain))
         Log.i(
             TAG,
-            "develop stages: autoexposure %dms, bitmap %dms, render %dms, defringe %dms, sharpen %dms".format(
-                tBitmap - tExposure, tNative - tBitmap, tDefringe - tNative,
-                tSharpen - tDefringe, tEnd - tSharpen,
+            "develop stages: autoexposure %dms, bitmap %dms, render %dms, chroma %dms, defringe %dms, sharpen %dms".format(
+                tBitmap - tExposure, tNative - tBitmap, tChroma - tNative,
+                tDefringe - tChroma, tSharpen - tDefringe, tEnd - tSharpen,
             ),
         )
         return bitmap
@@ -209,6 +214,11 @@ class NativeMerge private constructor(
         desatStrength: Float, desatStart: Float, blackPoint: Float,
         variantA: Int, variantB: Int, rounds: Int,
     ): LongArray?
+    private external fun nChromaSmooth(bitmap: Bitmap, radius: Int, sigma: Float, amount: Float): Boolean
+
+    /** The native chroma smoothing alone, on a bitmap, for the parity test. */
+    fun chromaSmooth(bitmap: Bitmap, params: ChromaSmooth.Params): Boolean =
+        nChromaSmooth(bitmap, params.radius, params.lumaSigma, params.amount)
     private external fun nSharpen(
         bitmap: Bitmap, amount: Float, threshold: Float, maxShift: Float,
     ): Boolean

@@ -454,10 +454,25 @@ Merged CFA (uint16, Bayer-patterned)
 7. Tone curve (global, hue-preserving)
    Three stages applied in order:
    a. Highlight roll-off: compress the *max channel* and scale all three by the
-      same factor. This preserves hue through the compression — no orange
-      highlight shift.
-   b. Highlight desaturation: blend toward neutral in the top of the range.
-      Controlled by desaturationStart and highlightDesaturation parameters.
+      same factor — `R' = R · T(m)/m` with `m = max(R,G,B)`. This preserves hue
+      *and* saturation through the compression: no orange highlight shift, and
+      a saturated red at three times nominal white comes out a saturated red at
+      the top of the range with its gradation intact. (Keying the compression
+      on luminance instead, `R' = R · T(Y)/Y`, leaves such a red out of gamut;
+      the clip that follows flattens its gradation to a single value and, on
+      other hues, rotates them. The max-channel key is the one that needs no
+      clip.)
+   b. Highlight desaturation, keyed on **luminance**: `Y = 0.2126R + 0.7152G +
+      0.0722B`, measured on the scene-linear values before compression; a
+      pixel whose Y exceeds `desaturationStart` blends toward neutral by
+      `((1 − start/Y)² · highlightDesaturation)`. It was keyed on the max
+      channel, and that rendered the fifth field test's red flowers pale pink:
+      R at 3× nominal read as "three times overexposed" and was pulled most of
+      the way to white, though the pixel's luminance was under white. Keyed on
+      Y, only a colour that is bright *as a colour* — a specular, the sun, a
+      near-white — gives up colour, and a saturated red keeps its hue and
+      saturation. `ToneCurveTest` renders the flower and holds it red; the
+      native `Tone.h` mirrors the key.
    c. Contrast: S-curve applied after gamma encode. Slope at mid-grey =
       1 + 0.875 * contrast.
   |
@@ -469,17 +484,50 @@ Merged CFA (uint16, Bayer-patterned)
    Via 4096-entry LUT for speed.
   |
   v
-9. Capture sharpening
-   Unsharp mask on luminance channel only. Restores acutance lost to CFA
-   sampling and demosaic. This is a restoration, not an effect.
-   Parameters: radius (default 1.2px), amount (default 0.4), threshold
-   (default 4 code values).
+9. Chrominance smoothing (`ChromaSmooth.kt`, `Chroma.h`)
+   A joint bilateral on Cb = B − Y and Cr = R − Y, guided by luminance, at
+   half resolution. The picture's Y, Cb, Cr are box-averaged 2×2; on that,
+   two separable passes (rows, then columns) of 5 taps each replace each
+   colour difference by its weighted mean, the weight of a tap
+   `max(0, 1 − (ΔY/2.5σ)²)²` with σ = 12 codes (widening to 24 by ISO 3200) —
+   a clamped quadratic that tracks a Gaussian of that width and is exactly
+   zero past 2.5σ, so nothing crosses a brightness edge; then each
+   full-resolution pixel reads the smoothed chroma back from the four
+   half-pixels around it, weighted by bilinear distance *and* luminance
+   likeness (a pixel with no like-brightness tap keeps its own chroma). Y is
+   written back exactly, at full resolution, so no brightness moves and no
+   luminance detail is lost; only the coloured salt-and-pepper of a high-ISO
+   frame — which the eye reads as damage where it reads luminance grain as
+   texture — is averaged away. Half resolution because the eye's colour
+   acuity is a fraction of its brightness acuity (every JPEG here is 4:2:0
+   already) and because the full-resolution version cost 380 ms of a
+   12.5-megapixel develop; this one costs about 200, NEON over four pixels.
+   Here, in the gamma domain where the speckle is perceptually uniform, and
+   before anything reads chroma: the defringe judges chroma outliers, and
+   the sharpen must not turn speckle into static. Every raw converter does
+   this by default; the pipeline did not until the fifth field test's ISO
+   3200 telephoto tiles came back as confetti. Both native develops mirror
+   the Kotlin reference within two codes (`ChromaSmoothParityTest`, worst 1).
   |
   v
 10. Defringe (lateral CA suppression)
     Per-pixel: if a pixel is at an edge AND its chroma is an outlier among
     same-luminance neighbors, desaturate toward the local mean.
-    Does not correct longitudinal CA (Phase 2 adds radial warp for that).
+    Does not correct longitudinal CA (the radial warp of §2 does the lateral
+    part it can).
+    Before the sharpen, not after it as an earlier draft of this list had it:
+    sharpening a fringe makes it worse, so the fringe is taken out first.
+  |
+  v
+11. Capture sharpening
+    Unsharp mask on luminance channel only: a 3×3 box, the detail above a
+    threshold added back to all three channels equally. Restores acutance
+    lost to CFA sampling and demosaic. This is a restoration, not an effect —
+    and it is *noise-adaptive*: the amount fades from full at ISO 800 to
+    nothing at ISO 3200 (`DevelopParams.adaptedTo`), because on a frame at
+    that gain what it would restore is grain, and sharpened grain is static.
+    Parameters: amount (default 0.55), threshold (default 3.5 code values),
+    maxShift (28).
   |
   v
 Output: 8-bit sRGB ARGB int array -> JPEG via libjpeg-turbo
@@ -1005,7 +1053,47 @@ itself; there is nothing to press.
 **The radius is the radius.** In and out at one lock radius, five percent
 of a tile, for every node in every state; see the retired magnet above. A
 tremor that carries the reticle over the edge restarts the hold, and the
-hold is 170 ms, so it is not a costly restart.
+hold is 150 ms, so it is not a costly restart.
+
+**One target at a time.** The nodes are taken in a serpentine over the rows
+(`MosaicGuide.order`: top-left, top-right, bottom-right, bottom-left on a
+2×2), and only the `activeNode` -- the first in that order not yet taken --
+can be approached or locked. The guidance draws it as the one target, with
+its ring and, when it is off the reticle, an arrow from the reticle's edge
+toward it; the nodes taken are dim checkmarks; the nodes to come are faint
+dots. The capture sequence is: the ring fills over the hold (150 ms, or the
+burst's span plus a poll where that is longer -- five frames is 200 ms);
+the burst is snapshotted, the node is done, `CONFIRM` fires; a pulse expands
+from the reticle for `LATCH_MILLIS` (150 ms, driven by the view's `latch`
+field the runner advances every poll); the arrow turns to the next target.
+Four identical dots asked the user which to go to, and a choice is a
+hesitation.
+
+**The preview's zoom.** The dots are computed on the sensor's frame, which a
+digital zoom never crops; the preview is what it crops. A dot drawn without
+the zoom moved slower than the scene behind it by the zoom factor -- a
+target that slides. `MosaicGuidance` takes the stream's `zoom` and maps
+sensor fractions through `0.5 + (f − 0.5)·z`; and Super Res resets the zoom
+to one when selected and refuses the pinch while it is, so in practice the
+factor is one. The preview is constrained to the raw stream's own aspect
+(`ZslRawStream.previewSizeFor`, within 2%), so no letterbox scale enters.
+
+**Frames per tile.** `MosaicCapture.tileFrames` holds the burst setting to
+4–6 frames per tile: fewer is grain from a small telephoto sensor at high
+ISO, more is a hold longer than a hand keeps. The merge is logged per tile
+-- `merged N of M frames, mean contribution` -- and on the live device test
+merges 4 of 4 at 0.95–0.97.
+
+**The mesh.** A tile's fine band is sampled bilinearly onto the canvas, and
+a projected sample almost never lands on a tile pixel centre; where it does
+it carries that pixel's whole noise, a quarter-pixel away it averages two or
+four and carries a quarter of it. On a noisy tile that is a periodic
+modulation of the grain's variance at the beat between the tile's grid and
+the canvas's -- the fifth field test's "4K TV screen" over every dark tile.
+`accumulateFull` now averages four bilinear samples a quarter-pixel either
+side of the point (a half-pixel box prefilter), which makes the variance
+nearly uniform; the detail is a quarter-pixel wider, which the sharpen
+already paid.
 
 **Why the old rule fired.** "Inside the radius for 250 ms, drift under a
 radius" -- with the tracker at the time polling every 300 ms, the second

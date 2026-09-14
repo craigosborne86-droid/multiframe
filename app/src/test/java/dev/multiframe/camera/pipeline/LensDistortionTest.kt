@@ -389,4 +389,39 @@ class LensDistortionTest {
         )
         assertThat(dst.all { (it ushr 24) and 0xFF == 0xFF }).isTrue()
     }
+
+    // --- the corner stretch --------------------------------------------------
+
+    /**
+     * Undistorting barrel magnifies the corners. A mild lens costs a few
+     * percent, which the picture carries; a strong one is scaled back until
+     * no corner is stretched past the limit, and the identity is one.
+     */
+    @Test
+    fun `the corner stretch is measured, and a strong correction is scaled back to the limit`() {
+        val none = barrel(k1 = 0f)
+        assertThat(LensDistortion.peakStretch(none, width, height)).isWithin(1e-3f).of(1f)
+
+        // A mild barrel: the corners are stretched a little, under the limit,
+        // and the model is left alone.
+        val mild = barrel(k1 = -0.02f)
+        val mildStretch = LensDistortion.peakStretch(mild, width, height)
+        assertThat(mildStretch).isGreaterThan(1.0f)
+        assertThat(mildStretch).isLessThan(LensDistortion.MAX_CORNER_STRETCH)
+        assertThat(LensDistortion.limitStretch(mild, width, height)).isSameInstanceAs(mild)
+
+        // A strong one -- the field test's mush -- is over the limit and comes
+        // back at it, with the same sign and a smaller coefficient: partly
+        // straight, still straighter than the glass.
+        val strong = barrel(k1 = -0.12f)
+        assertThat(LensDistortion.peakStretch(strong, width, height)).isGreaterThan(LensDistortion.MAX_CORNER_STRETCH)
+        val limited = LensDistortion.limitStretch(strong, width, height)
+        val limitedStretch = LensDistortion.peakStretch(limited, width, height)
+        assertThat(limitedStretch).isAtMost(LensDistortion.MAX_CORNER_STRETCH + 0.01f)
+        assertThat(limitedStretch).isGreaterThan(LensDistortion.MAX_CORNER_STRETCH - 0.03f)
+        assertThat(limited.k1).isLessThan(0f)
+        assertThat(kotlin.math.abs(limited.k1)).isLessThan(kotlin.math.abs(strong.k1))
+        // Pincushion compresses the corners and is never a stretch.
+        assertThat(LensDistortion.peakStretch(barrel(k1 = 0.05f), width, height)).isWithin(1e-3f).of(1f)
+    }
 }

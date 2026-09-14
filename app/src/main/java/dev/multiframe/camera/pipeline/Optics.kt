@@ -90,7 +90,22 @@ object Optics {
      */
     fun paramsFor(profile: LensProfile?, width: Int, height: Int): Params? {
         if (profile == null) return null
-        val model = profile.let { LensDistortion.modelFor(it, width, height) }
+        // Held to a corner stretch a picture can carry; see
+        // LensDistortion.MAX_CORNER_STRETCH for what happens past it.
+        val model = profile.let { LensDistortion.modelFor(it, width, height) }?.let { full ->
+            val limited = LensDistortion.limitStretch(full, width, height)
+            if (limited !== full) {
+                Log.w(
+                    TAG,
+                    "%dmm: correction scaled back, corner stretch %.2fx to %.2fx".format(
+                        profile.equivalent35mm,
+                        LensDistortion.peakStretch(full, width, height),
+                        LensDistortion.peakStretch(limited, width, height),
+                    ),
+                )
+            }
+            limited
+        }
 
         val worthCorrecting = model != null &&
             !model.isIdentity &&
@@ -217,10 +232,13 @@ object Optics {
 
         val scale = ChromaticAberration.estimate(pixels, width, height)
         // Kept for the rest of the session, so the search runs once per lens
-        // rather than once per photograph. See `measured`.
-        params.lensId?.let { measured[it] = scale }
+        // rather than once per photograph -- but only an estimate the search
+        // believed. A dark frame's estimate is noise, and cached noise would
+        // fringe every frame after it; the next frame gets to try. See
+        // `measured` and `ChromaticAberration.MIN_IMPROVEMENT`.
+        if (scale.confident) params.lensId?.let { measured[it] = scale }
         Log.i(TAG, "${params.lensLabel}: measured $scale")
-        return scale
+        return if (scale.confident) scale else ChromaticAberration.NONE
     }
 
     private fun logApplied(

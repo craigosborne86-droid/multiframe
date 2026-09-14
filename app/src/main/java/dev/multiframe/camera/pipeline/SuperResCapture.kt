@@ -64,6 +64,8 @@ object SuperResCapture {
 
         val color = ColorProfile.calibrated(characteristics, captureResult)
         val shading = ShadingMap.from(captureResult)
+        // The rendering, adapted to the gain the burst was taken at.
+        val params = params.adaptedTo(captureResult?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY))
 
         // The JPEG first, on this thread, because it is the one that can
         // decline. The DNG is written only once the 2x JPEG exists, so a

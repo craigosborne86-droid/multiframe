@@ -285,6 +285,10 @@ object RawBurstCapture {
         }
 
         val t3 = System.currentTimeMillis()
+        // The rendering, adapted to the gain the frame was taken at: no
+        // sharpening of grain, wider colour smoothing, above ISO 800.
+        val iso = captureResult?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
+        val develop = develop.adaptedTo(iso)
         // From the sensor's own characterisation rather than the ISP's
         // rendering matrix, which is tuned to the manufacturer's look.
         val color = ColorProfile.calibrated(characteristics, captureResult)

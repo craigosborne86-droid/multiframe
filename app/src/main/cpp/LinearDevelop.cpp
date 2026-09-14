@@ -30,6 +30,7 @@
 #endif
 
 #include "Jpeg.h"
+#include "Chroma.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "LinearDevelop", __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "LinearDevelop", __VA_ARGS__)
@@ -380,6 +381,8 @@ bool developToRgb8(uint16_t* rgb16, int width, int height, const Params& params,
     }
     const int64_t tSharpen = nowMicros();
 
+    // The colour speckle first, so the sharpen never sees it. See Chroma.h.
+    chroma::smooth<3>(out, width, height, outStride, p.chromaRadius, p.chromaSigma, p.chromaAmount);
     sharpenRgb8(out, width, height, outStride, p.sharpenAmount, p.sharpenThreshold, p.sharpenMaxShift);
     const int64_t tEnd = nowMicros();
 

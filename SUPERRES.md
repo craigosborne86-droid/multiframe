@@ -135,19 +135,22 @@ right way to test the algorithm.
    centre of the canvas, the develop gain and colour are measured from that
    frame and held, and the nodes are laid out around it as directions in the
    world, from the phone's attitude at that instant.
-3. A reticle sits at the centre of the viewfinder and a dot is drawn at each
-   node, where the phone's attitude says that direction now falls in the
-   frame -- thirty times a second, from the rotation vector, whatever the
-   scene shows. The dots are static targets in the world, as a panorama's
-   are: a dot laid over a doorknob stays on the doorknob as the phone pans,
-   and nothing that happens afterwards moves it. The user pans the reticle
-   onto a dot and holds *still*: the ring around the dot fills over 170 ms
-   and empties the moment the gyroscope reads more than six degrees a second
-   or the reticle drifts more than that would move it. Still for the settle
-   time -- longer than the burst, so the burst is the hold -- fires it: the
-   burst is taken from the ring, then a haptic. Pan too fast and the phone
-   says so. STOP, or the back gesture, ends the capture keeping what was
-   taken.
+3. A reticle sits at the centre of the viewfinder and one target is active
+   at a time -- the nodes are taken top-left, top-right, bottom-right,
+   bottom-left, a serpentine over the rows -- drawn where the phone's
+   attitude says that direction now falls in the frame, thirty times a
+   second, from the rotation vector, whatever the scene shows, with an arrow
+   from the reticle toward it. The dots are static targets in the world, as
+   a panorama's are: a dot laid over a doorknob stays on the doorknob as the
+   phone pans, and nothing that happens afterwards moves it. The user follows
+   the arrow onto the dot and holds *still*: the ring around the dot fills
+   over 150 ms -- or the burst's span, where that is longer -- and empties
+   the moment the gyroscope reads more than six degrees a second or the
+   reticle drifts more than that would move it. The ring closes: a burst of
+   four to six frames is taken from the ring, the node is done, the haptic
+   fires, a pulse expands from the reticle for a beat, the dot becomes a
+   check and the arrow turns to the next. Pan too fast and the phone says
+   so. STOP, or the back gesture, ends the capture keeping what was taken.
 4. The node is done the moment the burst is in hand: the checkmark, the
    haptic, the next dot. On its own thread the burst is merged like any other
    photograph, developed with the anchor's colour and gain (the gain scaled

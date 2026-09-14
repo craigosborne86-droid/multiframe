@@ -31,12 +31,19 @@ import kotlin.math.max
  *    before reaching white. Compressing the *brightest channel* and scaling all
  *    three by the same factor keeps the hue and only changes the level.
  *
- * 2. **Highlight desaturation.** Ratio-preserving compression alone never lets
- *    anything reach white, so bright saturated areas stay resolutely coloured
- *    in a way film and print never do. Real media desaturate as they approach
- *    maximum density. Blending toward neutral only in the top of the range
- *    restores that, and is what makes a bright sky read as bright rather than
- *    as cyan.
+ * 2. **Highlight desaturation, keyed on luminance.** Ratio-preserving
+ *    compression alone never lets anything reach white, so bright saturated
+ *    areas stay resolutely coloured in a way film and print never do. Real
+ *    media desaturate as they approach maximum density. Blending toward
+ *    neutral only in the top of the range restores that, and is what makes a
+ *    bright sky read as bright rather than as cyan. *Bright* means the
+ *    pixel's luminance, `Y = 0.2126 R + 0.7152 G + 0.0722 B`, and not its
+ *    brightest channel: keyed on the channel, a saturated red flower with
+ *    R at three times nominal white and a luminance under it was read as
+ *    three times over and pulled most of the way to white -- the field
+ *    test's pale pink. Keyed on luminance it is what it is: a red at the top
+ *    of the range, compressed by stage 1 with its hue and its saturation
+ *    intact, and not overexposed at all.
  *
  * 3. **An S-curve, applied after the gamma encode.** Contrast belongs in the
  *    perceptual domain: this is where a Photoshop curve, a film characteristic
@@ -49,6 +56,11 @@ import kotlin.math.max
  * the reason this cannot produce halos.
  */
 object ToneCurve {
+
+    /** Rec. 709 luminance weights: the same ones the sharpen and the peaking read by. */
+    const val LUMA_R = 0.2126f
+    const val LUMA_G = 0.7152f
+    const val LUMA_B = 0.0722f
 
     /**
      * Compresses [x] toward 1 above [knee], smoothly and without ever reaching
@@ -92,8 +104,11 @@ object ToneCurve {
         // compression on purpose: the roll-off drives everything bright
         // asymptotically toward 1, so afterwards a bright sky and the sun are
         // indistinguishable. Only the scene-linear value still knows which is
-        // which, and that is exactly what should decide how much colour is left.
+        // which. The peak channel decides the compression, which has to keep
+        // every channel in range; the luminance decides how much colour is
+        // left, because that is what "overexposed" means for a colour.
         val scenePeak = max(r, max(g, b))
+        val sceneLuma = LUMA_R * r + LUMA_G * g + LUMA_B * b
 
         // Stage 1: compress on the brightest channel and scale all three, so
         // the roll-off changes level without touching hue.
@@ -109,10 +124,10 @@ object ToneCurve {
         // just under white keeps its blue; a specular highlight several stops
         // over goes white, because that is what being that bright looks like.
         val start = params.desaturationStart
-        if (params.highlightDesaturation > 0f && scenePeak > start) {
+        if (params.highlightDesaturation > 0f && sceneLuma > start) {
             // Zero at the threshold, approaching one without limit as the scene
             // value climbs, so there is no point at which it stops responding.
-            val t = 1f - start / scenePeak
+            val t = 1f - start / sceneLuma
             val mix = (t * t * params.highlightDesaturation).coerceIn(0f, 1f)
             val level = max(r, max(g, b))
             r += (level - r) * mix

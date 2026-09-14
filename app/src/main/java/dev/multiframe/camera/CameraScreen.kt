@@ -981,9 +981,22 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // capture: the rotation vector takes most of a second to converge after
     // it is registered, and a capture that started it would anchor on an
     // attitude still swinging. Armed, they are converged long before the
-    // shutter; idle, they are off.
-    LaunchedEffect(superResPhase.selected) {
-        if (superResPhase.selected) motion.start() else motion.stop()
+    // shutter; idle, they are off. And the preview's zoom goes back to one:
+    // the dots are computed on the uncropped sensor frame, and a zoomed
+    // preview would move under them by the zoom.
+    LaunchedEffect(superResPhase.selected, zslStream) {
+        if (superResPhase.selected) {
+            motion.start()
+            val stream = zslStream
+            val c = caps
+            if (stream != null && c != null && digitalZoom != 1f) {
+                digitalZoom = 1f
+                gauges.setZoom(1f)
+                stream.setZoom(1f, settings, c)
+            }
+        } else {
+            motion.stop()
+        }
     }
 
     // The plan for the armed mosaic: the preset's grid on the capture lens,
@@ -1135,7 +1148,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                             when (event) {
                                                 is MosaicEvent.Anchored -> {
                                                     Haptics.segment(view)
-                                                    status = "pan the reticle onto each dot and hold"
+                                                    status = "follow the arrow to the dot and hold"
                                                 }
                                                 // The photograph is taken here: the
                                                 // node is done, and the confirmation
@@ -1276,9 +1289,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     }
                 }
             }
-            .pointerInput(zslStream, camera, caps) {
+            .pointerInput(zslStream, camera, caps, superResPhase.selected) {
                 detectTransformGestures { _, _, gestureZoom, _ ->
                     if (gestureZoom == 1f) return@detectTransformGestures
+                    // Not in Super Res: the dots are computed on the sensor's
+                    // frame, which no zoom crops, and the preview is what the
+                    // zoom crops. The two would part company by the zoom.
+                    if (superResPhase.selected) return@detectTransformGestures
                     val c = caps ?: return@detectTransformGestures
                     val stream = zslStream
                     if (stream != null) {
@@ -1910,6 +1927,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 MosaicGuidance(
                     view = v,
                     sensorOrientation = orientation,
+                    // The preview's own zoom, so a dot moves with the scene it
+                    // is drawn over and not with the uncropped frame behind it.
+                    previewZoom = zslStream?.zoom ?: 1f,
                     modifier = Modifier
                         .offset { IntOffset(b.left.toInt(), b.top.toInt()) }
                         .size(boundsW, boundsH),

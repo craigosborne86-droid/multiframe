@@ -41,6 +41,12 @@ data class DevelopParams(
     /** Toe. A little density in the deepest shadows, as film has. */
     val blackPoint: Float = 0.012f,
     /**
+     * Chrominance smoothing: the coloured speckle of a high-ISO frame averaged
+     * away, with luminance left exactly alone. See [ChromaSmooth]. Before the
+     * sharpen, so the sharpen never sees it.
+     */
+    val chroma: ChromaSmooth.Params = ChromaSmooth.Params(),
+    /**
      * Capture sharpening, restoring the acutance the CFA sampling and demosaic
      * cost. See [Sharpen] for why this is not an effect.
      */
@@ -71,11 +77,36 @@ data class DevelopParams(
      */
     val localTone: Float = 0f,
 ) {
+    /**
+     * The same rendering, adapted to the sensor gain the frame was taken at.
+     *
+     * Capture sharpening restores acutance the demosaic cost; on a frame at
+     * ISO 3200 what it restores is grain, and sharpened grain is static. The
+     * sharpen fades from full at [LOW_ISO] to nothing at [HIGH_ISO], and the
+     * chroma smoothing widens its luminance tolerance over the same range,
+     * since the speckle it removes is larger. Below [LOW_ISO] nothing
+     * changes, so a daylight frame renders exactly as before.
+     */
+    fun adaptedTo(iso: Int?): DevelopParams {
+        if (iso == null || iso <= LOW_ISO) return this
+        val t = ((iso - LOW_ISO).toFloat() / (HIGH_ISO - LOW_ISO)).coerceIn(0f, 1f)
+        return copy(
+            sharpen = sharpen.copy(amount = sharpen.amount * (1f - t)),
+            chroma = chroma.copy(lumaSigma = chroma.lumaSigma * (1f + t)),
+        )
+    }
+
     companion object {
         const val AUTO_EXPOSURE = -1f
 
         /** The strength the LOCAL TONE control turns on. */
         const val LOCAL_TONE_ON = 0.5f
+
+        /** Up to this ISO the rendering is the daylight rendering. */
+        const val LOW_ISO = 800
+
+        /** From this ISO the sharpen is off and the chroma smoothing at its widest. */
+        const val HIGH_ISO = 3200
     }
 }
 
@@ -198,13 +229,16 @@ object RawDeveloper {
         // optics correction needs more than neighbours -- it gathers from
         // several pixels away -- so it could not be banded at all.
         val optics = params.optics?.takeIf { it.hasWork }
-        if (params.sharpen.enabled || params.defringe.enabled || optics != null) {
+        if (params.sharpen.enabled || params.defringe.enabled || params.chroma.enabled || optics != null) {
             val all = IntArray(w * h)
             bitmap.getPixels(all, 0, w, 0, 0, w, h)
-            // Geometry first, for the reason in `develop`: the two passes below
+            // Geometry first, for the reason in `develop`: the passes below
             // read neighbourhoods, and correcting after them would be deciding
             // pixels from neighbours that are about to move.
             optics?.let { Optics.apply(all, w, h, it) }
+            // The colour speckle next, before anything reads chroma: the
+            // defringe judges outliers and the sharpen must not see noise.
+            if (params.chroma.enabled) ChromaSmooth.apply(all, w, h, params.chroma)
             // Defringe next: sharpening a fringe would make it worse.
             if (params.defringe.enabled) Defringe.apply(all, w, h, params.defringe)
             if (params.sharpen.enabled) Sharpen.apply(all, w, h, params.sharpen)
@@ -259,6 +293,8 @@ object RawDeveloper {
         // It also removes most of the work Defringe would otherwise have: a
         // fringe that has been put back where it belongs is not a fringe.
         resolved.optics?.takeIf { it.hasWork }?.let { Optics.apply(out, w, h, it) }
+        // The colour speckle, before anything reads chroma.
+        if (resolved.chroma.enabled) ChromaSmooth.apply(out, w, h, resolved.chroma)
 
         // Defringe next: sharpening a fringe would make it worse.
         if (resolved.defringe.enabled) Defringe.apply(out, w, h, resolved.defringe)

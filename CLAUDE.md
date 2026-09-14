@@ -111,7 +111,7 @@ section 3.1:
 
 ```
 Black subtract -> Hot pixel -> Lens shading -> White balance -> Demosaic
--> Color matrix -> Tone curve -> sRGB gamma -> Sharpen -> Defringe
+-> Color matrix -> Tone curve -> sRGB gamma -> Chroma smooth -> Defringe -> Sharpen
 ```
 
 Do not reorder these steps. Each operates on the output of the previous step.

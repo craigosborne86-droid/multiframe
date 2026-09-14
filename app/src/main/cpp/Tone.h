@@ -261,8 +261,12 @@ inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t,
     b = std::max(b, 0.0f);
 
     // Measured before compression: afterwards a bright sky and the sun both
-    // sit at 1 and nothing can tell them apart.
+    // sit at 1 and nothing can tell them apart. The peak drives the roll-off;
+    // the luminance drives the desaturation -- a saturated red three times
+    // over in its own channel is not three times overexposed, and keying the
+    // desaturation on the peak rendered it pink. Mirrors ToneCurve.kt.
     const float scenePeak = std::max(r, std::max(g, b));
+    const float sceneLuma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
 
     if constexpr (Shoulder) {
         // The branch stays. The first version of this dropped it -- the table
@@ -286,8 +290,8 @@ inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t,
     }
 
     if constexpr (Desat) {
-        if (t.desatStrength > 0.0f && scenePeak > t.desatStart) {
-            const float k = 1.0f - t.desatStart / scenePeak;
+        if (t.desatStrength > 0.0f && sceneLuma > t.desatStart) {
+            const float k = 1.0f - t.desatStart / sceneLuma;
             const float mix = std::clamp(k * k * t.desatStrength, 0.0f, 1.0f);
             const float level = std::max(r, std::max(g, b));
             r += (level - r) * mix;

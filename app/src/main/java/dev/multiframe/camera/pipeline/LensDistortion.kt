@@ -254,6 +254,81 @@ object LensDistortion {
     const val NEGLIGIBLE_PX = 0.5f
 
     /**
+     * The most a corner may be magnified by the correction.
+     *
+     * Undistorting barrel pulls the corners' source inward, so the output's
+     * corners are the source's corner pixels spread over more ground:
+     * magnified, and by the bilinear resample, softened. A few percent is the
+     * price of straight lines and nobody sees it; fifteen percent is a corner
+     * of interpolated mush, which is what the field test saw on the main lens
+     * -- and on a lens whose calibration asks for more than that, either the
+     * calibration describes a frame this is not, or the lens is one whose
+     * corners were mush before the correction. Either way the correction is
+     * scaled back to this rather than declined: partly straight is still
+     * straighter than the glass left it.
+     */
+    const val MAX_CORNER_STRETCH = 1.15f
+
+    /**
+     * The correction's local magnification at the worst corner: how many
+     * source pixels of ground one output pixel there is spread over,
+     * measured along the radius by a finite difference of [sourceFor].
+     * Greater than one is a corner stretched; less than one, compressed
+     * (pincushion). One for the identity.
+     */
+    fun peakStretch(model: Model, width: Int, height: Int): Float {
+        val w = width - 1f
+        val h = height - 1f
+        val corners = floatArrayOf(0f, 0f, w, 0f, 0f, h, w, h)
+        val a = FloatArray(2)
+        val b = FloatArray(2)
+        var worst = 1f
+        var i = 0
+        while (i < corners.size) {
+            val px = corners[i]
+            val py = corners[i + 1]
+            // A step of a few pixels toward the centre, so the difference is
+            // taken inside the frame and along the radius.
+            val toCentreX = model.cx - px
+            val toCentreY = model.cy - py
+            val len = kotlin.math.hypot(toCentreX, toCentreY).coerceAtLeast(1f)
+            val step = 4f
+            val ux = toCentreX / len * step
+            val uy = toCentreY / len * step
+            sourceFor(model, px, py, a)
+            sourceFor(model, px + ux, py + uy, b)
+            // Source distance covered per output distance: the inverse of the
+            // magnification. The output moved `step`; the source moved this.
+            val sourceStep = kotlin.math.hypot(b[0] - a[0], b[1] - a[1])
+            val stretch = if (sourceStep > 1e-3f) step / sourceStep else 1f
+            if (stretch > worst) worst = stretch
+            i += 2
+        }
+        return worst
+    }
+
+    /**
+     * The model with its correction scaled back until no corner is stretched
+     * past [maxStretch]. The displacement is close to linear in the
+     * coefficients, so the excess is removed in proportion and the result
+     * checked; two rounds is enough for the terms' small non-linearity.
+     * Returns the model unchanged where it is already within the limit.
+     */
+    fun limitStretch(model: Model, width: Int, height: Int, maxStretch: Float = MAX_CORNER_STRETCH): Model {
+        var limited = model
+        repeat(3) {
+            val stretch = peakStretch(limited, width, height)
+            if (stretch <= maxStretch) return limited
+            val t = ((maxStretch - 1f) / (stretch - 1f)).coerceIn(0.05f, 0.98f)
+            limited = limited.copy(
+                k1 = limited.k1 * t, k2 = limited.k2 * t, k3 = limited.k3 * t,
+                p1 = limited.p1 * t, p2 = limited.p2 * t,
+            )
+        }
+        return limited
+    }
+
+    /**
      * Resamples [src] into [dst], both packed ARGB at [width] x [height].
      *
      * Bilinear. Edge pixels that map outside the source are clamped to the

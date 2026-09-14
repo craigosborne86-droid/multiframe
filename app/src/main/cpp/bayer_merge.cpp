@@ -24,6 +24,7 @@
 #endif
 
 #include "Tone.h"
+#include "Chroma.h"
 
 #define LOG_TAG "MultiframeNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -2213,6 +2214,24 @@ JNIEXPORT void JNICALL
 Java_dev_multiframe_camera_pipeline_NativeMerge_nReleaseScratch(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> guard(gScratchLock);
     gScratch.release();
+}
+
+// Chrominance smoothing on the developed bitmap; see Chroma.h and ChromaSmooth.kt.
+JNIEXPORT jboolean JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nChromaSmooth(
+        JNIEnv* env, jobject, jobject bitmap, jint radius, jfloat sigma, jfloat amount) {
+    if (amount <= 0.0f || radius <= 0) return JNI_TRUE;
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) return JNI_FALSE;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS) return JNI_FALSE;
+    const int64_t t0 = nowMicros();
+    chroma::smooth<4>(static_cast<uint8_t*>(pixels), static_cast<int>(info.width),
+                      static_cast<int>(info.height), info.stride, radius, sigma, amount);
+    AndroidBitmap_unlockPixels(env, bitmap);
+    LOGI("chroma smooth: %lldms", static_cast<long long>((nowMicros() - t0) / 1000));
+    return JNI_TRUE;
 }
 
 JNIEXPORT jboolean JNICALL

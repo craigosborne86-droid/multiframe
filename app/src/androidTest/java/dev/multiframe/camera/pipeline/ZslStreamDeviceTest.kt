@@ -818,8 +818,19 @@ class ZslStreamDeviceTest {
             ),
         )
 
-        // Without the retained buffers this spread was 334 ms.
-        assertThat(slowest.toDouble()).isLessThan(fastest * 1.4)
+        // Without the retained buffers this spread was 334 ms. The bound was
+        // 1.4x until the chroma smoothing joined the develop (REFERENCE §3.1
+        // step 9): a fixed hundred milliseconds a shot, scene-independent --
+        // which is the property this test defends -- but enough more work
+        // per shot that a phone at 40C, four shots in under four seconds
+        // with the previous shot's DNG still being written, slows every stage
+        // of the third and fourth shot by a third to a half: measured 278 ms
+        // against 396, and 271 against 361, with the chroma pass itself going
+        // 73 to 121 ms and the render 68 to 100. That is the clock, not the
+        // pipeline. 1.6x admits it and still refuses the scene-dependent and
+        // allocation-driven spreads this test was written against, which
+        // were 2x and more.
+        assertThat(slowest.toDouble()).isLessThan(fastest * 1.6)
     }
 
     /**

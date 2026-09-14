@@ -112,8 +112,34 @@ class ChromaticAberrationTest {
     @Test
     fun aFlatImageIsNotMeasured() {
         val flat = IntArray(width * height) { (0xFF shl 24) or 0x808080 }
-        assertThat(ChromaticAberration.estimate(flat, width, height))
-            .isEqualTo(ChromaticAberration.NONE)
+        val scale = ChromaticAberration.estimate(flat, width, height)
+        assertThat(scale.isIdentity).isTrue()
+        // And says it had nothing to go on, so nobody caches it.
+        assertThat(scale.confident).isFalse()
+    }
+
+    /**
+     * The field test's doubled fringes: a dark, noisy frame has edges -- the
+     * noise is all edges -- but no fringe, and the search's minimum lands
+     * wherever the noise put it. Applied, that adds a fringe; cached, it adds
+     * one to every frame after. An estimate that does not beat unity by a
+     * clear margin is the identity and is not believed.
+     */
+    @Test
+    fun aNoisyFrameWithNoFringeIsNotBelieved() {
+        val rnd = kotlin.random.Random(7)
+        val noisy = IntArray(width * height) {
+            // Independent per channel, as sensor noise is after the matrix.
+            val r = 40 + rnd.nextInt(0, 60)
+            val g = 40 + rnd.nextInt(0, 60)
+            val b = 40 + rnd.nextInt(0, 60)
+            (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        val scale = ChromaticAberration.estimate(noisy, width, height)
+        assertThat(scale.isIdentity).isTrue()
+        assertThat(scale.confident).isFalse()
+        // Whereas a real fringe is believed.
+        assertThat(ChromaticAberration.estimate(rings(redScale = 1.002f), width, height).confident).isTrue()
     }
 
     @Test

@@ -222,10 +222,12 @@ class MosaicGuideTest {
         // Eight frames at 33 ms is 267 ms; the hold has to be longer than the
         // burst it will hand over, so that every frame was taken during it.
         // Three frames is 100 ms, under the 170 ms floor.
-        assertThat(MosaicGuide.settleFor(8, 33_333_333L)).isEqualTo(306L)
+        assertThat(MosaicGuide.settleFor(8, 33_333_333L)).isEqualTo(299L)
+        // Five frames -- a Super Res tile -- is 167 ms plus a poll: 199.
+        assertThat(MosaicGuide.settleFor(5, 33_333_333L)).isEqualTo(199L)
         assertThat(MosaicGuide.settleFor(3, 33_333_333L)).isEqualTo(MosaicGuide.DEFAULT_SETTLE_MILLIS)
         assertThat(MosaicGuide.settleFor(0, 33_333_333L)).isEqualTo(MosaicGuide.DEFAULT_SETTLE_MILLIS)
-        assertThat(MosaicGuide.DEFAULT_SETTLE_MILLIS).isIn(150L..180L)
+        assertThat(MosaicGuide.DEFAULT_SETTLE_MILLIS).isEqualTo(150L)
     }
 
     @Test
@@ -294,7 +296,10 @@ class MosaicGuideTest {
     fun `the whole grid captured is complete`() {
         val s = sweep()
         var t = 0L
-        for (node in plan.nodes) {
+        // Taken in the guide's own order, which is the only order it allows.
+        for (index in s.order) {
+            val node = plan.nodes[index]
+            assertThat(s.activeNode).isEqualTo(node)
             s.at(node, t = t)
             t += 100
             s.at(node, t = t)
@@ -308,23 +313,63 @@ class MosaicGuideTest {
         assertThat(s.captured).isEqualTo(4)
         assertThat(s.complete).isTrue()
         assertThat(s.nearestPending(0f, 0f)).isNull()
+        assertThat(s.activeNode).isNull()
     }
 
+    /**
+     * One target at a time. The order is a serpentine over the rows --
+     * top-left, top-right, bottom-right, bottom-left on this 2x2 -- and only
+     * the active node can be approached or locked, however near the reticle
+     * comes to another.
+     */
     @Test
-    fun `only the nearest pending node can be locking`() {
+    fun `only the active node can be locking, and the order is a serpentine`() {
+        val s = sweep()
+        assertThat(s.order).containsExactly(0, 1, 3, 2).inOrder()
+        val a = plan.nodes[0]
+        val b = plan.nodes[1]
+        val d = plan.nodes[3]
+        assertThat(s.activeNode).isEqualTo(a)
+        // Holding perfectly still on b, which is not the active node: nothing.
+        s.at(b, t = 0); s.at(b, t = 100); s.at(b, t = 200)
+        assertThat(s.at(b, t = 500)).isEqualTo(MosaicGuide.Decision.Idle)
+        assertThat(s.stateOf(b)).isEqualTo(MosaicGuide.NodeState.PENDING)
+        assertThat(s.stateOf(a)).isEqualTo(MosaicGuide.NodeState.PENDING)
+        // On a, the active node: locks and fires.
+        s.at(a, t = 600); s.at(a, t = 700); s.at(a, t = 800)
+        assertThat(s.at(a, t = 1000)).isEqualTo(MosaicGuide.Decision.Capture(a))
+        s.captured(a, 1000)
+        // The latch is struck for the screen, and the active node moves on to b.
+        assertThat(s.lastCapturedNode).isEqualTo(0)
+        assertThat(s.lastCapturedAt).isEqualTo(1000L)
+        assertThat(s.activeNode).isEqualTo(b)
+        assertThat(s.nearestPending(a.canvasX, a.canvasY)).isNotEqualTo(a)
+        // After b, the bottom-right, not the bottom-left: the row turns back.
+        s.at(b, t = 1100); s.at(b, t = 1200); s.at(b, t = 1300)
+        assertThat(s.at(b, t = 1500)).isEqualTo(MosaicGuide.Decision.Capture(b))
+        s.captured(b, 1500)
+        assertThat(s.activeNode).isEqualTo(d)
+    }
+
+    /** A node whose tile failed comes back into the order where it was. */
+    @Test
+    fun `a rejected node becomes active again in its turn`() {
         val s = sweep()
         val a = plan.nodes[0]
         val b = plan.nodes[1]
-        // Between the two, nearer a.
-        val x = a.canvasX + (b.canvasX - a.canvasX) * 0.3f
-        s.observe(x, a.canvasY, 0)
-        assertThat(s.stateOf(a)).isNotEqualTo(MosaicGuide.NodeState.LOCKING)
-        assertThat(s.stateOf(b)).isNotEqualTo(MosaicGuide.NodeState.LOCKING)
-        // A done node is never nearest.
-        s.at(a, t = 100); s.at(a, t = 200); s.at(a, t = 300)
-        assertThat(s.at(a, t = 500)).isEqualTo(MosaicGuide.Decision.Capture(a))
-        s.captured(a)
-        assertThat(s.nearestPending(a.canvasX, a.canvasY)).isNotEqualTo(a)
+        s.at(a, t = 0); s.at(a, t = 100); s.at(a, t = 200)
+        assertThat(s.at(a, t = 400)).isEqualTo(MosaicGuide.Decision.Capture(a))
+        s.captured(a, 400)
+        assertThat(s.activeNode).isEqualTo(b)
+        // The tile could not be made: a is pending again, and first in the order.
+        s.rejected(a, 500)
+        assertThat(s.activeNode).isEqualTo(a)
+        // For the rejected beat it reads as rejected, and cannot lock...
+        s.at(a, t = 600)
+        assertThat(s.stateOf(a)).isEqualTo(MosaicGuide.NodeState.REJECTED)
+        // ...then it is the target again.
+        s.at(a, t = 1200)
+        assertThat(s.stateOf(a)).isEqualTo(MosaicGuide.NodeState.LOCKING)
     }
 
     @Test

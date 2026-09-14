@@ -350,17 +350,23 @@ THE DOT while it waits. `REFERENCE.md` §3.4.4.
 When the capture begins (the shutter, with SUPER RES armed):
 
 1. The viewfinder is already on the telephoto lens, from selecting the mode.
-2. Target dots appear overlaid on the viewfinder, one per tile position. Each dot
-   represents the center of a tile the user needs to capture.
+2. One target dot is active at a time -- the nodes are taken top-left,
+   top-right, bottom-right, bottom-left (a serpentine over the rows) -- drawn
+   with its ring, and with an arrow from the reticle toward it when it is off
+   the reticle. Nodes taken are dim checkmarks; nodes to come are faint dots,
+   so the shape of the picture is legible and nothing competes with the
+   target.
 3. A crosshair reticle is fixed at the center of the viewfinder.
 4. The user pans the phone to align the reticle with each target dot.
 5. When the reticle is within the lock radius of a target dot (default 5% of
    frame width) *and the phone is still* (§ above):
-   - The dot changes color (muted -> amber, with a ring filling over the hold).
-   - After the hold, the burst is taken from the ring and a haptic
-     confirmation fires (`CONFIRM`) -- after the frames are in hand, never
-     before.
-   - The dot fills solid green to indicate completion.
+   - The dot changes color (bone -> amber, with a ring filling smoothly over
+     the hold: 150 ms, or the burst's span where that is longer).
+   - The ring closes: the burst -- four to six frames -- is taken from the
+     ring, the node is done, and `CONFIRM` fires -- after the frames are in
+     hand, never before.
+   - A pulse expands from the reticle for 150 ms: the latch, the tile taken.
+   - The arrow turns toward the next target; the taken dot becomes a check.
 6. If the user moves too quickly (a tile's width between polls), `REJECT`
    fires; a burst that cannot be registered or developed flashes its dot red
    for a beat and fires `REJECT`. The user re-aligns.
@@ -665,7 +671,7 @@ described is not yet built. This is what those numbers mean.
 | 1 | Foundation & Hardware Truth | **Delivered.** Design tokens, haptic vocabulary, decoupled viewfinder HUD, `LensProfile` discovery, non-invasive DCG noise profiling, gallery and review surface. |
 | 2 | Lens Corrections & Develop Quality | Geometric distortion correction from `LensProfile`, lateral chromatic aberration correction, dual-illuminant colour matrix, HEIF output. |
 | 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel alignment refinement (equiangular, after the parabola was measured biased); sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native tiled strips, parity-verified); coverage prediction from the alignment; the linear develop of the canvas to a JPEG from native memory; the `2X` control, readout and gallery badge; IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. See §5.2. |
-| 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after four field tests (§5.4–§5.7).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
+| 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after five field tests (§5.4–§5.8).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
 | 5 | Responsive UI & GPU Develop | Responsive layout, accessibility pass; Vulkan compute develop if the CPU budget is ever exceeded. |
 | 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
 
@@ -944,6 +950,54 @@ answers.
    lock gets the floor stretched toward 1/60 s and the gate tightened to 4°/s
    for the capture; a moving hand gets the floor. `StabilityGateTest` walks
    the evening case.
+
+### 5.8 What the fifth field test found
+
+The engine worked and the experience did not, and the output was noise. Four
+buckets.
+
+1. **Choreography.** One active target at a time in a serpentine order, an
+   arrow to it, dim checks for the taken, faint dots for the rest; a 150 ms
+   fill, `CONFIRM` at the snapshot, a 150 ms latch pulse (§2.3.3;
+   `MosaicGuideTest` walks the order and the latch). The zoom: the dots are on
+   the uncropped sensor frame and the preview is what a pinch crops, so a
+   zoomed preview slid under the dots by the zoom; Super Res now resets the
+   zoom and refuses the pinch, and the overlay maps through the stream's
+   zoom regardless. The projection itself was right -- `f · tan`, and the
+   preview is the raw stream's own aspect -- and stays.
+
+2. **Noise.** The tile burst was never a single frame -- the live test merges
+   4 of 4 at 0.95 contribution, now logged per tile -- but a single telephoto
+   sensor at ISO 3200 needs more than a merge. Chrominance smoothing is in
+   the pipeline (§3.1 step 9), by default, as every raw converter has it;
+   the sharpen fades to nothing between ISO 800 and 3200 and the smoothing
+   widens over the same range (`DevelopParams.adaptedTo`); and the tile burst
+   is held to 4–6 frames.
+
+3. **Colour.** The pale pink reds were the highlight desaturation keyed on
+   the brightest channel: a red at three times nominal in R read as three
+   times overexposed and was pulled toward white. Keyed on luminance it is a
+   red at the top of the range and stays one (`ToneCurveTest` renders the
+   flower). The roll-off was already hue-preserving and was left alone --
+   keying the compression on luminance would need a clip that flattens a
+   red's gradation.
+
+4. **Artefacts.** The "4K TV screen" mesh was the beat between the tile's
+   grid and the canvas's in the fine band's bilinear resampling of noise,
+   and is gone with a half-pixel prefilter (`REFERENCE.md` §3.4.4). The
+   "inverted" chromatic aberration was not inverted -- the estimator and the
+   corrector share one sign convention, pinned by test -- but the estimator
+   was biased on noisy frames: a resampled channel carries less noise than
+   green at the pixel, so on a dark frame every non-unity scale looked
+   better and the widest won, half a percent, a ten-pixel fringe on every
+   frame after (it was cached per lens). It now searches on a box-blurred
+   copy, refuses a minimum that does not beat unity by 3% or sits at the
+   search's limit, and caches only what it believed
+   (`ChromaticAberrationTest`). The Brown–Conrady correction is scaled back
+   where it would stretch a corner past 1.15× (`LensDistortionTest`). The
+   CFA phase was audited and is correct: the pattern Camera2 reports is the
+   raw buffer's own origin, and the colours in every field capture confirm
+   it.
 
 **Still open from Phase 3.** The chroma channels of an eight-frame handheld burst leave
 about a fifth of their cells to the fill; a longer burst closes them and the

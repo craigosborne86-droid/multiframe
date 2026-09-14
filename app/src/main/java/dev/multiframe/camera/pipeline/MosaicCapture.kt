@@ -65,6 +65,14 @@ data class MosaicGuideView(
     val captureLensLabel: String = "",
     /** Whether the mosaic has anchored; before it, the outline is where the anchor would put it. */
     val anchored: Boolean = true,
+    /** The one node to take the reticle to now, by index; -1 when every node is taken. */
+    val activeNode: Int = -1,
+    /**
+     * How far through the latch -- the pulse that says a tile was just taken
+     * -- the screen is, 0 to 1, or -1 when no latch is being drawn. Drawn at
+     * the reticle, where the capture happened.
+     */
+    val latch: Float = -1f,
 )
 
 /** Moments the screen answers with a haptic or a flash. */
@@ -196,6 +204,17 @@ object MosaicCapture {
     private const val ANCHOR_POLL_MILLIS = 90L
 
     /**
+     * Frames per tile: the burst setting, held to this range. Fewer than four
+     * frames is grain -- a single frame from a small telephoto sensor at high
+     * ISO has no signal to speak of -- and more than six is a hold longer
+     * than a hand keeps: the burst is the hold (`MosaicGuide.settleFor`).
+     */
+    const val MIN_TILE_FRAMES = 4
+    const val MAX_TILE_FRAMES = 6
+    fun tileFrames(burstFrames: Int, ringBurst: Int): Int =
+        burstFrames.coerceIn(MIN_TILE_FRAMES, MAX_TILE_FRAMES).coerceAtMost(ringBurst.coerceAtLeast(1))
+
+    /**
      * The thread tiles are placed on: merged, registered, developed and
      * composited, while the guidance thread keeps the dots moving. The same
      * priority as the guidance, a step below the viewfinder's, for the same
@@ -315,9 +334,12 @@ object MosaicCapture {
                 if (motion.isAvailable) "present" else "absent",
             ),
         )
+        // The burst per tile, and the hold that covers it.
+        val tileFrames = tileFrames(frames, stream.maxBurst)
+        Log.i(TAG, "tiles: $tileFrames frames each (setting $frames, ring burst ${stream.maxBurst})")
         guide.configureGate(
             maxAngularSpeed = maxSpeed,
-            settleMillis = MosaicGuide.settleFor(frames, stream.config.minFrameDurationNs),
+            settleMillis = MosaicGuide.settleFor(tileFrames, stream.config.minFrameDurationNs),
             canvasPixelsPerRadian = pixelsPerRadian * session.plan.tileScale,
         )
         val imu = ImuGuidance(session.plan, pixelsPerRadian, sensorOrientation)
@@ -471,7 +493,7 @@ object MosaicCapture {
                             while (slotsHeld.get() > 0 && shouldContinue()) delay(20)
                             if (!shouldContinue()) break
 
-                            val burst = stream.snapshot(frames)
+                            val burst = stream.snapshot(tileFrames)
                             if (burst.count == 0) {
                                 burst.close()
                                 guide.rejected(decision.node, System.currentTimeMillis())
@@ -483,7 +505,8 @@ object MosaicCapture {
                                 // The tile is the worker's from here.
                                 slotsHeld.incrementAndGet()
                                 val atFrame = frameRotation(motion, burst.results.getOrNull(0) ?: burst.referenceResult, realtimeStamps)
-                                guide.captured(decision.node)
+                                guide.captured(decision.node, System.currentTimeMillis())
+                                Log.i(TAG, "node ${decision.node.index}: burst of ${burst.count} frames in hand")
                                 onEvent(MosaicEvent.Locked(decision.node))
                                 tiles.send(PendingTile(decision.node, burst, atFrame))
                             }
@@ -566,7 +589,16 @@ object MosaicCapture {
             unsteady = if (guide.lockingNodeOrNull != null) guide.unsteadyReason else null,
             captureLensLabel = captureLabel,
             anchored = true,
+            activeNode = guide.activeNode?.index ?: -1,
+            latch = latchAt(guide, nowMillis),
         )
+    }
+
+    /** How far through its [MosaicGuide.LATCH_MILLIS] the latch is, or -1 when none is being drawn. */
+    private fun latchAt(guide: MosaicGuide, nowMillis: Long): Float {
+        if (guide.lastCapturedAt <= 0L) return -1f
+        val age = nowMillis - guide.lastCapturedAt
+        return if (age in 0 until MosaicGuide.LATCH_MILLIS) age.toFloat() / MosaicGuide.LATCH_MILLIS else -1f
     }
 
     /**
@@ -635,6 +667,8 @@ object MosaicCapture {
             unsteady = if (guide.lockingNodeOrNull != null) guide.unsteadyReason else null,
             captureLensLabel = captureLabel,
             anchored = anchored,
+            activeNode = if (anchored) guide.activeNode?.index ?: -1 else -1,
+            latch = latchAt(guide, nowMillis),
         )
     }
 
@@ -716,6 +750,7 @@ object MosaicCapture {
         slotsHeld: AtomicInteger,
     ): PlaceOutcome {
         val burst = pending.burst
+        val frameCount = burst.count
         val merger = NativeMerge.create(stream.config.width, stream.config.height, profile)
             ?: run { burst.close(); slotsHeld.decrementAndGet(); return PlaceOutcome.Failed("no memory for the merge") }
 
@@ -786,14 +821,19 @@ object MosaicCapture {
             if (byAttitude) Log.i(TAG, "node ${pending.node.index}: placed by the attitude" +
                 (session.lastLocateFailure?.let { " ($it)" } ?: ""))
 
-            val (merged, _) = m.finish()
+            val (merged, stats) = m.finish()
+            Log.i(TAG, "node ${pending.node.index}: merged %d of %d frames, mean contribution %.2f".format(
+                stats.framesMerged, frameCount, stats.meanContribution))
             val color = session.color ?: ColorProfile.NEUTRAL
             // The anchor's gain, scaled by how this burst's exposure differed
             // from the anchor's -- which under the mosaic's lock should be not
             // at all, and this is what holds if it was.
             val gain = session.gainFor(exposureProduct(referenceResult))
+            // Adapted to the ISO the lock pinned: a tile at ISO 3200 is not
+            // sharpened, and its colour speckle is smoothed wider.
+            val iso = referenceResult?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
             var tile = m.develop(
-                merged, color, DevelopParams(exposureGain = gain), shading = session.shading,
+                merged, color, DevelopParams(exposureGain = gain).adaptedTo(iso), shading = session.shading,
             ) ?: return@use PlaceOutcome.Failed("develop failed")
 
             // The lens's geometry, before the tile is placed by a homography

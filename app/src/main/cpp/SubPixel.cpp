@@ -858,11 +858,18 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     p.autoTarget = tone[7];
     p.localTone = tone[8];
 
-    float sharpen[3];
-    env->GetFloatArrayRegion(jsharpen, 0, 3, sharpen);
+    // amount, threshold, maxShift, then the chroma smoothing's radius, sigma
+    // and amount -- the order NativeSubPixel packs them in. An older caller
+    // passing three leaves the chroma defaults.
+    float sharpen[6] = {0.55f, 3.5f, 28.0f, 2.0f, 12.0f, 1.0f};
+    const jsize n = std::min<jsize>(6, env->GetArrayLength(jsharpen));
+    env->GetFloatArrayRegion(jsharpen, 0, n, sharpen);
     p.sharpenAmount = sharpen[0];
     p.sharpenThreshold = sharpen[1];
     p.sharpenMaxShift = sharpen[2];
+    p.chromaRadius = static_cast<int>(sharpen[3]);
+    p.chromaSigma = sharpen[4];
+    p.chromaAmount = sharpen[5];
     return true;
 }
 

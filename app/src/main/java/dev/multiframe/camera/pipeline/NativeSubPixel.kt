@@ -165,8 +165,10 @@ class NativeSubPixel private constructor(
         p.localTone,
     )
 
+    /** The sharpen, then the chroma smoothing, in the order SubPixel.cpp unpacks them. */
     private fun sharpenArray(p: DevelopParams) = floatArrayOf(
         if (p.sharpen.enabled) p.sharpen.amount else 0f, p.sharpen.threshold, p.sharpen.maxShift,
+        p.chroma.radius.toFloat(), p.chroma.lumaSigma, if (p.chroma.enabled) p.chroma.amount else 0f,
     )
 
     override fun close() {

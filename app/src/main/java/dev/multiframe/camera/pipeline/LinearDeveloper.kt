@@ -12,7 +12,7 @@ import kotlin.math.pow
  *
  * ```
  * Black subtract -> Lens shading -> White balance -> Colour matrix
- *   -> Tone curve -> sRGB gamma -> Sharpen
+ *   -> Tone curve -> sRGB gamma -> Chroma smooth -> Sharpen
  * ```
  *
  * Hot pixels are not here because they were dealt with before the samples
@@ -173,6 +173,7 @@ object LinearDeveloper {
                 }
             }
         }
+        if (resolved.chroma.enabled) ChromaSmooth.apply(out, width, height, resolved.chroma)
         if (resolved.sharpen.enabled) Sharpen.apply(out, width, height, resolved.sharpen)
         return out
     }

@@ -137,9 +137,11 @@ class ToneCurveTest {
     fun `desaturation scales with how overexposed the scene actually was`() {
         // Ratio-preserving compression alone never reaches white, so bright
         // areas stay stubbornly coloured. How much colour is given up has to
-        // track the scene value, not the compressed one.
-        fun spreadAt(stops: Float): Float {
-            val rgb = floatArrayOf(stops, stops * 0.4f, stops * 0.2f)
+        // track the scene's luminance, not the compressed value -- and not
+        // the peak channel either, see the red flower below.
+        fun spreadAt(times: Float): Float {
+            // A warm near-white: luminance close to its peak.
+            val rgb = floatArrayOf(times, times * 0.9f, times * 0.7f)
             ToneCurve.renderLinear(rgb, params)
             return rgb[0] - rgb[2]
         }
@@ -147,15 +149,49 @@ class ToneCurveTest {
         val moderate = spreadAt(3f)
         val extreme = spreadAt(20f)
 
-        val noDesat = floatArrayOf(3f, 1.2f, 0.6f)
+        val noDesat = floatArrayOf(3f, 2.7f, 2.1f)
         ToneCurve.renderLinear(noDesat, params.copy(highlightDesaturation = 0f))
         val uncorrected = noDesat[0] - noDesat[2]
 
-        // A few stops over loses a good part of its colour...
-        assertThat(moderate).isLessThan(uncorrected * 0.6f)
+        // Three times over loses a good part of its colour -- two fifths of
+        // its spread, at a luminance 2.7 times white...
+        assertThat(moderate).isLessThan(uncorrected * 0.65f)
+        assertThat(moderate).isGreaterThan(uncorrected * 0.5f)
         // ...and something blindingly bright is essentially white.
-        assertThat(extreme).isLessThan(0.15f)
+        assertThat(extreme).isLessThan(0.05f)
         assertThat(extreme).isLessThan(moderate)
+    }
+
+    /**
+     * The field test's pale pink. A saturated red flower in sun has R at
+     * three times nominal white and a luminance under it. Keyed on the peak
+     * channel, the desaturation read it as three times overexposed and pulled
+     * it most of the way to white; keyed on luminance, it is a red at the top
+     * of the range and keeps its hue and nearly all its saturation.
+     */
+    @Test
+    fun `a bright saturated red stays red rather than going pink`() {
+        val rgb = floatArrayOf(3f, 0.2f, 0.15f)
+        val luma = ToneCurve.LUMA_R * 3f + ToneCurve.LUMA_G * 0.2f + ToneCurve.LUMA_B * 0.15f
+        assertThat(luma).isLessThan(1f)
+        ToneCurve.renderLinear(rgb, params)
+        // Compressed to the top of the range, and still red: the other two
+        // channels are a small fraction of it, as they were.
+        assertThat(rgb[0]).isWithin(0.05f).of(1f)
+        assertThat(rgb[1] / rgb[0]).isLessThan(0.12f)
+        assertThat(rgb[2] / rgb[0]).isLessThan(0.10f)
+        // With the ratios of the scene, to the precision the roll-off keeps.
+        assertThat(rgb[1] / rgb[0]).isWithin(1e-3f).of(0.2f / 3f)
+    }
+
+    /** And a red that *is* overexposed -- a luminance past white -- does give up colour. */
+    @Test
+    fun `a red past white in luminance is desaturated like any other highlight`() {
+        val rgb = floatArrayOf(6f, 1.4f, 1.0f)
+        val luma = ToneCurve.LUMA_R * 6f + ToneCurve.LUMA_G * 1.4f + ToneCurve.LUMA_B * 1.0f
+        assertThat(luma).isGreaterThan(1.5f)
+        ToneCurve.renderLinear(rgb, params)
+        assertThat(rgb[1] / rgb[0]).isGreaterThan(0.4f)
     }
 
     @Test

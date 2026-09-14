@@ -73,21 +73,33 @@ class GuidesTest {
         render { MosaicGuidance(view = view, sensorOrientation = 90, modifier = Modifier.fillMaxSize()) }
         assertThat(view.canvasCorners).hasSize(4)
 
-        // Running: a hold on the centre node, a done node, a rejected one.
-        val centre = plan.nodes[4]
-        guide.captured(plan.nodes[0])
-        guide.rejected(plan.nodes[1], nowMillis = 0)
-        guide.observe(centre.canvasX, centre.canvasY, 0, 0.01f)
-        guide.observe(centre.canvasX + 2f, centre.canvasY, 100, 0.01f)
+        // Running: the first node done (with its latch still struck), the
+        // last rejected, and a hold on the active node -- the next in the
+        // order -- with the arrow and the faint future dots all drawn.
+        guide.captured(plan.nodes[0], nowMillis = 150)
+        guide.rejected(plan.nodes[8], nowMillis = 0)
+        val active = guide.activeNode!!
+        assertThat(active).isEqualTo(plan.nodes[1])
+        guide.observe(active.canvasX, active.canvasY, 0, 0.01f)
+        guide.observe(active.canvasX + 2f, active.canvasY, 100, 0.01f)
         val t = dev.multiframe.camera.pipeline.Homography.translation(
-            (centre.canvasX - plan.placedTileWidth / 2f).toDouble(),
-            (centre.canvasY - plan.placedTileHeight / 2f).toDouble(),
+            (active.canvasX - plan.placedTileWidth / 2f).toDouble(),
+            (active.canvasY - plan.placedTileHeight / 2f).toDouble(),
         )
         view = dev.multiframe.camera.pipeline.MosaicCapture.viewOf(guide, plan, t, "110mm", 200, anchored = true)
         compose.waitForIdle()
         assertThat(view.holdProgress).isGreaterThan(0f)
+        assertThat(view.activeNode).isEqualTo(1)
+        assertThat(view.latch).isGreaterThan(0f)
         assertThat(view.nodes.map { it.state }).contains(dev.multiframe.camera.pipeline.MosaicGuide.NodeState.LOCKING)
         assertThat(view.nodes.map { it.state }).contains(dev.multiframe.camera.pipeline.MosaicGuide.NodeState.DONE)
+        assertThat(view.nodes.map { it.state }).contains(dev.multiframe.camera.pipeline.MosaicGuide.NodeState.REJECTED)
+
+        // The reticle away from the active node: the arrow is drawn toward it.
+        guide.observe(active.canvasX - plan.placedTileWidth * 0.4f, active.canvasY + 300f, 250, 0.01f)
+        view = dev.multiframe.camera.pipeline.MosaicCapture.viewOf(guide, plan, t, "110mm", 260, anchored = true)
+        compose.waitForIdle()
+        assertThat(view.nodes.single { it.node.index == 1 }.state).isEqualTo(dev.multiframe.camera.pipeline.MosaicGuide.NodeState.PENDING)
 
         // Lost: no outline, no dots, and it still draws.
         view = dev.multiframe.camera.pipeline.MosaicCapture.viewOf(guide, plan, null, "110mm", 300, anchored = true)

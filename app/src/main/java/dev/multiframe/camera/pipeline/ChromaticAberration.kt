@@ -45,11 +45,21 @@ object ChromaticAberration {
      * pixels of fringe at the corner of a 4000-pixel frame, which is plainly
      * visible, and the numbers here are correspondingly small.
      */
-    data class Scale(val red: Float, val blue: Float) {
+    data class Scale(
+        val red: Float,
+        val blue: Float,
+        /**
+         * Whether the search found a clear minimum -- a scale whose cost beat
+         * unity's by [MIN_IMPROVEMENT] -- or only noise. An unconfident
+         * estimate is the identity, and is not worth remembering: the next
+         * frame may have edges this one did not.
+         */
+        val confident: Boolean = true,
+    ) {
         val isIdentity: Boolean get() = red == 1f && blue == 1f
 
         override fun toString(): String =
-            "CA red %.5f blue %.5f".format(red, blue)
+            "CA red %.5f blue %.5f%s".format(red, blue, if (confident) "" else " (unconfident)")
     }
 
     val NONE = Scale(1f, 1f)
@@ -79,6 +89,18 @@ object ChromaticAberration {
     private const val MIN_SAMPLES = 500
 
     /**
+     * How much better than unity the best scale's cost has to be before the
+     * estimate is believed. On a frame with real fringes the true scale beats
+     * unity by a wide margin; on a dark, noisy frame every candidate costs
+     * about the same and the minimum is wherever the noise put it -- and an
+     * estimate like that, applied, *adds* a fringe of up to half a percent of
+     * the radius where there was none, and cached, adds it to every frame
+     * after. Three percent is well under a real lens's margin and well over
+     * noise.
+     */
+    const val MIN_IMPROVEMENT = 0.03f
+
+    /**
      * Estimates the radial scale of red and blue against green.
      *
      * Takes a packed ARGB image that has already been white balanced, which
@@ -96,13 +118,53 @@ object ChromaticAberration {
         val cx = (width - 1) / 2f
         val cy = (height - 1) / 2f
 
-        val edges = edgePixels(pixels, width, height)
-        if (edges.size < MIN_SAMPLES) return NONE
+        // The search runs on a box-blurred copy, and the reason is noise. The
+        // cost samples a channel bilinearly at the candidate's position and
+        // compares it with green at the pixel; at unity the sample lands on a
+        // pixel centre and carries that pixel's full noise, while at any other
+        // scale it is an average of neighbours and carries less. On a noisy
+        // frame that alone makes every non-unity scale look better, and the
+        // widest one -- the most averaging -- best: the fourth field test's
+        // telephoto at ISO 3200 measured the search's own limit, half a
+        // percent, and wore a ten-pixel fringe on every frame after. Blurred
+        // first, the channels are smooth at the interpolation's scale and the
+        // averaging changes nothing; only the alignment is left to measure.
+        val smooth = boxBlur(pixels, width, height)
+        val edges = edgePixels(smooth, width, height)
+        if (edges.size < MIN_SAMPLES) return NONE.copy(confident = false)
 
-        return Scale(
-            red = bestScale(pixels, width, height, cx, cy, edges, SHIFT_RED),
-            blue = bestScale(pixels, width, height, cx, cy, edges, SHIFT_BLUE),
-        )
+        val red = bestScale(smooth, width, height, cx, cy, edges, SHIFT_RED)
+        val blue = bestScale(smooth, width, height, cx, cy, edges, SHIFT_BLUE)
+        // Believed only where at least one channel's search found a clear
+        // minimum; a channel that did not is left at unity by bestScale.
+        val confident = red.confident || blue.confident
+        return Scale(red = red.scale, blue = blue.scale, confident = confident)
+    }
+
+    /** One channel's search: the scale, and whether the search believed it. */
+    private class Found(val scale: Float, val confident: Boolean)
+
+    /** A 3x3 box blur of every channel, clamped at the border, for the search alone. */
+    internal fun boxBlur(pixels: IntArray, width: Int, height: Int): IntArray {
+        val out = IntArray(width * height)
+        for (y in 0 until height) {
+            val y0 = maxOf(0, y - 1)
+            val y1 = minOf(height - 1, y + 1)
+            for (x in 0 until width) {
+                val x0 = maxOf(0, x - 1)
+                val x1 = minOf(width - 1, x + 1)
+                var r = 0; var g = 0; var b = 0; var n = 0
+                for (yy in y0..y1) for (xx in x0..x1) {
+                    val p = pixels[yy * width + xx]
+                    r += (p shr 16) and 0xFF
+                    g += (p shr 8) and 0xFF
+                    b += p and 0xFF
+                    n++
+                }
+                out[y * width + x] = (0xFF shl 24) or ((r / n) shl 16) or ((g / n) shl 8) or (b / n)
+            }
+        }
+        return out
     }
 
     private const val SHIFT_RED = 16
@@ -174,7 +236,7 @@ object ChromaticAberration {
         cy: Float,
         edges: IntArray,
         shift: Int,
-    ): Float {
+    ): Found {
         // Each candidate is an independent sweep over the same sample set, so
         // the costs are computed in parallel and compared afterwards. Written
         // into a per-candidate slot rather than reduced under a lock: the
@@ -197,7 +259,15 @@ object ChromaticAberration {
                 bestScale = scaleAt(step)
             }
         }
-        return bestScale
+        // Against unity: the odd step count puts 1.0 exactly at the middle.
+        // And not at the search's own limit: a real lens sits well inside it,
+        // and a minimum on the boundary is a search that wanted to keep going
+        // -- which on a real fringe it never does, and on noise it always does.
+        val unity = costs[(SEARCH_STEPS - 1) / 2]
+        if (bestScale == 1f) return Found(1f, true)
+        if (unity <= 0f || bestCost > unity * (1f - MIN_IMPROVEMENT)) return Found(1f, false)
+        if (kotlin.math.abs(bestScale - 1f) >= MAX_SCALE_DEVIATION * 0.999f) return Found(1f, false)
+        return Found(bestScale, true)
     }
 
     /** The candidate scale at [step], spanning the allowed deviation either way. */

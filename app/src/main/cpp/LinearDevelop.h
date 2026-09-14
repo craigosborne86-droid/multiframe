@@ -51,6 +51,11 @@ struct Params {
     float sharpenAmount = 0.55f;
     float sharpenThreshold = 3.5f;
     float sharpenMaxShift = 28.0f;
+
+    /** Chrominance smoothing before the sharpen; amount <= 0 disables. Mirrors ChromaSmooth.kt. */
+    int chromaRadius = 2;
+    float chromaSigma = 12.0f;
+    float chromaAmount = 1.0f;
 };
 
 /** Stage timings and the exposure that was used, for the log and the tests. */

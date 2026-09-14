@@ -231,17 +231,41 @@ long MosaicCanvas::accumulateFull(const uint8_t* rgba, int tileWidth, int tileHe
             const float weight = mask.weight(edge);
             if (weight <= 0.0f) continue;
 
-            const int ix = static_cast<int>(sx);
-            const int iy = static_cast<int>(sy);
-            const float fx = static_cast<float>(sx) - ix;
-            const float fy = static_cast<float>(sy) - iy;
-            const int ix1 = std::min(ix + 1, tileWidth - 1);
-            const int iy1 = std::min(iy + 1, tileHeight - 1);
-
-            const uint8_t* p00 = rgba + static_cast<size_t>(iy) * tileStride + ix * 4;
-            const uint8_t* p10 = rgba + static_cast<size_t>(iy) * tileStride + ix1 * 4;
-            const uint8_t* p01 = rgba + static_cast<size_t>(iy1) * tileStride + ix * 4;
-            const uint8_t* p11 = rgba + static_cast<size_t>(iy1) * tileStride + ix1 * 4;
+            // Four bilinear samples a quarter-pixel either side of the point,
+            // averaged -- the tile prefiltered by a half-pixel box, then read
+            // bilinearly. Not for softness: for the noise. A projected sample
+            // almost never lands on a tile pixel centre, and where it does a
+            // plain bilinear read carries that pixel's whole noise, while a
+            // quarter-pixel away it averages two or four and carries half or
+            // a quarter of it. On a noisy tile that is a periodic modulation
+            // of the grain's variance at the beat between the tile's grid and
+            // the canvas's -- the field test's "4K TV screen" mesh over every
+            // dark tile. Spread over four sub-samples the variance is nearly
+            // uniform and the mesh is gone; the detail the mosaic exists to
+            // gain is a quarter-pixel wider, which the sharpen already paid.
+            float acc[3] = {0.0f, 0.0f, 0.0f};
+            for (int k = 0; k < 4; ++k) {
+                const double ssx = std::clamp(sx + ((k & 1) ? 0.25 : -0.25), 0.0, tileWidth - 1.0);
+                const double ssy = std::clamp(sy + ((k & 2) ? 0.25 : -0.25), 0.0, tileHeight - 1.0);
+                const int ix = static_cast<int>(ssx);
+                const int iy = static_cast<int>(ssy);
+                const float fx = static_cast<float>(ssx) - ix;
+                const float fy = static_cast<float>(ssy) - iy;
+                const int ix1 = std::min(ix + 1, tileWidth - 1);
+                const int iy1 = std::min(iy + 1, tileHeight - 1);
+                const uint8_t* p00 = rgba + static_cast<size_t>(iy) * tileStride + ix * 4;
+                const uint8_t* p10 = rgba + static_cast<size_t>(iy) * tileStride + ix1 * 4;
+                const uint8_t* p01 = rgba + static_cast<size_t>(iy1) * tileStride + ix * 4;
+                const uint8_t* p11 = rgba + static_cast<size_t>(iy1) * tileStride + ix1 * 4;
+                for (int c = 0; c < 3; ++c) {
+                    // Bilinear, because the projected sample almost never lands
+                    // on a tile pixel centre. Nearest neighbour here would undo
+                    // the resolution the mosaic exists to gain.
+                    const float top = p00[c] * (1.0f - fx) + p10[c] * fx;
+                    const float bottom = p01[c] * (1.0f - fx) + p11[c] * fx;
+                    acc[c] += top * (1.0f - fy) + bottom * fy;
+                }
+            }
 
             uint16_t* px = row + static_cast<size_t>(x) * kChannels;
             const float accumulated = decodeWeight(px[3]);
@@ -249,12 +273,7 @@ long MosaicCanvas::accumulateFull(const uint8_t* rgba, int tileWidth, int tileHe
             if (total <= 0.0f) continue;
 
             for (int c = 0; c < 3; ++c) {
-                // Bilinear, because the projected sample almost never lands on
-                // a tile pixel centre. Nearest neighbour here would undo the
-                // resolution the mosaic exists to gain.
-                const float top = p00[c] * (1.0f - fx) + p10[c] * fx;
-                const float bottom = p01[c] * (1.0f - fx) + p11[c] * fx;
-                const float sample = (top * (1.0f - fy) + bottom * fy) * 257.0f;
+                const float sample = acc[c] * (0.25f * 257.0f);
 
                 // Running weighted mean: no separate sum to overflow, and the
                 // canvas stays at eight bytes per pixel instead of sixteen.

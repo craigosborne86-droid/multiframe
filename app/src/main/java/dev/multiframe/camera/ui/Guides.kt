@@ -247,7 +247,7 @@ fun Peaking(
  *
  * Drawn over the viewfinder, which during a mosaic shows the telephoto. The
  * outline is the canvas -- the whole photograph -- projected into the current
- * frame by the frame's registration, so the user sees how much of the scene
+ * frame from the phone's attitude, so the user sees how much of the scene
  * the mosaic will cover and where the frame they are looking at sits in it;
  * before the anchor it is drawn as the anchor would place it, centred. Each
  * dot is a node of the plan, projected the same way, so it sits on the part
@@ -256,29 +256,52 @@ fun Peaking(
  * edge of the frame is drawn at the edge, pointing the way. The reticle is
  * fixed at the centre.
  *
- * ### The locking ring
+ * ### One target at a time
  *
- * The stability gate wants a hold: still, inside the radius, for the settle
- * time. The ring around the locking dot is that hold made visible -- an arc
- * that fills as the time runs and empties the moment the gate reads a drift
- * or a turn, so the user sees what steady means before the burst is taken
- * rather than after. Fires green when it closes.
+ * Four identical dots at once asked the user which to go to, and a choice
+ * is a hesitation. The guide names one [MosaicGuideView.activeNode]; it is
+ * the only dot drawn as a target, with a ring, and when it is off the reticle
+ * an arrow from the reticle's edge points the way to it. The nodes already
+ * taken are dim checkmarks -- done, and out of the way. The nodes still to
+ * come are faint dots, present so the shape of the picture is legible and
+ * nothing more.
+ *
+ * ### The capture sequence
+ *
+ * The reticle arrives on the active dot; the ring around it fills over the
+ * hold -- the stability gate made visible, an arc that empties the moment
+ * the gate reads a drift or a turn; it closes, the burst is in hand and the
+ * haptic fires; and for [MosaicGuide.LATCH_MILLIS] a pulse expands from the
+ * reticle -- the latch, the tile taken -- while the arrow turns toward the
+ * next target. The pulse is driven by the view's [MosaicGuideView.latch],
+ * which the runner advances every poll, so it needs no animation clock of
+ * its own.
+ *
+ * ### The preview's zoom
+ *
+ * The dots are computed on the sensor's frame, and the raw stream is never
+ * cropped by a digital zoom -- but the preview is. A preview zoomed by z
+ * shows the middle 1/z of the frame, so a sensor fraction f lands on the
+ * preview at `0.5 + (f - 0.5) * z`; drawn without that, a dot moves slower
+ * than the scene behind it by the zoom, and reads as a target that slides.
+ * [previewZoom] is the stream's own ratio.
  *
  * ### Colour, and the rule it bends
  *
- * The palette rule is that nothing coloured sits on the photograph, with two
+ * The palette rule is that nothing coloured sits on the photograph, with
  * documented exceptions for transient states of the photograph itself. This
- * is the third, and `Ink.Confirm`'s own comment names it: mosaic tile
- * guidance. A dot reads muted while it is only a place, amber as the reticle
+ * is one, and `Ink.Confirm`'s own comment names it: Super Res tile guidance.
+ * The active dot reads bone while it is only a place, amber as the reticle
  * closes on it -- a live reading of distance, which is what amber is for --
- * solid green once its tile is on the canvas, and red for a beat when a
- * capture there failed. Nothing here persists past the mosaic.
+ * a green check once its tile is taken, and red for a beat when a capture
+ * there failed. Nothing here persists past the capture.
  */
 @Composable
 fun MosaicGuidance(
     view: dev.multiframe.camera.pipeline.MosaicGuideView,
     sensorOrientation: Int,
     modifier: Modifier = Modifier,
+    previewZoom: Float = 1f,
 ) {
     Canvas(modifier = modifier) {
         val w = size.width
@@ -289,17 +312,20 @@ fun MosaicGuidance(
         val stroke = 2.dp.toPx()
         val hair = 1.dp.toPx()
         val margin = 18.dp.toPx()
+        val zoom = previewZoom.coerceAtLeast(1f)
 
         fun display(fx: Float, fy: Float): Offset {
             val (dx, dy) = dev.multiframe.camera.pipeline.TouchFocus.toDisplayPoint(fx, fy, sensorOrientation)
-            return Offset(dx * w, dy * h)
+            // Through the preview's zoom: the picture on screen is the middle
+            // 1/zoom of the frame the dots were computed on.
+            return Offset((0.5f + (dx - 0.5f) * zoom) * w, (0.5f + (dy - 0.5f) * zoom) * h)
         }
 
-        // The outline of the photograph. A quadrilateral, since the frame's
-        // registration is a homography; drawn in the guide's faint ink, and
-        // the canvas clips whatever lies beyond the view -- which for a 2x2
-        // is most of it, and that is the point: the picture is bigger than
-        // the frame.
+        // The outline of the photograph. A quadrilateral, since the attitude's
+        // projection of the plane is a homography; drawn in the guide's faint
+        // ink, and the canvas clips whatever lies beyond the view -- which for
+        // a 2x2 is most of it, and that is the point: the picture is bigger
+        // than the frame.
         view.canvasCorners?.let { corners ->
             val pts = corners.map { (fx, fy) -> display(fx, fy) }
             for (i in pts.indices) {
@@ -335,6 +361,19 @@ fun MosaicGuidance(
         drawLine(Ink.GuideBright, Offset(cx, cy + gap), Offset(cx, cy + arm), stroke)
         drawCircle(Ink.GuideBright, radius = ring, center = Offset(cx, cy), style = Stroke(stroke))
 
+        // The latch: a pulse from the reticle, where the tile was just taken,
+        // expanding and fading over its beat.
+        if (view.latch in 0f..1f) {
+            val t = view.latch
+            val alpha = 1f - t
+            drawCircle(
+                Ink.Confirm.copy(alpha = alpha),
+                radius = ring + (lockRing * 1.6f - ring) * t,
+                center = Offset(cx, cy),
+                style = Stroke(stroke * (2f - t)),
+            )
+        }
+
         for (node in view.nodes) {
             val fx = node.frameX
             val fy = node.frameY
@@ -352,10 +391,16 @@ fun MosaicGuidance(
             val y = raw.y.coerceIn(margin, h - margin)
             val offFrame = raw.x != x || raw.y != y
             val centre = Offset(x, y)
+            val active = node.node.index == view.activeNode
 
             when (node.state) {
                 dev.multiframe.camera.pipeline.MosaicGuide.NodeState.DONE -> {
-                    drawCircle(Ink.Confirm, radius = dot, center = centre)
+                    // Done: a dim check, out of the way.
+                    val tick = Ink.Confirm.copy(alpha = 0.55f)
+                    drawCircle(tick, radius = dot * 0.9f, center = centre, style = Stroke(hair * 1.5f))
+                    val s = dot * 0.9f
+                    drawLine(tick, Offset(x - s * 0.5f, y), Offset(x - s * 0.1f, y + s * 0.4f), stroke)
+                    drawLine(tick, Offset(x - s * 0.1f, y + s * 0.4f), Offset(x + s * 0.55f, y - s * 0.4f), stroke)
                 }
                 dev.multiframe.camera.pipeline.MosaicGuide.NodeState.LOCKING -> {
                     // The hold: an arc that fills, in amber while the gate is
@@ -386,11 +431,33 @@ fun MosaicGuidance(
                     drawCircle(Ink.Danger, radius = ring, center = centre, style = Stroke(stroke))
                 }
                 dev.multiframe.camera.pipeline.MosaicGuide.NodeState.PENDING -> {
-                    drawCircle(
-                        if (offFrame) Ink.GuideMid else Ink.GuideBright,
-                        radius = dot * 0.6f, center = centre,
-                    )
-                    drawCircle(Ink.GuideMid, radius = ring, center = centre, style = Stroke(stroke * 0.5f))
+                    if (active) {
+                        // The target: a bone dot with its ring, and an arrow to
+                        // it from the reticle when it is not under the reticle.
+                        drawCircle(if (offFrame) Ink.GuideBright else Ink.Bone, radius = dot * 0.6f, center = centre)
+                        drawCircle(Ink.GuideBright, radius = ring, center = centre, style = Stroke(stroke * 0.75f))
+                        val dx = raw.x - cx
+                        val dy = raw.y - cy
+                        val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+                        if (dist > ring * 3f) {
+                            val ux = dx / dist
+                            val uy = dy / dist
+                            val from = Offset(cx + ux * (ring + 6.dp.toPx()), cy + uy * (ring + 6.dp.toPx()))
+                            val length = 34.dp.toPx()
+                            val to = Offset(from.x + ux * length, from.y + uy * length)
+                            drawLine(Ink.GuideBright, from, to, stroke)
+                            // The head: two short strokes back from the tip.
+                            val head = 9.dp.toPx()
+                            val px = -uy
+                            val py = ux
+                            drawLine(Ink.GuideBright, to, Offset(to.x - ux * head + px * head * 0.6f, to.y - uy * head + py * head * 0.6f), stroke)
+                            drawLine(Ink.GuideBright, to, Offset(to.x - ux * head - px * head * 0.6f, to.y - uy * head - py * head * 0.6f), stroke)
+                        }
+                    } else {
+                        // Still to come: faint, so the shape of the picture is
+                        // legible and nothing competes with the target.
+                        drawCircle(Ink.GuideMid, radius = dot * 0.45f, center = centre)
+                    }
                 }
             }
         }

@@ -46,6 +46,18 @@ import kotlin.math.sqrt
  * satisfied the clock. Every tile was smeared. The radius says where the
  * reticle is; only speed says whether the frame will be sharp. The radius is
  * PRD §2.3.3's 5% of the frame.
+ *
+ * ### One target at a time
+ *
+ * The nodes are taken in a fixed [order] -- the rows top to bottom, each row
+ * the other way from the last, so the reticle never has to cross the canvas
+ * to reach the next one: top-left, top-right, bottom-right, bottom-left on
+ * a 2x2. Only the [activeNode], the first in that order still to be taken,
+ * can be approached or locked; the rest are pending in the plain sense and
+ * are drawn faint. Four undifferentiated dots asked the user to choose, and
+ * a choice is a hesitation; one dot and an arrow to it is a path. A node
+ * whose tile failed goes back into the order where it was and becomes active
+ * again in its turn.
  */
 class MosaicGuide(
     val plan: MosaicPlan,
@@ -122,6 +134,18 @@ class MosaicGuide(
 
     private val states = Array(plan.nodes.size) { NodeState.PENDING }
     private val rejectedUntil = LongArray(plan.nodes.size)
+
+    /** The order the nodes are taken in: a serpentine over the rows. */
+    val order: List<Int> = serpentine(plan)
+
+    /** When the last node was taken, for the latch the screen draws; zero before any was. */
+    var lastCapturedAt: Long = 0L
+        private set
+
+    /** The node last taken, for the latch; -1 before any was. */
+    var lastCapturedNode: Int = -1
+        private set
+
     private var lockingNode = -1
     private var lockingSince = 0L
     private var steadyPolls = 0
@@ -169,6 +193,14 @@ class MosaicGuide(
     fun nearestPending(x: Float, y: Float): MosaicNode? =
         plan.nodes.filter { states[it.index] != NodeState.DONE && states[it.index] != NodeState.CAPTURING }
             .minByOrNull { distance(it, x, y) }
+
+    /**
+     * The one node the reticle should be taken to now: the first in [order]
+     * that is not done and not being taken. Null when every node is.
+     */
+    val activeNode: MosaicNode?
+        get() = order.map { plan.nodes[it] }
+            .firstOrNull { states[it.index] != NodeState.DONE && states[it.index] != NodeState.CAPTURING }
 
     private fun distance(node: MosaicNode, x: Float, y: Float): Float {
         val dx = node.canvasX - x
@@ -226,13 +258,12 @@ class MosaicGuide(
         lastY = reticleY
         lastNow = nowMillis
 
-        // Every pending node's state follows from its distance; only one can
-        // be locking, and it is the nearest. One radius, in and out: a version
-        // let a locking node keep its lock out to one and a half radii, so a
-        // tremor over the edge would not restart the hold, and with the dot
-        // drawn at the reticle it read as a target that moved. The radius is
-        // the radius.
-        val nearest = nearestPending(reticleX, reticleY)
+        // Only the active node -- the next in the order -- can be approached
+        // or locked; every other pending node stays pending. One radius, in
+        // and out: a version let a locking node keep its lock out to one and
+        // a half radii, so a tremor over the edge would not restart the hold,
+        // and with the dot drawn at the reticle it read as a target that
+        // moved. The radius is the radius.
         for (node in plan.nodes) {
             val s = states[node.index]
             if (s == NodeState.DONE || s == NodeState.CAPTURING) continue
@@ -240,17 +271,20 @@ class MosaicGuide(
                 // A rejected node reads as such for a beat -- long enough to
                 // be seen and felt -- then is pending again.
                 if (nowMillis < rejectedUntil[node.index]) continue
-                states[node.index] = NodeState.PENDING
             }
-            val d = distance(node, reticleX, reticleY)
-            states[node.index] = when {
-                node === nearest && d <= lockRadius -> NodeState.LOCKING
+            states[node.index] = NodeState.PENDING
+        }
+        val active = activeNode?.takeIf { states[it.index] == NodeState.PENDING }
+        if (active != null) {
+            val d = distance(active, reticleX, reticleY)
+            states[active.index] = when {
+                d <= lockRadius -> NodeState.LOCKING
                 d <= lockRadius * NEAR_MULTIPLE -> NodeState.NEAR
                 else -> NodeState.PENDING
             }
         }
 
-        val locking = nearest?.takeIf { states[it.index] == NodeState.LOCKING }
+        val locking = active?.takeIf { states[it.index] == NodeState.LOCKING }
         if (locking == null) {
             clearLocking()
             return if (tooFast) Decision.TooFast else Decision.Idle
@@ -281,10 +315,12 @@ class MosaicGuide(
         return Decision.Idle
     }
 
-    /** The burst at [node] was captured and composited. */
-    fun captured(node: MosaicNode) {
+    /** The burst at [node] is in hand: the node is done, and the latch is struck. */
+    fun captured(node: MosaicNode, nowMillis: Long = System.currentTimeMillis()) {
         states[node.index] = NodeState.DONE
         if (capturing == node.index) capturing = -1
+        lastCapturedAt = nowMillis
+        lastCapturedNode = node.index
     }
 
     /** The burst at [node] could not be used; the node will be asked for again. */
@@ -309,10 +345,30 @@ class MosaicGuide(
 
         /**
          * Hold this long, still, inside the radius before the burst fires.
-         * Was 250 ms; 170 is what a hand holds without the ring seeming to
-         * stall, and the settle time still stretches to cover the burst.
+         * Was 250 ms, then 170; 150 is the fill the hand reads as deliberate
+         * without seeming to stall, and the settle time still stretches to
+         * cover the burst (`settleFor`), which on a five-frame burst is what
+         * actually sets it.
          */
-        const val DEFAULT_SETTLE_MILLIS = 170L
+        const val DEFAULT_SETTLE_MILLIS = 150L
+
+        /** How long the latch -- the pulse that says the tile was taken -- is drawn for. */
+        const val LATCH_MILLIS = 150L
+
+        /**
+         * The order the nodes are taken in: rows top to bottom, alternating
+         * direction, so consecutive nodes are always neighbours. Top-left,
+         * top-right, bottom-right, bottom-left on a 2x2.
+         */
+        fun serpentine(plan: MosaicPlan): List<Int> = buildList {
+            for (r in 0 until plan.rows) {
+                val columns = (0 until plan.columns).toList()
+                for (c in if (r % 2 == 0) columns else columns.reversed()) {
+                    val index = r * plan.columns + c
+                    if (index < plan.nodes.size) add(index)
+                }
+            }
+        }
 
         /** The poll interval the still distance is stated at. */
         const val NOMINAL_POLL_MILLIS = 100L
@@ -325,7 +381,7 @@ class MosaicGuide(
          */
         fun settleFor(frames: Int, frameIntervalNs: Long): Long {
             val span = (frames.coerceAtLeast(1) * frameIntervalNs) / 1_000_000L
-            return maxOf(DEFAULT_SETTLE_MILLIS, span + 40L)
+            return maxOf(DEFAULT_SETTLE_MILLIS, span + 33L)
         }
 
         /** How long a failed node reads as failed before it is asked for again. */
