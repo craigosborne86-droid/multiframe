@@ -222,6 +222,10 @@ class LinearDevelopParityTest {
         assertParity(shadingMap(), DevelopParams(exposureGain = 1.7f), "fixed gain")
 
     @Test
+    fun withTheLocalOperatorItAgrees() =
+        assertParity(shadingMap(), DevelopParams(localTone = 0.5f), "local tone")
+
+    @Test
     fun withTheToneOffOnlyTheArithmeticRemains() {
         // No table, no curve: the two should now agree exactly or to one code
         // of -ffast-math drift. Says whether the tone stages are where the

@@ -1233,7 +1233,9 @@ void demosaicAndTone(const float* plane, int width, int height,
                      const int* cfa, const float* m,
                      const ToneParams& tone, const DisplayLut& display,
                      const ShoulderLut& shoulder,
-                     std::atomic<long>* aboveKnee = nullptr) {
+                     std::atomic<long>* aboveKnee = nullptr,
+                     const BilateralGrid* localTone = nullptr,
+                     float localToneStrength = 0.0f) {
     const int w1 = width;
     const int w2 = width * 2;
 
@@ -1293,6 +1295,15 @@ void demosaicAndTone(const float* plane, int width, int height,
             // branches, which is the part that does not want to be a vector.
             auto emitTone = [&](int x, float r, float g, float b) {
                 uint8_t* q = row + static_cast<size_t>(x) * 4;
+                // The local operator, when asked for: the pixel scaled by how
+                // its neighbourhood's brightness stands to the picture's, with
+                // its own detail carried through. Before the global curve, as
+                // REFERENCE.md §3.5 places it. See BilateralGrid in Tone.h.
+                if (localTone != nullptr) {
+                    const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                    const float k = localTone->gain(x, y, lum, localToneStrength);
+                    r *= k; g *= k; b *= k;
+                }
                 if constexpr (Ablation == kToneCensus) {
                     if (std::max(r, std::max(g, b)) > tone.knee) ++overKnee;
                 }
@@ -1685,11 +1696,11 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         jfloat exposureGain, jfloat knee,
         jfloat contrast, jfloat desatStrength, jfloat desatStart, jfloat blackPoint,
         jfloatArray jshading, jint shadingColumns, jint shadingRows,
-        jfloat hotPixelThreshold) {
+        jfloat hotPixelThreshold, jfloat localTone) {
     ensureGammaLut();
 
     // Stage clocks, declared here so they outlive the blocks they are taken in.
-    int64_t tPrepass = 0, tDemosaic = 0;
+    int64_t tPrepass = 0, tDemosaic = 0, tGrid = 0;
 
     // Lens shading, when the camera reported a map for this capture. Raw is
     // defined as uncorrected, so without this every frame carries a stop and a
@@ -1775,13 +1786,54 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     ShoulderLut shoulder;
     buildShoulderLut(shoulder, tone);
 
+    // The bilateral grid, when the local operator is asked for. Built from
+    // the luminance of each 2x2 block of the normalised plane -- the block's
+    // red, the mean of its two greens, its blue, through the matrix and the
+    // gain -- which is the luminance the grid needs at a sixteenth of the
+    // resolution it is stored at, without a demosaic. Mirrors
+    // BilateralGrid.fromFrame in Kotlin, which builds it the same way.
+    tGrid = nowMicros();
+    BilateralGrid grid;
+    const BilateralGrid* gridPtr = nullptr;
+    if (localTone > 0.0f && width >= 2 && height >= 2) {
+        grid.init(width, height);
+        int siteOf[3] = {0, 1, 3};
+        int greens[2] = {1, 2};
+        int ng = 0;
+        for (int site = 0; site < 4; ++site) {
+            if (cfa[site] == 0) siteOf[0] = site;
+            else if (cfa[site] == 2) siteOf[2] = site;
+            else if (ng < 2) greens[ng++] = site;
+        }
+        for (int by = 0; by + 1 < height; by += 2) {
+            const float* r0 = plane.data() + static_cast<size_t>(by) * width;
+            const float* r1 = r0 + width;
+            for (int bx = 0; bx + 1 < width; bx += 2) {
+                auto at = [&](int site) -> float {
+                    const float* rowp = (site >> 1) ? r1 : r0;
+                    return rowp[bx + (site & 1)];
+                };
+                const float rr = at(siteOf[0]);
+                const float gg = 0.5f * (at(greens[0]) + at(greens[1]));
+                const float bb = at(siteOf[2]);
+                const float r = (m[0] * rr + m[1] * gg + m[2] * bb) * tone.exposureGain;
+                const float g = (m[3] * rr + m[4] * gg + m[5] * bb) * tone.exposureGain;
+                const float b = (m[6] * rr + m[7] * gg + m[8] * bb) * tone.exposureGain;
+                grid.splat(bx, by, 0.2126f * r + 0.7152f * g + 0.0722f * b);
+            }
+        }
+        grid.finish();
+        gridPtr = &grid;
+    }
+
     tDemosaic = nowMicros();
     demosaicAndTone<kToneFull>(plane.data(), width, height, dstBase, stride,
-                               cfa, m, tone, display, shoulder);
+                               cfa, m, tone, display, shoulder, nullptr, gridPtr, localTone);
 
     const int64_t tEnd = nowMicros();
-    LOGI("develop: prepass %lldms, demosaic+tone %lldms, total %lldms",
-         (tDemosaic - tPrepass) / 1000, (tEnd - tDemosaic) / 1000, (tEnd - tPrepass) / 1000);
+    LOGI("develop: prepass %lldms, local tone grid %lldms, demosaic+tone %lldms, total %lldms",
+         static_cast<long long>((tGrid - tPrepass) / 1000), static_cast<long long>((tDemosaic - tGrid) / 1000),
+         static_cast<long long>((tEnd - tDemosaic) / 1000), static_cast<long long>((tEnd - tPrepass) / 1000));
 
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;

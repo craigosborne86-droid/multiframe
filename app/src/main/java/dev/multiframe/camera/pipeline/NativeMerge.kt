@@ -65,6 +65,27 @@ class NativeMerge private constructor(
     }
 
     /**
+     * The exposure multiplier the develop would choose for [merged], without
+     * developing it.
+     *
+     * A sweep needs this once, from its anchor, and then holds it: developed
+     * each with its own automatic gain, the tiles of one scene came out at
+     * nine different brightnesses, one per tile's own idea of its highlights,
+     * and the blend was asked to hide differences that were not in the scene.
+     */
+    fun autoExposure(
+        merged: ByteBuffer,
+        color: ColorProfile,
+        params: DevelopParams = DevelopParams(),
+    ): Float {
+        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        return nAutoExposure(
+            merged, width, height, profile.cfaPattern, black, profile.whiteLevel,
+            color.gains, params.highlightPercentile, params.highlightTarget,
+        )
+    }
+
+    /**
      * Develops merged CFA data straight into a Bitmap's pixel store.
      *
      * Both ends are native: the merged buffer is a direct ByteBuffer and the
@@ -100,7 +121,7 @@ class NativeMerge private constructor(
             params.contrast, params.highlightDesaturation,
             params.desaturationStart, params.blackPoint,
             shading?.gains, shading?.columns ?: 0, shading?.rows ?: 0,
-            params.hotPixelThreshold,
+            params.hotPixelThreshold, params.localTone,
         )
         if (!ok) {
             Log.w(TAG, "native develop failed, caller should fall back")
@@ -165,7 +186,7 @@ class NativeMerge private constructor(
         exposureGain: Float, knee: Float,
         contrast: Float, desatStrength: Float, desatStart: Float, blackPoint: Float,
         shading: FloatArray?, shadingColumns: Int, shadingRows: Int,
-        hotPixelThreshold: Float,
+        hotPixelThreshold: Float, localTone: Float,
     ): Boolean
     private external fun nDefringe(
         bitmap: Bitmap, edgeThreshold: Float, tolerance: Float, strength: Float,

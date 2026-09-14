@@ -42,9 +42,21 @@ class MosaicCanvas private constructor(
      * Returns how many canvas pixels the tile reached, which is zero when it
      * falls outside the canvas entirely.
      */
-    fun addTile(tile: Bitmap, transform: Homography, feather: Float = 64f): Long {
+    fun addTile(tile: Bitmap, transform: Homography, feather: Float = 64f): Long =
+        addTile(tile, transform, floatArrayOf(feather, feather, feather))
+
+    /**
+     * The same, blending in bands.
+     *
+     * [feathers] is one ramp width per frequency band, narrowest first, in
+     * tile pixels: fine detail crosses the seam over the first, and the broad
+     * differences between tiles -- exposure, colour -- over the last. See the
+     * note on the blend in Mosaic.cpp, and [BLEND_FEATHERS] for the widths
+     * that ship. On a canvas created with one band only the first is used.
+     */
+    fun addTile(tile: Bitmap, transform: Homography, feathers: FloatArray): Long {
         if (closed) return 0
-        return nAddTile(handle, tile, transform.m, feather)
+        return nAddTile(handle, tile, transform.m, feathers)
     }
 
     /** Fraction of the canvas any tile has covered, for reporting sweep progress. */
@@ -96,9 +108,9 @@ class MosaicCanvas private constructor(
         handle = 0
     }
 
-    private external fun nCreate(width: Int, height: Int): Long
+    private external fun nCreate(width: Int, height: Int, bands: Int): Long
     private external fun nDestroy(h: Long)
-    private external fun nAddTile(h: Long, tile: Bitmap, transform: DoubleArray, feather: Float): Long
+    private external fun nAddTile(h: Long, tile: Bitmap, transform: DoubleArray, feathers: FloatArray): Long
     private external fun nCoverage(h: Long): Float
     private external fun nRenderInto(h: Long, bitmap: Bitmap): Boolean
     private external fun nCompressTo(h: Long, fd: Int, quality: Int): Long
@@ -112,15 +124,33 @@ class MosaicCanvas private constructor(
          */
         const val QUALITY = 95
 
+        /** Frequency bands the blend keeps apart; see Mosaic.cpp. One is the old single feather. */
+        const val BANDS = 3
+
+        /**
+         * The feathers that ship, narrowest first, in tile pixels.
+         *
+         * Twenty-four pixels for the detail band's ramp, which takes the
+         * tile's outermost pixels to nothing so a registration error at its
+         * border is hidden; the detail band's *mask* is that ramp times a
+         * steep hand-off on depth into the tile, so that across an overlap
+         * the deeper tile owns the texture rather than the two being
+         * averaged into a double image -- see `Mask` in Mosaic.h. A hundred
+         * and sixty for the middle band and six hundred for the broadest,
+         * which is most of a 35% overlap on a 4080-wide tile: an exposure
+         * step between two tiles is spread across the width of the overlap.
+         */
+        val BLEND_FEATHERS = floatArrayOf(24f, 160f, 600f)
+
         /**
          * Allocates a canvas, or null when the device cannot afford one.
          *
          * Null is a real answer rather than a failure: the plan can be redrawn
          * against a smaller cap and offered again.
          */
-        fun create(width: Int, height: Int): MosaicCanvas? {
+        fun create(width: Int, height: Int, bands: Int = BANDS): MosaicCanvas? {
             if (!NativeMerge.isAvailable()) return null
-            val h = MosaicCanvas(0L, width, height).nCreate(width, height)
+            val h = MosaicCanvas(0L, width, height).nCreate(width, height, bands)
             if (h == 0L) {
                 Log.w(TAG, "mosaic canvas ${width}x$height could not be allocated")
                 return null

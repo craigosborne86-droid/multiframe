@@ -165,4 +165,31 @@ class TouchFocusTest {
         val cropped = crop.width.toFloat() / crop.height
         assertThat(cropped).isWithin(0.01f).of(original)
     }
+
+    @Test
+    fun `the display mapping inverts the sensor mapping in every orientation`() {
+        val crop = SensorRect(0, 0, 1000, 1000)
+        for (orientation in intArrayOf(0, 90, 180, 270)) {
+            for ((x, y) in listOf(0.2f to 0.7f, 0.5f to 0.5f, 0.9f to 0.1f)) {
+                val (sx, sy) = TouchFocus.toSensorPoint(x, y, orientation, crop)
+                val (dx, dy) = TouchFocus.toDisplayPoint(sx / 1000f, sy / 1000f, orientation)
+                assertThat(dx).isWithin(0.002f).of(x)
+                assertThat(dy).isWithin(0.002f).of(y)
+            }
+        }
+    }
+
+    @Test
+    fun `the sensor's x axis runs down a portrait view`() {
+        // The usual phone: sensor rotated 90 degrees. toSensorPoint sends the
+        // top of the upright image to the sensor's x = 0 (the test above pins
+        // that, and touch focus on the phone confirms it), so the far end of
+        // the sensor's x axis is the bottom of the picture as the user sees it.
+        val (dx, dy) = TouchFocus.toDisplayPoint(1f, 0.5f, 90)
+        assertThat(dy).isWithin(1e-6f).of(1f)
+        assertThat(dx).isWithin(1e-6f).of(0.5f)
+        val (tx, ty) = TouchFocus.toDisplayPoint(0f, 0.5f, 90)
+        assertThat(ty).isWithin(1e-6f).of(0f)
+        assertThat(tx).isWithin(1e-6f).of(0.5f)
+    }
 }

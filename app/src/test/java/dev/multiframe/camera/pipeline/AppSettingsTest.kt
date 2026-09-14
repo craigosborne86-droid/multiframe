@@ -245,6 +245,26 @@ class AppSettingsTest {
     }
 
     @Test
+    fun `the sweep preset survives a round trip and an unknown name falls back`() {
+        assertThat(AppSettings().sweepPreset).isEqualTo(SweepPreset.DETAIL_BOOST)
+        val large = AppSettings(sweepPreset = SweepPreset.LARGE_FORMAT)
+        assertThat(AppSettings.decode(large.encode()).sweepPreset).isEqualTo(SweepPreset.LARGE_FORMAT)
+        assertThat(AppSettings.decode(mapOf(AppSettings.KEY_SWEEP_PRESET to "7x7")).sweepPreset)
+            .isEqualTo(SweepPreset.DETAIL_BOOST)
+    }
+
+    @Test
+    fun `local tone is off out of the box, survives a round trip, and sets the develop`() {
+        assertThat(AppSettings().localTone).isFalse()
+        assertThat(AppSettings().developParams.localTone).isEqualTo(0f)
+        val on = AppSettings(localTone = true)
+        assertThat(AppSettings.decode(on.encode()).localTone).isTrue()
+        assertThat(on.developParams.localTone).isEqualTo(DevelopParams.LOCAL_TONE_ON)
+        assertThat(DevelopParams.LOCAL_TONE_ON).isGreaterThan(0f)
+        assertThat(DevelopParams.LOCAL_TONE_ON).isAtMost(1f)
+    }
+
+    @Test
     fun `reconciling settings that are already valid changes nothing`() {
         val fine = AppSettings(
             manual = ManualSettings(

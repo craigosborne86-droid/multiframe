@@ -27,6 +27,8 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.AndroidExternalSurface
 import androidx.compose.foundation.AndroidExternalSurfaceZOrder
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.border
@@ -39,6 +41,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
@@ -74,11 +77,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -107,10 +112,14 @@ import dev.multiframe.camera.pipeline.LensProfiles
 import dev.multiframe.camera.pipeline.MemoryPressure
 import dev.multiframe.camera.pipeline.NativeMerge
 import dev.multiframe.camera.pipeline.PressureResponse
+import dev.multiframe.camera.pipeline.DevelopParams
+import dev.multiframe.camera.pipeline.GuidedSweep
+import dev.multiframe.camera.pipeline.GuidedSweepView
 import dev.multiframe.camera.pipeline.MosaicCapture
 import dev.multiframe.camera.pipeline.MosaicPlanner
-import dev.multiframe.camera.pipeline.MosaicProgress
 import dev.multiframe.camera.pipeline.MosaicSession
+import dev.multiframe.camera.pipeline.SweepEvent
+import dev.multiframe.camera.pipeline.SweepPreset
 import dev.multiframe.camera.pipeline.ImageSaver
 import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.MemoryBudget
@@ -143,7 +152,7 @@ import dev.multiframe.camera.ui.GalleryScreen
 import dev.multiframe.camera.ui.GuideMode
 import dev.multiframe.camera.ui.Guides
 import dev.multiframe.camera.ui.Peaking
-import dev.multiframe.camera.ui.SweepMap
+import dev.multiframe.camera.ui.SweepGuidance
 import dev.multiframe.camera.ui.ControlsPanel
 import dev.multiframe.camera.ui.ActionStrip
 import dev.multiframe.camera.ui.ControlBar
@@ -243,6 +252,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var guardPull by remember { mutableFloatStateOf(0f) }
     var dcgEnabled by remember { mutableStateOf(restored.dcgEnabled) }
     var superRes by remember { mutableStateOf(restored.superRes) }
+    var localTone by remember { mutableStateOf(restored.localTone) }
     var outputFormat by remember { mutableStateOf(restored.outputFormat) }
 
     // What the user is photographing. The right settings for a night scene and
@@ -274,13 +284,16 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
     // Telephoto mosaic: cover this framing with a longer lens's detail.
     var sweepRequested by remember { mutableStateOf(false) }
-    var sweepProgress by remember { mutableStateOf<MosaicProgress?>(null) }
-    // Read off the session rather than carried on MosaicProgress: an array
-    // inside a data class compares by identity, which would quietly make every
-    // progress update unequal to the last one for every other reader of it.
-    var sweepGrid by remember { mutableStateOf<Array<BooleanArray>?>(null) }
-    var sweepAspect by remember { mutableFloatStateOf(1f) }
+    var sweepView by remember { mutableStateOf<GuidedSweepView?>(null) }
     var sweepTargetLens by remember { mutableStateOf<Lens?>(null) }
+    var sweepPreset by remember { mutableStateOf(restored.sweepPreset) }
+    // The custom preset's region, as fractions of the wide frame, drawn by
+    // the user before the sweep; null until they have drawn one.
+    var customRegion by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+    var drawingRegion by remember { mutableStateOf(false) }
+    var regionDrag by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
+    // A failed capture flashes its dot for a beat; this is the beat.
+    var sweepFlashUntil by remember { mutableLongStateOf(0L) }
 
     // Composition aids. One control cycles them rather than several toggles.
     var guides by remember {
@@ -978,11 +991,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         val target = sweepTargetLens ?: return@LaunchedEffect
         if (stream.lensId != lens?.cameraId) return@LaunchedEffect
 
-        val plan = MosaicPlanner.plan(
+        val plan = MosaicPlanner.planPreset(
+            preset = sweepPreset,
             target = target,
             capture = stream.lens,
             tileWidth = stream.config.width,
             tileHeight = stream.config.height,
+            customRegion = customRegion,
         )
         if (plan == null) {
             status = "no useful mosaic for this pair of lenses"
@@ -997,23 +1012,49 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             return@LaunchedEffect
         }
 
-        // The map is drawn at the shape of the canvas being built, not the
-        // shape of the viewfinder, which during a sweep is the telephoto's.
-        sweepAspect = plan.canvasWidth.toFloat() / plan.canvasHeight
-
         busy = true
-        status = "sweep: pan slowly across the scene"
+        status = "aim at the centre of the picture to begin"
+        val sweep = GuidedSweep(plan)
         val result = withContext(Dispatchers.Default) {
             session.use {
                 MosaicCapture.run(
                     context = context,
                     stream = stream,
                     session = it,
+                    sweep = sweep,
                     settings = settings,
                     caps = c,
-                    onProgress = { p ->
-                        sweepProgress = p
-                        sweepGrid = it.coverageGrid()
+                    frames = burstFrames,
+                    lensProfile = lensProfiles[stream.lensId],
+                    onView = { v -> sweepView = v },
+                    onEvent = { event ->
+                        // Haptics from the main thread, and only after the
+                        // frames a haptic could blur have already been taken:
+                        // Locked fires once the burst is snapshotted from the
+                        // ring, not before.
+                        scope.launch {
+                            when (event) {
+                                is SweepEvent.Anchored -> {
+                                    Haptics.segment(view)
+                                    status = "pan the reticle onto each dot and hold"
+                                }
+                                is SweepEvent.Locked -> Haptics.confirm(view)
+                                is SweepEvent.Captured -> Haptics.tick(view)
+                                is SweepEvent.Rejected -> {
+                                    Haptics.reject(view)
+                                    sweepFlashUntil = System.currentTimeMillis() + 600
+                                    status = "tile ${event.node.index + 1}: ${event.reason}"
+                                }
+                                is SweepEvent.TooFast -> {
+                                    val now = System.currentTimeMillis()
+                                    if (now > sweepFlashUntil) {
+                                        Haptics.reject(view)
+                                        sweepFlashUntil = now + 800
+                                    }
+                                }
+                                is SweepEvent.Complete -> Haptics.confirm(view)
+                            }
+                        }
                     },
                     shouldContinue = { sweepRequested },
                 )
@@ -1023,8 +1064,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         status = "%s  %.0f MP  %.1fs".format(
             result.message, result.megapixels, result.elapsedMillis / 1000.0,
         )
-        sweepProgress = null
-        sweepGrid = null
+        sweepView = null
         sweepRequested = false
         // Back to the framing the user was composing with.
         lens = target
@@ -1036,7 +1076,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(
         settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, captureMode,
-        timerSeconds, guides, dcgEnabled, superRes, outputFormat,
+        timerSeconds, guides, dcgEnabled, superRes, sweepPreset, localTone, outputFormat,
     ) {
         AppSettings.save(
             context,
@@ -1052,6 +1092,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 guides = guides.name,
                 dcgEnabled = dcgEnabled,
                 superRes = superRes,
+                sweepPreset = sweepPreset,
+                localTone = localTone,
                 outputFormat = outputFormat,
             ),
         )
@@ -1309,11 +1351,22 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 ControlBar.SWEEP -> {
                     if (sweepRequested) {
                         sweepRequested = false
+                    } else if (drawingRegion) {
+                        drawingRegion = false
+                        status = "region cancelled"
                     } else if (sweepPlan != null) {
-                        sweepTargetLens = lens
-                        lens = sweepPlan.captureLens
-                        sweepRequested = true
-                        status = "switching to ${sweepPlan.captureLens.label}…"
+                        if (sweepPreset == SweepPreset.CUSTOM && customRegion == null) {
+                            // The custom grid is sized from a rectangle the
+                            // user draws on the wide frame; the sweep starts
+                            // when they lift their finger.
+                            drawingRegion = true
+                            status = "drag a box over what the sweep should cover"
+                        } else {
+                            sweepTargetLens = lens
+                            lens = sweepPlan.captureLens
+                            sweepRequested = true
+                            status = "switching to ${sweepPlan.captureLens.label}…"
+                        }
                     }
                 }
 
@@ -1337,6 +1390,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 rotationDegrees = caps?.let {
                                     orientation.captureRotation(it.sensorOrientation)
                                 } ?: 0,
+                                develop = DevelopParams(
+                                    localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
+                                ),
                                 onProgress = { },
                             )
                         }
@@ -1511,6 +1567,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         // a property of the ZSL burst.
                         superRes = if (caps?.supportsSuperRes == true && zslStream != null) superRes else null,
                         onSuperRes = { if (!busy) superRes = it },
+                        // Only where there is a longer lens to sweep with.
+                        sweepPreset = if (sweepPlan != null) sweepPreset else null,
+                        onSweepPreset = {
+                            if (!busy) {
+                                sweepPreset = it
+                                // A new preset means a new region to draw.
+                                if (it == SweepPreset.CUSTOM) customRegion = null
+                            }
+                        },
+                        localTone = localTone,
+                        onLocalTone = { if (!busy) localTone = it },
                         outputFormat = if (HeifEncoder.isAvailable) outputFormat else null,
                         onOutputFormat = { if (!busy) outputFormat = it },
                         onReset = {
@@ -1529,6 +1596,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             abMode = false
                             dcgEnabled = fresh.dcgEnabled
                             superRes = fresh.superRes
+                            sweepPreset = fresh.sweepPreset
+                            customRegion = null
+                            localTone = fresh.localTone
                             outputFormat = fresh.outputFormat
                             status = "settings reset"
                         },
@@ -1630,6 +1700,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                             lensProfile = lensProfiles[stream.lensId],
                                             outputFormat = outputFormat,
                                             superRes = superRes && caps?.supportsSuperRes == true,
+                                            develop = DevelopParams(
+                                                localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
+                                            ),
                                         )
                                     }
                                     Log.i(TAG, "ZSL result: $r")
@@ -1746,49 +1819,117 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 .padding(end = 16.dp),
         )
 
-        sweepProgress?.let { progress ->
-            // The sweep is the one moment this app takes the screen over, so
-            // it gets a surface rather than a wash: at 0xAA of black over a
-            // sunlit street the numbers were competing with the photograph
-            // they were reporting on. Same ground, edge and radius as the
-            // manual panel, because it is the same kind of thing.
-            Column(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .background(Ink.Panel, RoundedCornerShape(20.dp))
-                    .border(1.dp, Ink.Hairline, RoundedCornerShape(20.dp))
-                    .padding(horizontal = 22.dp, vertical = 20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                sweepGrid?.let { grid ->
-                    SweepMap(
-                        grid = grid,
-                        aspect = sweepAspect,
-                        modifier = Modifier
-                            .width(140.dp)
-                            .padding(bottom = 16.dp),
-                    )
-                }
-                // The number is the reading and takes the accent; the noun is
-                // not, and does not. Same rule as every other value here.
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text(text = progress.placed.toString(), style = Type.GaugeLarge)
-                    Text(
-                        text = "tiles",
-                        style = Type.Control,
-                        color = Ink.Muted,
-                        modifier = Modifier.padding(start = 6.dp, bottom = 3.dp),
-                    )
-                }
-                Text(
-                    text = "%.0f%% covered".format(progress.coverage * 100),
-                    style = Type.GaugeBone,
-                    modifier = Modifier.padding(top = 2.dp),
+        sweepView?.let { v ->
+            val orientation = caps?.sensorOrientation ?: 90
+            // The dots and the reticle, over the preview and only the
+            // preview: a dot on a letterbox bar would point at nothing.
+            previewBounds?.let { b ->
+                val density = LocalDensity.current
+                val boundsW = with(density) { b.width.toDp() }
+                val boundsH = with(density) { b.height.toDp() }
+                SweepGuidance(
+                    view = v,
+                    sensorOrientation = orientation,
+                    modifier = Modifier
+                        .offset { IntOffset(b.left.toInt(), b.top.toInt()) }
+                        .size(boundsW, boundsH),
                 )
+            }
+            // The count, small and out of the way at the top. The number is
+            // the reading and takes the accent; the noun is not.
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 72.dp)
+                    .background(Ink.Readout, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                Text(text = "${v.captured}", style = Type.GaugeLarge)
                 Text(
-                    text = "PAN SLOWLY",
+                    text = " of ${v.total} nodes",
+                    style = Type.Control,
+                    color = Ink.Muted,
+                    modifier = Modifier.padding(bottom = 3.dp),
+                )
+                if (!v.located) {
+                    Text(
+                        text = "  ·  FINDING",
+                        style = Type.Label,
+                        color = Ink.Muted,
+                        modifier = Modifier.padding(bottom = 3.dp),
+                    )
+                }
+            }
+        }
+
+        // The custom region, being drawn: a rectangle from the first touch to
+        // the finger, in the guide's own faint ink, and the sweep begins when
+        // the finger lifts.
+        if (drawingRegion) {
+            val bounds = previewBounds
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(bounds) {
+                        detectDragGestures(
+                            onDragStart = { start -> regionDrag = start to start },
+                            onDrag = { change, _ ->
+                                regionDrag = regionDrag?.let { it.first to change.position }
+                            },
+                            onDragEnd = {
+                                val drag = regionDrag
+                                val b = bounds
+                                regionDrag = null
+                                if (drag != null && b != null && b.width > 0f && b.height > 0f) {
+                                    val w = kotlin.math.abs(drag.second.x - drag.first.x) / b.width
+                                    val h = kotlin.math.abs(drag.second.y - drag.first.y) / b.height
+                                    // The region is drawn on the upright
+                                    // display; the plan wants fractions of
+                                    // the sensor's frame, which a quarter
+                                    // turn swaps.
+                                    val swaps = (caps?.sensorOrientation ?: 90) % 180 != 0
+                                    val region = if (swaps) h to w else w to h
+                                    if (region.first > 0.05f && region.second > 0.05f) {
+                                        customRegion = region
+                                        drawingRegion = false
+                                        sweepPlan?.let { plan ->
+                                            sweepTargetLens = lens
+                                            lens = plan.captureLens
+                                            sweepRequested = true
+                                            status = "switching to ${plan.captureLens.label}…"
+                                        }
+                                    } else {
+                                        status = "too small a box; drag a larger one"
+                                    }
+                                }
+                            },
+                            onDragCancel = { regionDrag = null },
+                        )
+                    },
+            ) {
+                regionDrag?.let { (a, b) ->
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val left = minOf(a.x, b.x)
+                        val top = minOf(a.y, b.y)
+                        val w = kotlin.math.abs(b.x - a.x)
+                        val h = kotlin.math.abs(b.y - a.y)
+                        drawRect(
+                            color = Ink.GuideBright,
+                            topLeft = Offset(left, top),
+                            size = androidx.compose.ui.geometry.Size(w, h),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx()),
+                        )
+                    }
+                }
+                Text(
+                    text = "DRAG A BOX",
                     style = Type.Instruction,
-                    modifier = Modifier.padding(top = 14.dp),
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .background(Ink.Readout, RoundedCornerShape(6.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
                 )
             }
         }

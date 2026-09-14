@@ -44,6 +44,9 @@ struct Params {
     float autoPercentile = 0.92f;
     float autoTarget = 0.62f;
 
+    /** The local tone operator's strength, REFERENCE §3.5; zero is off. */
+    float localTone = 0.0f;
+
     /** Capture sharpening; amount <= 0 disables. Mirrors Sharpen.kt. */
     float sharpenAmount = 0.55f;
     float sharpenThreshold = 3.5f;

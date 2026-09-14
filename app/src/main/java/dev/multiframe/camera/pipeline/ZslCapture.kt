@@ -38,6 +38,8 @@ object ZslCapture {
          * the canvas declines.
          */
         superRes: Boolean = false,
+        /** How the JPEG is rendered; the default is the PRD's global rendering. */
+        develop: DevelopParams = DevelopParams(),
         onProgress: (String) -> Unit = {},
     ): RawBurstResult {
         val profile = SensorProfile.from(stream.characteristics)
@@ -212,6 +214,7 @@ object ZslCapture {
                         rotationDegrees = rotationDegrees,
                         captured = captured,
                         lens = stream.lens,
+                        params = develop,
                     )
                 } finally {
                     built.close()
@@ -263,6 +266,7 @@ object ZslCapture {
                 burstSpanMillis = spanMillis,
                 streamStats = statsAfter.toString(),
                 dcgActive = stream.dcg,
+                develop = develop,
             ).copy(superRes = outcome)
         } catch (e: Exception) {
             Log.e(TAG, "ZSL merge failed", e)

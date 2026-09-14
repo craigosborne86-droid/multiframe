@@ -274,4 +274,66 @@ class MosaicAssemblerTest {
         assertThat(origin[0]).isWithin(10f).of(anchor + 120f)
         println("scaled placement: %.1f against an expected %.1f".format(origin[0], anchor + 120f))
     }
+
+    // --- the guided sweep's use of it ------------------------------------
+
+    @Test
+    fun `an anchor is the origin and contributes no coverage`() {
+        val a = assembler()
+        val anchor = a.anchor(window(100, 100))
+        val where = anchor.transform.apply(0f, 0f)
+        assertThat(where[0]).isWithin(2f).of((1400 - tile) / 2f)
+        assertThat(where[1]).isWithin(2f).of((1200 - tile) / 2f)
+        assertThat(a.coverage).isEqualTo(0f)
+        assertThat(a.composited).isEmpty()
+        assertThat(a.anchorIndex).isEqualTo(0)
+    }
+
+    @Test
+    fun `locating a frame says where it is without placing it`() {
+        val a = assembler()
+        a.anchor(window(100, 100))
+
+        val located = a.locate(window(160, 100), proxyScale)
+        assertThat(located).isNotNull()
+        val origin = located!!.transform.apply(0f, 0f)
+        assertThat(origin[0]).isWithin(4f).of((1400 - tile) / 2f + 60f)
+        assertThat(origin[1]).isWithin(4f).of((1200 - tile) / 2f)
+        // Pure: nothing was placed and the same frame locates the same way again.
+        assertThat(a.placed).hasSize(1)
+        assertThat(a.coverage).isEqualTo(0f)
+        val again = a.locate(window(160, 100), proxyScale)!!
+        assertThat(again.transform.apply(0f, 0f)[0]).isWithin(1f).of(origin[0])
+    }
+
+    @Test
+    fun `a located frame can then be placed, and counts`() {
+        val a = assembler()
+        a.anchor(window(100, 100))
+        val frame = window(160, 130)
+        val located = a.locate(frame, proxyScale)!!
+
+        val placed = a.place(frame, located.transform, located.inliers, located.inlierRatio)
+        assertThat(placed).isNotNull()
+        assertThat(a.composited).hasSize(1)
+        assertThat(a.coverage).isGreaterThan(0f)
+        // And a frame further on registers against the placed tile as well as the anchor.
+        val further = a.locate(window(220, 160), proxyScale)
+        assertThat(further).isNotNull()
+        assertThat(further!!.transform.apply(0f, 0f)[0]).isWithin(6f).of((1400 - tile) / 2f + 120f)
+    }
+
+    @Test
+    fun `nothing can be located before there is an anchor`() {
+        val a = assembler()
+        assertThat(a.locate(window(100, 100), proxyScale)).isNull()
+    }
+
+    @Test
+    fun `an unrelated frame cannot be located`() {
+        val a = assembler()
+        a.anchor(window(100, 100))
+        val noise = Plane(tile, tile, ByteArray(tile * tile) { i -> ((i * 7919) % 251).toByte() })
+        assertThat(a.locate(noise, proxyScale)).isNull()
+    }
 }

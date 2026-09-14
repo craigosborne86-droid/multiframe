@@ -84,6 +84,22 @@ object TouchFocus {
     }
 
     /**
+     * The inverse of [toSensorPoint] for a full-frame crop: where a point in
+     * the sensor's own frame, as fractions of its width and height, lands on
+     * the displayed image. The sweep guidance draws its dots with this.
+     */
+    fun toDisplayPoint(
+        sensorX: Float,
+        sensorY: Float,
+        sensorOrientation: Int,
+    ): Pair<Float, Float> = when (((sensorOrientation % 360) + 360) % 360) {
+        90 -> (1f - sensorY) to sensorX
+        180 -> (1f - sensorX) to (1f - sensorY)
+        270 -> sensorY to (1f - sensorX)
+        else -> sensorX to sensorY
+    }
+
+    /**
      * A metering rectangle around a tap, clamped inside the crop region.
      *
      * Clamping rather than centring: a tap near the edge of the frame must

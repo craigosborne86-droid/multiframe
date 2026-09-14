@@ -98,10 +98,11 @@ to tell the user this in the interface rather than let them discover it.
 | RANSAC robust fitting | Done | Recovers exactly with a third of matches poisoned |
 | Corner detection and matching | Done | 8 unit tests, recovers known rotation |
 | Match verification | Done | Brown-Lowe criterion; refuses noise and repeated patterns |
-| Capture planning and geometry | Done | 12 unit tests |
-| Native compositing canvas with feathered blending | Done | 8 device tests; seam step 1/255 |
-| Guided capture map | Done | 3 Compose tests; coverage drawn at canvas shape |
-| Exposure, white balance and focus locking | Done | `lockForSweep`; a device test asserts the stream is handed back |
+| Capture planning and geometry | Done | 12 unit tests; presets 2x2, 3x3 and a drawn region, 7 more |
+| Native compositing canvas, three-band blending | Done | One tile is identical to the byte in one band and three; two tiles a quarter-stop and a pixel apart keep their texture and lose their step (`MosaicBlendDeviceTest`) |
+| Reticle and dot guidance | Done | 10 unit tests on the lock rule against scripted pans; the overlay draws each node where the frame's registration puts it |
+| Burst per node, merged and lens-corrected | Done | The same merge as a shutter press, the Phase 2 optics before the homography |
+| Exposure, white balance, colour and develop gain locking | Done | `lockForSweep`; colour and gain fixed by the anchor, tiles normalised by ISO × exposure |
 | Writing the result out | Done | 3 device tests; compresses from the canvas's own pages |
 
 Every piece of it is built. What has not happened is the part no table can
@@ -109,24 +110,36 @@ record: nobody has swept a real scene with it. The stitching is tested against
 synthetic frames cut from a generated image, which is the right way to test the
 algorithm and no substitute for pointing it at a building.
 
-## How the capture should work
+## How the capture works
 
-1. User frames the shot on the target lens and presses capture.
-2. App switches to the capture lens, **locks exposure, focus and white balance**
-   — without this, tiles differ in brightness and the blend cannot hide it.
-3. A grid overlay shows which cells are covered. The user sweeps; the app takes
-   a frame whenever the view enters an uncovered cell and is steady.
-4. Each frame is registered against its neighbours, not against a global
-   reference: accumulated error is smaller chained locally.
-5. Tiles composite into the canvas as they arrive, so memory holds one tile plus
-   the canvas rather than all forty-nine.
-6. Coverage below a threshold at the end means an honest partial result, cropped
-   to what was shot, rather than black bars.
+1. The user frames the shot on the target lens, chooses how much of it the
+   sweep covers -- a 2x2, a 3x3, or a box drawn on the frame -- and presses
+   SUPER RES.
+2. The app switches to the capture lens and **locks exposure, focus and white
+   balance**. The first frame is the anchor: wherever the user is pointing
+   becomes the centre of the canvas, the develop gain and colour are measured
+   from it and held, and the plan's nodes -- one per tile -- are laid out
+   around it.
+3. A reticle sits at the centre of the viewfinder and a dot is drawn at each
+   node, where the frame's own registration says that part of the scene is.
+   The user pans the reticle onto a dot and holds. A quarter of a second
+   inside 5% of the frame, without drifting, locks it: a haptic, and the
+   burst fires itself from the ring. Pan too fast and the phone says so.
+4. Each burst is merged like any other photograph, developed with the anchor's
+   gain scaled by its own ISO and exposure, corrected for the lens's geometry,
+   and composited where its reference frame registered -- against the anchor
+   and every tile so far, not chained.
+5. Compositing is in three frequency bands: the fine detail is handed from
+   one tile to the next along the line where they are equally deep, the broad
+   differences between them are spread over six hundred pixels, so the texture
+   is kept and the step is hidden.
+6. The count reads "3 of 9 nodes". Every node captured is the sweep complete;
+   stopping early keeps what was taken, cropped to what was shot.
 
-Step 4 is where a future refinement belongs: **bundle adjustment**, jointly
-optimising all tile transforms rather than chaining pairwise fits, which is
-what keeps a large mosaic from drifting. Pairwise chaining is good enough for
-7 × 7 and would not be for 28 × 28.
+Bundle adjustment -- jointly refining every tile's transform against every
+overlap -- stays where it was: not built, because a 3x3 registered against all
+its neighbours does not drift enough to need it, and it would be machinery in
+service of a sweep nobody should be taking.
 
 ## Why this fits the app
 

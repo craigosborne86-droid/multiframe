@@ -87,7 +87,7 @@ data class SuperResOutcome(
  * geometry. A rotation of 90 or 270 degrees swaps the axes, which the model's
  * rescale handles by being given the dimensions it will actually see.
  */
-private fun opticsFor(
+internal fun opticsFor(
     profile: LensProfile?,
     bitmap: android.graphics.Bitmap,
 ): Optics.Params? =
@@ -122,6 +122,8 @@ object RawBurstCapture {
         /** Optical calibration for [lens], where the device published any. */
         lensProfile: LensProfile? = null,
         outputFormat: OutputFormat = OutputFormat.JPEG,
+        /** How the JPEG is rendered; the default is the PRD's global rendering. */
+        develop: DevelopParams = DevelopParams(),
         onProgress: (String) -> Unit,
     ): RawBurstResult {
         val profile = SensorProfile.from(characteristics)
@@ -205,6 +207,7 @@ object RawBurstCapture {
                 lens = lens,
                 lensProfile = lensProfile,
                 outputFormat = outputFormat,
+                develop = develop,
             )
         } finally {
             merger?.close()
@@ -236,6 +239,7 @@ object RawBurstCapture {
         burstSpanMillis: Long = 0,
         streamStats: String? = null,
         dcgActive: Boolean = false,
+        develop: DevelopParams = DevelopParams(),
     ): RawBurstResult {
         val stamp = stamp()
 
@@ -293,13 +297,13 @@ object RawBurstCapture {
         // Native develop writes into the Bitmap's own pixels, so nothing here
         // touches the Java heap. Falls back to the Kotlin developer, which is
         // the implementation the unit tests cover, if native declines.
-        var bitmap = merger.develop(mergedBuffer, color, shading = shading) ?: run {
+        var bitmap = merger.develop(mergedBuffer, color, develop, shading = shading) ?: run {
             Log.w(TAG, "falling back to Kotlin develop")
             val shorts = ShortArray(width * height)
             mergedBuffer.rewind()
             mergedBuffer.asShortBuffer().get(shorts)
             RawDeveloper.developIntoBitmap(
-                BayerFrame(width, height, shorts), profile, color, shading = shading,
+                BayerFrame(width, height, shorts), profile, color, develop, shading = shading,
             )
         }
         // Optics before the rotation, and the ordering is not a preference.

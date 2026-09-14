@@ -14,10 +14,45 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstddef>
 
 namespace multiframe {
+
+/**
+ * How much a tile pixel at [edge] tile pixels from the tile's nearest edge
+ * counts.
+ *
+ * Two parts. The ramp, `min(1, edge / feather)^2`, takes the outermost pixels
+ * to nothing so a registration error at the tile's border is hidden; every
+ * band has one. The hand-off, `(edge / halfTile)^power`, is what the detail
+ * band alone adds: it makes the tile that is *deeper* at a pixel win it by a
+ * wide margin, which is a soft Voronoi -- the tile whose centre is nearest owns
+ * the pixel, and the two swap over in a narrow zone about the equidistant line
+ * rather than averaging across the whole overlap. Averaging is what a ramp
+ * alone does everywhere both ramps have reached one, and two textures a pixel
+ * apart averaged are a double image. A power of zero is the ramp alone.
+ */
+struct Mask {
+    float feather = 64.0f;
+    float power = 0.0f;
+    float halfTile = 1.0f;
+
+    inline float weight(float edge) const {
+        float w = std::clamp(edge / std::max(feather, 1.0f), 0.0f, 1.0f);
+        w *= w;
+        if (power > 0.0f && w > 0.0f) {
+            // Floored at the smallest weight the canvas stores, so a pixel
+            // the ramp has reached is covered however shallow it sits: the
+            // hand-off decides who wins an overlap, never whether a pixel a
+            // single tile reached is a pixel at all.
+            w *= std::max(std::pow(std::clamp(edge / halfTile, 0.0f, 1.0f), power), 1.0f / 65536.0f);
+        }
+        return w;
+    }
+};
 
 /**
  * A plane of accumulated colour with per-pixel coverage.
@@ -28,7 +63,11 @@ namespace multiframe {
  */
 class MosaicCanvas {
 public:
-    static MosaicCanvas* Create(int width, int height);
+    /**
+     * [bands] is how many frequency bands the blend keeps apart: 1 is the
+     * feathered running mean alone, 3 adds two coarser levels (see AddTile).
+     */
+    static MosaicCanvas* Create(int width, int height, int bands = 3);
     ~MosaicCanvas();
 
     MosaicCanvas(const MosaicCanvas&) = delete;
@@ -53,6 +92,20 @@ public:
      */
     long AddTile(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
                  const double* h, float feather);
+
+    /**
+     * The same, blending in three frequency bands.
+     *
+     * [feathers] is one ramp width per band, narrowest first, in tile pixels:
+     * the finest detail crosses a seam over `feathers[0]`, and the broad
+     * differences between tiles -- exposure, colour -- are spread over
+     * `feathers[2]`. See the note on the canvas levels in Mosaic.cpp. With a
+     * canvas created for one band this is AddTile with `feathers[0]`.
+     */
+    long AddTileBands(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
+                      const double* h, const float* feathers);
+
+    int bands() const { return bands_; }
 
     /** Fraction of the canvas that any tile has covered. */
     float Coverage() const;
@@ -104,11 +157,40 @@ private:
     /** Three colour channels plus the accumulated weight, all 16-bit. */
     static constexpr int kChannels = 4;
 
+    /** The pyramid's step between levels: each coarser level is this much smaller per axis. */
+    static constexpr int kLevelScale = 4;
+
+    /**
+     * A running-mean canvas at a coarser scale. Two per coarser level: one
+     * blended with that level's own wide feather, one with the finer level's,
+     * whose difference is what the band correction is made of.
+     */
+    struct Level {
+        uint16_t* data = nullptr;
+        size_t bytes = 0;
+        int width = 0;
+        int height = 0;
+        int scale = 1;
+    };
+
+    /** Composes the blended value of one full-resolution pixel into [rgb], scaled 0..65535. */
+    bool Compose(int x, int y, float* rgb) const;
+
+    long accumulateFull(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
+                        const double* h, const Mask& mask);
+    void accumulateLevel(Level& level, int tileWidth, int tileHeight,
+                         const double* inverse, const Mask& mask,
+                         const float* pyramid, int pyramidWidth, int pyramidHeight);
+
     uint16_t* data_ = nullptr;
     size_t bytes_ = 0;
     bool flattened_ = false;
     int width_ = 0;
     int height_ = 0;
+    int bands_ = 1;
+    // wide_[k] and narrow_[k] for coarser level k+1, k = 0 .. bands_-2.
+    Level wide_[2];
+    Level narrow_[2];
 };
 
 }  // namespace multiframe

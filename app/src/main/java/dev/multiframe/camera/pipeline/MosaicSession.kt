@@ -49,12 +49,84 @@ class MosaicSession private constructor(
 
     val progress: MosaicProgress
         get() = MosaicProgress(
-            placed = assembler.placed.size,
+            placed = assembler.composited.size,
             planned = plan.tileCount,
             coverage = assembler.coverage,
             rejected = rejected,
             lastReason = lastReason,
         )
+
+    /**
+     * The colour every tile is developed with, fixed by the first.
+     *
+     * Read from each burst's own result, the white balance drifted between
+     * tiles as the auto algorithm saw more or less sky, and the seams were
+     * colour seams that no blend could hide because the tiles genuinely
+     * differed. The sweep locks exposure for the same reason; this locks
+     * colour and shading beside it.
+     */
+    var color: ColorProfile? = null
+        private set
+    var shading: ShadingMap? = null
+        private set
+
+    fun lockColour(color: ColorProfile, shading: ShadingMap?) {
+        if (this.color == null) {
+            this.color = color
+            this.shading = shading
+        }
+    }
+
+    /**
+     * The develop gain every tile is rendered with, and the exposure it was
+     * measured at, both fixed by the anchor.
+     *
+     * The stream locks the sensor's exposure for the sweep, so the frames
+     * should agree already; the normalisation is what holds if they do not.
+     * A tile whose ISO times exposure came out at some other product than
+     * the anchor's is scaled by the ratio, so the developed tiles sit on one
+     * scale whatever the sensor did between them.
+     */
+    var developGain: Float = 0f
+        private set
+    private var anchorExposureProduct = 0.0
+
+    fun lockExposure(gain: Float, isoTimesExposureNs: Double) {
+        if (developGain <= 0f && gain > 0f) {
+            developGain = gain
+            anchorExposureProduct = isoTimesExposureNs
+        }
+    }
+
+    /** The gain for a tile shot at [isoTimesExposureNs], relative to the anchor's. */
+    fun gainFor(isoTimesExposureNs: Double): Float =
+        normalisedGain(developGain, anchorExposureProduct, isoTimesExposureNs)
+
+    // --- the guided sweep --------------------------------------------------
+
+    /** Makes [proxy] the origin. See [MosaicAssembler.anchor]. */
+    fun anchor(proxy: Plane): Placement = assembler.anchor(proxy)
+
+    /** Where a frame is, or null when nothing placed can see it. Pure. */
+    fun locate(proxy: Plane, proxyScale: Float): MosaicAssembler.Located? =
+        if (closed) null else assembler.locate(proxy, proxyScale)
+
+    /**
+     * Records a captured tile at its located transform and draws it.
+     *
+     * Returns the placement, or null if the canvas would not take it -- in
+     * which case the node stays pending and the user is asked again.
+     */
+    fun place(tile: Bitmap, proxy: Plane, located: MosaicAssembler.Located): Placement? {
+        if (closed) return null
+        val placement = assembler.place(proxy, located.transform, located.inliers, located.inlierRatio)
+        if (placement == null) {
+            rejected++
+            lastReason = RejectionReason.OUT_OF_BOUNDS
+            return null
+        }
+        return if (composite(tile, placement)) placement else null
+    }
 
     /** Coverage as a grid, for drawing the sweep guide. */
     fun coverageGrid(): Array<BooleanArray> = assembler.coverageGrid()
@@ -103,7 +175,7 @@ class MosaicSession private constructor(
     /** Draws an accepted tile onto the canvas. */
     fun composite(tile: Bitmap, placement: Placement): Boolean {
         if (closed) return false
-        val touched = canvas.addTile(tile, placement.transform, feather = FEATHER)
+        val touched = canvas.addTile(tile, placement.transform, FEATHERS)
         if (touched == 0L) {
             // The assembler thought it landed on the canvas and the canvas
             // disagreed. Reported rather than silently counted as placed, since
@@ -128,7 +200,7 @@ class MosaicSession private constructor(
      * what was actually shot rather than a rectangle with black bars.
      */
     fun save(context: Context, name: String): String? {
-        if (closed || assembler.placed.isEmpty()) return null
+        if (closed || assembler.composited.isEmpty()) return null
 
         // Not through a Bitmap. The canvas is 610 MB at the default cap and its
         // rendered form would be another 320 MB, which is why this used to
@@ -147,7 +219,7 @@ class MosaicSession private constructor(
         }
         Log.i(
             TAG,
-            ("mosaic saved: ${assembler.placed.size} tiles, %.0f MP written " +
+            ("mosaic saved: ${assembler.composited.size} tiles, %.0f MP written " +
                 "from a %.0f MP canvas, coverage %.2f").format(
                 size.megapixels, canvas.megapixels, assembler.coverage,
             ),
@@ -170,7 +242,7 @@ class MosaicSession private constructor(
         result = null,
         characteristics = null,
         lens = plan.targetLens,
-        frames = assembler.placed.size,
+        frames = assembler.composited.size,
         kind = CaptureKind.MOSAIC,
     )
 
@@ -182,12 +254,29 @@ class MosaicSession private constructor(
 
     companion object {
         /**
-         * Blend width at tile edges.
+         * The develop gain for a tile, from the anchor's gain and the two
+         * exposures. Pure, so the arithmetic is checkable on the JVM.
          *
-         * Wide enough to hide the disagreement between two frames, narrow
-         * enough not to smear detail across the overlap.
+         * No anchor gain yet means the develop's own automatic choice; a
+         * missing exposure on either side means the anchor's gain unchanged,
+         * since a ratio with nothing on one side is not a correction.
          */
-        const val FEATHER = 96f
+        fun normalisedGain(anchorGain: Float, anchorProduct: Double, tileProduct: Double): Float {
+            if (anchorGain <= 0f) return DevelopParams.AUTO_EXPOSURE
+            if (anchorProduct <= 0.0 || tileProduct <= 0.0) return anchorGain
+            return (anchorGain * (anchorProduct / tileProduct)).toFloat()
+        }
+
+        /**
+         * Blend widths at tile edges, one per frequency band.
+         *
+         * There used to be one, at 96 pixels, and it was the compromise a
+         * single feather always is: wide enough to hide a step in exposure and
+         * it doubled fine detail across the overlap; narrow enough to keep the
+         * detail and the step showed. The bands let each frequency have the
+         * width it needs. See [MosaicCanvas.BLEND_FEATHERS].
+         */
+        val FEATHERS: FloatArray get() = MosaicCanvas.BLEND_FEATHERS
 
         /**
          * Starts a sweep, or returns null when the canvas cannot be allocated.

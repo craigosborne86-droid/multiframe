@@ -273,3 +273,88 @@ fun SweepMap(
         )
     }
 }
+
+/**
+ * The reticle and the dots: where to point, and what has been captured.
+ *
+ * Drawn over the viewfinder, which during a sweep shows the telephoto. Each
+ * dot is a node of the plan, projected into the current frame by the sweep's
+ * registration of that frame, so it sits on the part of the scene the tile
+ * will be -- and moves with the scene as the phone pans, which is what makes
+ * it a target rather than a diagram. A node beyond the edge of the frame is
+ * drawn at the edge, pointing the way. The reticle is fixed at the centre.
+ *
+ * ### Colour, and the rule it bends
+ *
+ * The palette rule is that nothing coloured sits on the photograph, with two
+ * documented exceptions for transient states of the photograph itself. This
+ * is the third, and `Ink.Confirm`'s own comment names it: sweep tile guidance.
+ * A dot reads muted while it is only a place, amber as the reticle closes on
+ * it -- a live reading of distance, which is what amber is for -- solid green
+ * once its tile is on the canvas, and red for a beat when a capture there
+ * failed. Nothing here persists past the sweep.
+ */
+@Composable
+fun SweepGuidance(
+    view: dev.multiframe.camera.pipeline.GuidedSweepView,
+    sensorOrientation: Int,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val dot = 9.dp.toPx()
+        val ring = 14.dp.toPx()
+        val stroke = 2.dp.toPx()
+        val margin = 18.dp.toPx()
+
+        // The reticle: a fine cross with a gap at the centre, so the thing
+        // being aimed at is not hidden by the aim.
+        val cx = w / 2f
+        val cy = h / 2f
+        val arm = 22.dp.toPx()
+        val gap = 6.dp.toPx()
+        drawLine(Ink.GuideBright, Offset(cx - arm, cy), Offset(cx - gap, cy), stroke)
+        drawLine(Ink.GuideBright, Offset(cx + gap, cy), Offset(cx + arm, cy), stroke)
+        drawLine(Ink.GuideBright, Offset(cx, cy - arm), Offset(cx, cy - gap), stroke)
+        drawLine(Ink.GuideBright, Offset(cx, cy + gap), Offset(cx, cy + arm), stroke)
+        drawCircle(Ink.GuideBright, radius = ring, center = Offset(cx, cy), style = Stroke(stroke))
+
+        for (node in view.nodes) {
+            val fx = node.frameX
+            val fy = node.frameY
+            if (fx == null || fy == null) continue
+            val (dx, dy) = dev.multiframe.camera.pipeline.TouchFocus.toDisplayPoint(fx, fy, sensorOrientation)
+            // Clamped to the frame, with a margin so a dot at the edge is whole.
+            val x = (dx * w).coerceIn(margin, w - margin)
+            val y = (dy * h).coerceIn(margin, h - margin)
+            val offFrame = dx * w != x || dy * h != y
+            val centre = Offset(x, y)
+
+            when (node.state) {
+                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.DONE -> {
+                    drawCircle(Ink.Confirm, radius = dot, center = centre)
+                }
+                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.LOCKING,
+                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.CAPTURING -> {
+                    drawCircle(Ink.Confirm, radius = ring, center = centre, style = Stroke(stroke))
+                    drawCircle(Ink.Confirm, radius = dot * 0.5f, center = centre)
+                }
+                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.NEAR -> {
+                    drawCircle(Ink.Amber, radius = ring, center = centre, style = Stroke(stroke))
+                    drawCircle(Ink.Amber, radius = dot * 0.5f, center = centre)
+                }
+                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.REJECTED -> {
+                    drawCircle(Ink.Danger, radius = ring, center = centre, style = Stroke(stroke))
+                }
+                dev.multiframe.camera.pipeline.GuidedSweep.NodeState.PENDING -> {
+                    drawCircle(
+                        if (offFrame) Ink.GuideMid else Ink.GuideBright,
+                        radius = dot * 0.6f, center = centre,
+                    )
+                    drawCircle(Ink.GuideMid, radius = ring, center = centre, style = Stroke(stroke * 0.5f))
+                }
+            }
+        }
+    }
+}

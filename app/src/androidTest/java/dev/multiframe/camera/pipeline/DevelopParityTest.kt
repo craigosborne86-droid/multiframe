@@ -376,6 +376,77 @@ class DevelopParityTest {
     }
 
     /**
+     * The local tone operator agrees between the two, and actually acts.
+     *
+     * The grid is built from the same 2x2 block luminances on both sides and
+     * sliced with the same trilinear read, so the bound is the develop's own.
+     * A scene with a bright quarter and a dim rest gives the operator
+     * something to do, and the test says it did -- the bright quarter comes
+     * down against the plain develop -- before it says the two agree on it.
+     */
+    @Test
+    fun nativeAndKotlinLocalToneAgreeAndAct() {
+        assertThat(NativeMerge.isAvailable()).isTrue()
+        val w = 256
+        val h = 192
+        val data = ShortArray(w * h) { i ->
+            val x = i % w
+            val y = i / w
+            val texture = ((x * 7 + y * 3) % 11) * 6
+            val level = if (x > w * 3 / 4 && y < h / 2) 720 else 90
+            (64 + level + texture).toShort()
+        }
+        val frame = BayerFrame(w, h, data)
+        val color = ColorProfile(
+            gains = floatArrayOf(1.9f, 1f, 1f, 1.6f),
+            matrix = floatArrayOf(1.7f, -0.6f, -0.1f, -0.2f, 1.5f, -0.3f, 0f, -0.4f, 1.4f),
+        )
+        val local = fixedGain.copy(exposureGain = 1.2f, localTone = 0.5f)
+        val expected = RawDeveloper.develop(frame, profile, color, local)
+        val plain = RawDeveloper.develop(frame, profile, color, local.copy(localTone = 0f))
+
+        val merger = NativeMerge.create(w, h, profile)
+        assertThat(merger).isNotNull()
+        val bitmap = merger!!.use { it.develop(directBufferOf(frame), color, local) }
+        assertThat(bitmap).isNotNull()
+
+        var worst = 0
+        var sum = 0L
+        var count = 0
+        for (y in 3 until h - 3) {
+            for (x in 3 until w - 3) {
+                val a = expected[y * w + x]
+                val b = bitmap!!.getPixel(x, y)
+                for (shift in intArrayOf(16, 8, 0)) {
+                    val da = (a shr shift) and 0xFF
+                    val db = when (shift) {
+                        16 -> Color.red(b)
+                        8 -> Color.green(b)
+                        else -> Color.blue(b)
+                    }
+                    val d = abs(da - db)
+                    if (d > worst) worst = d
+                    sum += d.toLong()
+                    count++
+                }
+            }
+        }
+        bitmap!!.recycle()
+        val mean = sum.toDouble() / count
+        val brightPlain = (plain[(h / 4) * w + w * 7 / 8] shr 8) and 0xFF
+        val brightLocal = (expected[(h / 4) * w + w * 7 / 8] shr 8) and 0xFF
+        val dimPlain = (plain[(h * 3 / 4) * w + w / 4] shr 8) and 0xFF
+        val dimLocal = (expected[(h * 3 / 4) * w + w / 4] shr 8) and 0xFF
+        Log.i(TAG, "local tone: native vs Kotlin worst %d/255, mean %.3f; bright %d -> %d, dim %d -> %d".format(
+            worst, mean, brightPlain, brightLocal, dimPlain, dimLocal))
+
+        assertThat(brightLocal).isLessThan(brightPlain)
+        assertThat(dimLocal).isGreaterThan(dimPlain)
+        assertThat(worst).isAtMost(2)
+        assertThat(mean).isLessThan(0.25)
+    }
+
+    /**
      * Defective sites are corrected identically in both implementations.
      *
      * They are found before shading and white balance in native, and on the CFA

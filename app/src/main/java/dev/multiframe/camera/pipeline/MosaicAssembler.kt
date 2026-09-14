@@ -120,56 +120,20 @@ class MosaicAssembler(
      * full-resolution pixels each proxy pixel represents.
      */
     fun offer(proxy: Plane, proxyScale: Float): OfferResult {
-        val previous = previousProxy
-        val previousPlacement = previousTransform
-
         val transform: Homography
         var inliers = 0
         var ratio = 1f
 
-        if (previous == null || previousPlacement == null) {
+        if (previousProxy == null || previousTransform == null) {
             // The first frame defines the origin: placed centred, with the rest
             // of the mosaic growing around it.
-            val scaled = tileWidth * tileScale
-            val scaledHeight = tileHeight * tileScale
-            transform = Homography.translation(
-                (canvasWidth - scaled) / 2.0,
-                (canvasHeight - scaledHeight) / 2.0,
-            ).times(scaleTransform(tileScale))
+            transform = centredTransform()
         } else {
-            val proxyToTile = scaleTransform(proxyScale)
-            val tileToProxy = proxyToTile.invert()
+            val located = locate(proxy, proxyScale)
                 ?: return OfferResult.Rejected(RejectionReason.UNREGISTRABLE)
-
-            // Registered against every placed tile that overlaps, not only the
-            // one before it. A sweep gives each frame several independent
-            // measurements -- the tile beside it and the tile above both saw
-            // it -- and chaining uses one and discards the rest, which is how a
-            // long sweep drifts while every individual join looks perfect.
-            val predictions = ArrayList<Homography>()
-            var bestInliers = 0
-            var bestRatio = 0f
-
-            for (candidate in registrationCandidates()) {
-                val fit = FeatureMatcher.register(placedProxies[candidate], proxy) ?: continue
-                val inverse = fit.homography.invert() ?: continue
-                predictions.add(
-                    placements[candidate].transform
-                        .times(proxyToTile).times(inverse).times(tileToProxy)
-                )
-                if (fit.inliers.size > bestInliers) {
-                    bestInliers = fit.inliers.size
-                    bestRatio = fit.inlierRatio
-                }
-            }
-
-            if (predictions.isEmpty()) {
-                return OfferResult.Rejected(RejectionReason.UNREGISTRABLE)
-            }
-            transform = consensus(predictions)
-                ?: return OfferResult.Rejected(RejectionReason.UNREGISTRABLE)
-            inliers = bestInliers
-            ratio = bestRatio
+            transform = located.transform
+            inliers = located.inliers
+            ratio = located.inlierRatio
         }
 
         if (!landsOnCanvas(transform)) {
@@ -196,14 +160,107 @@ class MosaicAssembler(
             return OfferResult.Rejected(RejectionReason.REDUNDANT)
         }
 
-        for (cell in cells) covered[cell] = true
+        return OfferResult.Placed(record(proxy, transform, inliers, ratio))
+    }
+
+    /** Where a frame is, with how well it registered. */
+    data class Located(val transform: Homography, val inliers: Int, val inlierRatio: Float)
+
+    /**
+     * Where a frame belongs on the canvas, without placing it.
+     *
+     * Registered against every placed tile that overlaps, not only the one
+     * before it. A sweep gives each frame several independent measurements --
+     * the tile beside it and the tile above both saw it -- and chaining uses
+     * one and discards the rest, which is how a long sweep drifts while every
+     * individual join looks perfect. Null when nothing placed can see it.
+     *
+     * Pure: the guided sweep asks this of every frame the preview produces to
+     * know where the reticle is pointing, and places only the bursts it takes.
+     */
+    fun locate(proxy: Plane, proxyScale: Float): Located? {
+        if (placements.isEmpty()) return null
+        val proxyToTile = scaleTransform(proxyScale)
+        val tileToProxy = proxyToTile.invert() ?: return null
+
+        val predictions = ArrayList<Homography>()
+        var bestInliers = 0
+        var bestRatio = 0f
+        for (candidate in registrationCandidates()) {
+            val fit = FeatureMatcher.register(placedProxies[candidate], proxy) ?: continue
+            val inverse = fit.homography.invert() ?: continue
+            predictions.add(
+                placements[candidate].transform
+                    .times(proxyToTile).times(inverse).times(tileToProxy)
+            )
+            if (fit.inliers.size > bestInliers) {
+                bestInliers = fit.inliers.size
+                bestRatio = fit.inlierRatio
+            }
+        }
+        if (predictions.isEmpty()) return null
+        val transform = consensus(predictions) ?: return null
+        if (!landsOnCanvas(transform)) return null
+        return Located(transform, bestInliers, bestRatio)
+    }
+
+    /**
+     * Makes a frame the origin without compositing it.
+     *
+     * The guided sweep's anchor: wherever the user is pointing when the sweep
+     * begins is the centre of the canvas, and the nodes are laid out around it.
+     * The anchor is registered against like any placed tile -- it is the one
+     * every early frame overlaps -- but it contributes no pixels and no
+     * coverage, so a sweep abandoned at once has produced nothing rather than
+     * one tile in the middle of an empty canvas.
+     */
+    fun anchor(proxy: Plane): Placement {
+        val transform = centredTransform()
+        val placement = Placement(placements.size, transform, 0, 1f)
+        placements.add(placement)
+        placedProxies.add(proxy)
+        previousProxy = proxy
+        previousTransform = transform
+        anchorIndex = placement.index
+        return placement
+    }
+
+    /**
+     * Records a frame the guided sweep captured at a located [transform], and
+     * marks the ground under it covered. The composite is the session's.
+     */
+    fun place(proxy: Plane, transform: Homography, inliers: Int, inlierRatio: Float): Placement? {
+        if (!landsOnCanvas(transform)) return null
+        if (cellsUnder(transform).isEmpty()) return null
+        return record(proxy, transform, inliers, inlierRatio)
+    }
+
+    private fun record(proxy: Plane, transform: Homography, inliers: Int, ratio: Float): Placement {
+        for (cell in cellsUnder(transform)) covered[cell] = true
         val placement = Placement(placements.size, transform, inliers, ratio)
         placements.add(placement)
         previousProxy = proxy
         previousTransform = transform
         placedProxies.add(proxy)
-        return OfferResult.Placed(placement)
+        return placement
     }
+
+    /** The first frame's place: centred, with the rest of the mosaic growing around it. */
+    private fun centredTransform(): Homography {
+        val scaled = tileWidth * tileScale
+        val scaledHeight = tileHeight * tileScale
+        return Homography.translation(
+            (canvasWidth - scaled) / 2.0,
+            (canvasHeight - scaledHeight) / 2.0,
+        ).times(scaleTransform(tileScale))
+    }
+
+    /** Index of the anchor among the placements, or -1 where the sweep had none. */
+    var anchorIndex: Int = -1
+        private set
+
+    /** Placed tiles that contributed pixels: everything but the anchor. */
+    val composited: List<Placement> get() = placements.filter { it.index != anchorIndex }
 
     /**
      * Which placed tiles are worth registering a new frame against.
@@ -334,6 +391,7 @@ class MosaicAssembler(
         placedProxies.clear()
         previousProxy = null
         previousTransform = null
+        anchorIndex = -1
         covered.fill(false)
     }
 

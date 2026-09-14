@@ -178,8 +178,12 @@ object Haptics {
 | Cycle value | FRAMES, MODE, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
 | Slider at detent | ISO at round number (100, 200, ...), EV at 0 | `Haptics.tick` | Subtle stop point, not every pixel of drag |
 | Lens switch | New lens selected in strip | `Haptics.segment` | Camera is physically switching |
-| Sweep tile locked | Reticle aligns with target dot | `Haptics.confirm` | "Got it" — eyes are on the subject |
-| Sweep tile rejected | Alignment failed or motion blur | `Haptics.reject` | "Try again" — also eyes on subject |
+| Sweep anchored | First frame taken; the dots appear | `Haptics.segment` | The sweep has begun; same detent as the lens switch that preceded it |
+| Sweep tile locked | Reticle has held on a dot; the burst is being taken | `Haptics.confirm` | "Got it" — eyes are on the subject. Fires *after* the burst is snapshotted from the ring, never before: the frames a haptic could blur are already in hand |
+| Sweep tile composited | The node's burst is on the canvas | `Haptics.tick` | Light: the hold is over, move on |
+| Sweep tile rejected | The burst could not be registered or developed | `Haptics.reject` | "Try again" — also eyes on subject; the dot flashes red for a beat |
+| Sweep pan too fast | Frame centre moved most of a tile between polls | `Haptics.reject` | Rate-limited to one per 800 ms; a fast pan is a blurred frame everywhere along it |
+| Sweep complete | Every node captured | `Haptics.confirm` | The sweep has finished itself |
 | Error action | Tapping a disabled control, invalid state | `Haptics.reject` | Something went wrong |
 | PRO panel open/close | Toggle PRO chip | (none) | Panel animation is sufficient feedback |
 | Gallery delete confirmed | After confirmation dialog | `Haptics.confirm` | Acknowledge destructive action |
@@ -734,45 +738,131 @@ Optimization: Levenberg-Marquardt.
 
 #### 3.4.3 Multi-Band Laplacian Blending
 
-For each pair of overlapping tiles in the composite:
+**As built** (`Mosaic.cpp`, `MosaicCanvas.addTile(tile, transform, feathers)`).
+Burt and Adelson's construction, in the running-mean form the canvas already
+kept, so nothing new can overflow and the cost is an eighth again of the canvas.
+
+A tile's Laplacian band k is `G_k - up(G_{k+1})`: its Gaussian level less the
+next coarser one upsampled. Blending that band across tiles with a mask `M_k`
+of feather `f_k` gives
 
 ```
-1. Build Gaussian pyramid of each tile (4 levels).
-2. Build Laplacian pyramid (difference between consecutive Gaussian levels).
-3. Build a binary mask at the seam (which tile "owns" which pixel, determined
-   by Voronoi of tile centers).
-4. Blend each Laplacian level using a Gaussian-blurred version of the mask
-   at that level's resolution.
-5. Reconstruct from the blended Laplacian pyramid.
+sum_t (G_k(t) - up(G_{k+1}(t))) M_k(t) / sum_t M_k(t)  =  A_k - up(B_{k+1})
+
+A_k      running mean of G_k     under the level's own feather  f_k
+B_{k+1}  running mean of G_{k+1} under the finer level's feather f_k
 ```
 
-This blends low-frequency differences (exposure, color temperature) over wide
-regions while preserving high-frequency detail (texture, edges) at the seam.
-The result has no visible seam even when tiles differ in exposure by 1+ stop.
-
-### 3.5 Bilateral Grid Local Tone Mapping (Phase 4)
+approximating that upsampling commutes with the weighted mean, which is exact
+wherever the mask is locally flat. So each coarser level keeps two canvases,
+and the finished pixel is
 
 ```
-Input: linear RGB image after color matrix, before global tone curve.
-
-1. Compute luminance: L = 0.2126*R + 0.7152*G + 0.0722*B
-2. Build 3D bilateral grid:
-   - Spatial dimensions: image downsampled by 16x in each axis.
-   - Range dimension: 16 bins spanning [0, max_luminance].
-   - Each cell stores: (sum_of_log_L, count).
-3. Splat: for each pixel, accumulate log(L) into the grid cell indexed by
-   (x/16, y/16, L_bin).
-4. Blur: 3D Gaussian blur on the grid (sigma_spatial=1, sigma_range=1).
-5. Slice: for each pixel, trilinearly interpolate the grid at (x/16, y/16, L)
-   to get the local average log-luminance.
-6. Detail layer: log(L) - local_average = local contrast (preserved).
-7. Compressed base: global tone curve applied to local_average.
-8. Reconstruct: compressed_base + detail layer -> output luminance.
-9. Apply to RGB: scale each channel by (output_L / input_L).
-
-Result: global dynamic range is compressed, local contrast is preserved,
-no halos (the grid's spatial binning prevents them).
+out = A_0 - up(B_1) + up(A_1 - up(B_2) + up(A_2))
 ```
+
+| Level | Scale | Canvases | Mask |
+|---|---|---|---|
+| 0 | 1 | the canvas as before | ramp 24 px × hand-off |
+| 1 | 1/4 | `wide_[0]` (M_1), `narrow_[0]` (M_0) | M_1: ramp 160 px |
+| 2 | 1/16 | `wide_[1]` (M_2), `narrow_[1]` (M_1) | M_2: ramp 600 px |
+
+The pyramid steps by four, not two: the corrections are for exposure and
+colour, which are very low frequency, and two levels at a quarter and a
+sixteenth reach them for an eighth of the canvas rather than a third. The
+tile's levels are 4×4 box means, read bilinearly at quarter scale.
+
+**The detail band's mask hands off; it does not feather.** This was the
+finding of the seam test's first run. A ramp measured from each tile's own
+edge reaches one a feather's width in, and from there to the far side of the
+overlap both tiles weigh the same -- so the overlap's interior is an average
+of two textures a registration error apart, a double image, whatever the
+ramp's width. The bands changed nothing because the detail band was averaging
+exactly as the single feather had. The spec's Voronoi seam is what was
+missing: the tile whose centre is nearer owns the pixel. In the running-mean
+form that is a weight that rises steeply with depth into the tile,
+`ramp² × (edge / halfTile)^12`, so the deeper tile outweighs the shallower by
+a large ratio everywhere but a narrow zone about the equidistant line -- a
+soft Voronoi, a fifteenth of a 35% overlap wide. The coarser bands keep plain
+ramps, and each level's `narrow_` canvas carries the finer level's mask,
+hand-off included, since that is the blend it corrects.
+
+**Which forced the weight into a logarithm.** The canvas stored its weight as
+fixed point at 512 per unit; a twelfth-power hand-off at the far side of an
+overlap is a millionth, which fixed point stored as zero -- the pixel read as
+uncovered and the next tile took it as a first sample, and the seam step went
+to 26 codes. The weight field is now sixteen bits of exponent, `2^((code -
+32768) / 2048)`, sixteen octaves either side of one at a thirtieth of a
+percent, with code 0 uncovered. The running mean uses only the ratio of
+weights and is unaffected.
+
+**The null.** With one tile every canvas at a level holds that tile's own
+level wherever it holds anything, whatever its mask, so `A_k = B_k` and the
+corrections cancel: the three-band output is the one-band output to the byte.
+Composition reads each level's pair through the *same* bilinear taps -- only
+taps both canvases hold -- because a tap the wide mask reached and the narrow
+one did not would put a difference into the correction that is about the
+taps, not the tiles; the first version read them separately and 23,000 pixels
+of a one-tile canvas differed. `MosaicBlendDeviceTest.oneTileIsTheSameToTheByteInOneBandAndThree`
+asserts zero before the seam is measured.
+
+**The seam, measured** (two 480×320 tiles of one textured scene, the right one
+a quarter stop brighter and placed a pixel off; masks scaled to the tile, 12 /
+60 / 160):
+
+| | Step across the seam (codes per 8 columns) | Texture rms in the overlap (codes) |
+|---|---|---|
+| Right tile alone | — | 10.13 |
+| One band, narrow ramp | 5.90 | 8.41 |
+| One band, wide ramp | 2.12 | 8.51 |
+| Three bands | **2.13** | **8.86** |
+
+The bands spread the step as the wide ramp does and keep more of the texture
+than either ramp -- the measurement window straddles the equidistant line, so
+a third of it is the hand-off zone where the two tiles still mix; away from
+that line the detail is one tile's alone.
+
+### 3.5 Bilateral Grid Local Tone Mapping
+
+**As built** (`Tone.h` `BilateralGrid`, `BilateralGrid.kt` as the reference,
+in both develops behind `DevelopParams.localTone`; off by default, the
+`LOCAL TONE` control turns it on at 0.5).
+
+```
+Input: linear RGB after the colour matrix and the exposure gain, before the
+global roll-off. Luminance L = 0.2126 R + 0.7152 G + 0.0722 B.
+
+Grid: cells 16 px square, 16 bins over log2 L in [-10, +2] (0.8 stop each).
+      Each cell: (sum of log2 L, count).
+
+Splat: one sample per 2x2 CFA block -- the block's red, the mean of its two
+       greens, its blue, through the matrix and the gain -- into the cell at
+       (x/16, y/16, bin(log2 L)). A quarter of the pixels, no demosaic; the
+       grid is coarser than that by two orders anyway.
+Blur:  [1 4 6 4 1] / 16 along each of the three axes in turn.
+Slice: per pixel, trilinear at (x/16, y/16, log2 L) -> base b.
+Pivot: the count-weighted mean base of the whole grid.
+Gain:  k = 2 ^ (-strength * (b - pivot));  R, G, B *= k.
+```
+
+The detail layer `log2 L - b` is carried through unchanged because every
+pixel with the same base gets the same gain; the base layer's range about the
+picture's mean shrinks by the strength. Then the global chain proceeds. The
+spec's "global tone curve applied to the base" is this: the shoulder and the
+display curve see a picture whose range has been brought in locally.
+
+Three properties, each a unit test (`BilateralGridTest`): a bright region
+comes down and a dark one up, meeting at the pivot at full strength; a pixel a
+fifth of a stop above its neighbours stays exactly that far above them; and a
+dark pixel four pixels from a hard bright edge gets the dark side's gain within
+8%, not a blend -- which is the halo a spatial blur would produce and the third
+axis prevents. The operator is hue-preserving because it is one scale per
+pixel. Native and Kotlin agree within the develops' own bound of two codes
+(`DevelopParityTest.nativeAndKotlinLocalToneAgreeAndAct`,
+`LinearDevelopParityTest.withTheLocalOperatorItAgrees`).
+
+Not applied to sweep tiles: a base computed per tile differs at every seam.
+The right grid for a mosaic is one over the canvas, which is future work.
 
 ---
 
@@ -1097,12 +1187,12 @@ photograph is.
 | **Capture & ZSL** | `ZslRawStream.kt`, `ZslCapture.kt`, `ZslPolicy.kt`, `RawRing.kt`, `BurstBuffer.kt`, `RawCapture.kt`, `RawBurstCapture.kt` |
 | **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt` |
 | **2x canvas** | `SubPixelAccumulator.kt` (reference), `NativeSubPixel.kt` (strips, and the develop entry points), `SubPixelCoverage.kt` (the prediction and its bounds), `LinearDeveloper.kt` (the linear develop, reference), `SuperResCapture.kt` (the outputs) |
-| **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
+| **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `BilateralGrid.kt` (local tone, reference), `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
 | **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` |
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt` |
 | **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `LensProfile.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |
 | **DCG calibration** | `DcgCalibration.kt`, `DcgProfiler.kt`, `DcgCalibrationStore.kt` |
-| **Mosaic** | `MosaicSession.kt`, `MosaicCapture.kt`, `MosaicPlanner.kt`, `MosaicAssembler.kt`, `MosaicCanvas.kt`, `MosaicRefiner.kt` |
+| **Mosaic** | `MosaicSession.kt`, `MosaicCapture.kt` (the guided runner), `GuidedSweep.kt` (the lock rule), `MosaicPlanner.kt` (presets, regions, nodes), `MosaicAssembler.kt` (anchor, locate, place), `MosaicCanvas.kt`, `MosaicRefiner.kt` |
 | **Memory** | `MemoryBudget.kt`, `MemoryPressure.kt` |
 | **Settings** | `AppSettings.kt`, `CaptureReadout.kt`, `RecentCapture.kt`, `CaptureLog.kt` |
 | **GPU** | `GpuCrossing.kt` (benchmark only) |
@@ -1114,12 +1204,12 @@ photograph is.
 | File | Purpose |
 |---|---|
 | `bayer_merge.cpp` | NEON-vectorized merge accumulation, noise estimation, shading correction, prepass, the CFA develop. |
-| `Tone.h` | The tone chain shared by both develops: gamma and display tables, the shoulder table, `renderLinear`, shading interpolation, the band scheduler. Header-only. |
+| `Tone.h` | The tone chain shared by both develops: gamma and display tables, the shoulder table, `renderLinear`, shading interpolation, the band scheduler, and the `BilateralGrid` local tone operator (§3.5). Header-only. |
 | `SubPixel.cpp` | Sub-pixel kernel accumulation onto a 2x canvas, strip-major over an mmap output, tiled for cache residency (§3.6). Held to `SubPixelAccumulator.kt` within one 16-bit count. Also the JNI for the canvas's develop. |
 | `LinearDevelop.cpp` / `.h` | The develop for the 2x canvas: black, shading, white balance, matrix and tone from `Tone.h`, sharpen on band-local luma, into three-byte RGB with the canvas released strip by strip, then the strip encoder (§3.6.5). Held to `LinearDeveloper.kt`. |
 | `Align.cpp` | Native 4-level pyramid tile alignment with equiangular sub-pixel refinement at the finest level (§3.3.1). Held to `Aligner.kt` at zero differing tiles. |
 | `RingBuffer.cpp` / `.h` | mmap-backed AHardwareBuffer ring buffer |
-| `Mosaic.cpp` / `.h` | Native mosaic tile compositing |
+| `Mosaic.cpp` / `.h` | Native mosaic canvas: running-mean compositing in three frequency bands (§3.4.3), flattening and compression from its own pages |
 | `Rotate.cpp` | NEON-accelerated image rotation |
 | `Jpeg.cpp` / `.h` | libjpeg-turbo strip encoder, parallel; the header exposes it to the linear develop for RGB from native memory |
 | `GpuCrossing.cpp` | Vulkan crossing cost benchmark (not production) |
@@ -1134,7 +1224,7 @@ photograph is.
 | `ControlChips.kt` | Composable rendering of chips: `ControlRow`, `ActionStrip`, `ControlChip` |
 | `ControlsPanel.kt` | PRO panel: manual exposure, focus, WB, toggles, sliders |
 | `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation |
-| `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.) |
+| `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), the sweep map, and `SweepGuidance` -- the reticle and the dots |
 | `AboutSheet.kt` | About/info bottom sheet |
 
 ### Build Configuration

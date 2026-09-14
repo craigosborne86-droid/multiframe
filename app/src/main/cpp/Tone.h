@@ -396,5 +396,163 @@ inline void buildDisplayLut(DisplayLut& lut, const ToneParams& t) {
     }
 }
 
+/**
+ * A bilateral grid over log luminance: the local tone operator of
+ * REFERENCE.md §3.5.
+ *
+ * ### What it does
+ *
+ * A global curve compresses the whole picture's range with one function of
+ * brightness, so a bright window and the dim room around it are pulled toward
+ * each other everywhere at once, and the room's own contrast goes with it. A
+ * local operator asks, for each pixel, how bright its *neighbourhood* is, and
+ * compresses that instead -- the base -- while leaving the pixel's difference
+ * from its base, the detail, exactly as it was. The window comes down, the
+ * room comes up, and the texture in each is untouched.
+ *
+ * ### Why a grid, and why the third axis
+ *
+ * "Neighbourhood brightness" as a spatial blur produces halos: at the edge of
+ * the window the blur mixes window and wall, the base is wrong on both sides,
+ * and a bright fringe appears along the wall. The bilateral grid (Chen, Paris
+ * and Durand, 2007) adds luminance as a third axis, so a wall pixel's base is
+ * averaged only with pixels near it in space *and in brightness* -- the wall,
+ * not the window. The grid is coarse in all three axes, which is what makes
+ * it cheap: a cell is sixteen pixels square and three quarters of a stop
+ * deep, the whole grid for a twelve-megapixel frame is a few hundred
+ * kilobytes, and slicing it is one trilinear read per pixel.
+ *
+ * ### The arithmetic
+ *
+ * Splat: each pixel adds its log2 luminance and a count to the cell at
+ * (x / 16, y / 16, bin(log2 L)). Blur: a separable [1 4 6 4 1] over all three
+ * axes, once. Slice: trilinear at the pixel's own position and luminance gives
+ * the base b. The operator scales the pixel by `2 ^ (-strength * (b - pivot))`,
+ * where the pivot is the count-weighted mean base of the grid -- so the base
+ * layer's range about its mean shrinks by the strength and the detail layer,
+ * `log2 L - b`, is carried through unchanged. Everything downstream -- the
+ * shoulder, the desaturation, the display curve -- then sees a picture whose
+ * range has been brought in locally rather than globally.
+ *
+ * Mirrors BilateralGrid.kt, which is the reference. Constants here and there
+ * are the same numbers.
+ */
+struct BilateralGrid {
+    static constexpr int kCell = 16;
+    static constexpr int kBins = 16;
+    static constexpr float kLogMin = -10.0f;
+    static constexpr float kLogMax = 2.0f;
+    static constexpr float kMinLuminance = 1e-6f;
+
+    int cellsX = 0;
+    int cellsY = 0;
+    std::vector<float> sum;
+    std::vector<float> count;
+    float pivot = 0.0f;
+    bool ready = false;
+
+    void init(int width, int height) {
+        cellsX = (width + kCell - 1) / kCell;
+        cellsY = (height + kCell - 1) / kCell;
+        sum.assign(static_cast<size_t>(cellsX) * cellsY * kBins, 0.0f);
+        count.assign(sum.size(), 0.0f);
+        ready = false;
+    }
+
+    static inline float logOf(float luminance) {
+        return std::log2(std::max(luminance, kMinLuminance));
+    }
+
+    static inline float binOf(float logL) {
+        return std::clamp((logL - kLogMin) / (kLogMax - kLogMin) * (kBins - 1), 0.0f, static_cast<float>(kBins - 1));
+    }
+
+    inline size_t index(int cx, int cy, int b) const {
+        return (static_cast<size_t>(cy) * cellsX + cx) * kBins + b;
+    }
+
+    /** Adds one luminance at a pixel position. Not thread-safe; splat on one thread or per band with a merge. */
+    inline void splat(int x, int y, float luminance) {
+        const int cx = std::min(x / kCell, cellsX - 1);
+        const int cy = std::min(y / kCell, cellsY - 1);
+        const float logL = logOf(luminance);
+        const int b = static_cast<int>(binOf(logL) + 0.5f);
+        const size_t i = index(cx, cy, std::min(b, kBins - 1));
+        sum[i] += logL;
+        count[i] += 1.0f;
+    }
+
+    /** Blurs the grid in all three axes and fixes the pivot. */
+    void finish() {
+        for (int axis = 0; axis < 3; ++axis) blurAxis(axis);
+        double ws = 0.0, wc = 0.0;
+        for (size_t i = 0; i < sum.size(); ++i) {
+            ws += sum[i];
+            wc += count[i];
+        }
+        pivot = wc > 0.0 ? static_cast<float>(ws / wc) : 0.0f;
+        ready = true;
+    }
+
+    /** One separable pass of [1 4 6 4 1] / 16 along one axis, clamped at the ends. */
+    void blurAxis(int axis) {
+        static const float kTaps[5] = {1.0f / 16, 4.0f / 16, 6.0f / 16, 4.0f / 16, 1.0f / 16};
+        std::vector<float> s2(sum.size());
+        std::vector<float> c2(count.size());
+        for (int cy = 0; cy < cellsY; ++cy) {
+            for (int cx = 0; cx < cellsX; ++cx) {
+                for (int b = 0; b < kBins; ++b) {
+                    float s = 0.0f, c = 0.0f;
+                    for (int t = -2; t <= 2; ++t) {
+                        const int xx = axis == 0 ? std::clamp(cx + t, 0, cellsX - 1) : cx;
+                        const int yy = axis == 1 ? std::clamp(cy + t, 0, cellsY - 1) : cy;
+                        const int bb = axis == 2 ? std::clamp(b + t, 0, kBins - 1) : b;
+                        const size_t i = index(xx, yy, bb);
+                        s += kTaps[t + 2] * sum[i];
+                        c += kTaps[t + 2] * count[i];
+                    }
+                    s2[index(cx, cy, b)] = s;
+                    c2[index(cx, cy, b)] = c;
+                }
+            }
+        }
+        sum.swap(s2);
+        count.swap(c2);
+    }
+
+    /** The base at a pixel: the neighbourhood's mean log luminance near this luminance. */
+    inline float slice(int x, int y, float logL) const {
+        const float fx = std::clamp((x + 0.5f) / kCell - 0.5f, 0.0f, static_cast<float>(cellsX - 1));
+        const float fy = std::clamp((y + 0.5f) / kCell - 0.5f, 0.0f, static_cast<float>(cellsY - 1));
+        const float fb = binOf(logL);
+        const int x0 = static_cast<int>(fx), y0 = static_cast<int>(fy), b0 = static_cast<int>(fb);
+        const int x1 = std::min(x0 + 1, cellsX - 1), y1 = std::min(y0 + 1, cellsY - 1), b1 = std::min(b0 + 1, kBins - 1);
+        const float tx = fx - x0, ty = fy - y0, tb = fb - b0;
+        float s = 0.0f, c = 0.0f;
+        const float wts[8] = {
+            (1 - tx) * (1 - ty) * (1 - tb), tx * (1 - ty) * (1 - tb), (1 - tx) * ty * (1 - tb), tx * ty * (1 - tb),
+            (1 - tx) * (1 - ty) * tb,       tx * (1 - ty) * tb,       (1 - tx) * ty * tb,       tx * ty * tb,
+        };
+        const int xs[8] = {x0, x1, x0, x1, x0, x1, x0, x1};
+        const int ys[8] = {y0, y0, y1, y1, y0, y0, y1, y1};
+        const int bs[8] = {b0, b0, b0, b0, b1, b1, b1, b1};
+        for (int k = 0; k < 8; ++k) {
+            const size_t i = index(xs[k], ys[k], bs[k]);
+            s += wts[k] * sum[i];
+            c += wts[k] * count[i];
+        }
+        // Nothing near this luminance in this neighbourhood: the pixel is its own base.
+        return c > 1e-4f ? s / c : logL;
+    }
+
+    /** The scale to apply to a pixel of [luminance] at (x, y). */
+    inline float gain(int x, int y, float luminance, float strength) const {
+        if (!ready || strength <= 0.0f || luminance <= kMinLuminance) return 1.0f;
+        const float logL = logOf(luminance);
+        const float base = slice(x, y, logL);
+        return std::exp2(-strength * (base - pivot));
+    }
+};
+
 }  // namespace tone
 }  // namespace multiframe

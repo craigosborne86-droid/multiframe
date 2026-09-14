@@ -60,9 +60,22 @@ data class DevelopParams(
      * no lens to describe. See [Optics].
      */
     val optics: Optics.Params? = null,
+    /**
+     * Local tone mapping, as the strength of the bilateral-grid operator of
+     * REFERENCE.md §3.5: how much of the base layer's range about its mean is
+     * taken in, with the detail layer carried through untouched. Zero is off,
+     * which is the default and the PRD's photographic rendering: a global
+     * scale and a roll-off. One would flatten every neighbourhood to the
+     * picture's mean brightness. Half is a strong but photographic setting.
+     * See [BilateralGrid].
+     */
+    val localTone: Float = 0f,
 ) {
     companion object {
         const val AUTO_EXPOSURE = -1f
+
+        /** The strength the LOCAL TONE control turns on. */
+        const val LOCAL_TONE_ON = 0.5f
     }
 }
 
@@ -171,11 +184,12 @@ object RawDeveloper {
         correctDefects(frame, sensor, params)
         val gain = resolveGain(frame, sensor, color, params)
         val resolved = params.copy(exposureGain = gain)
+        val grid = if (resolved.localTone > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
         val band = IntArray(w * bandRows)
         var y = 0
         while (y < h) {
             val rows = min(bandRows, h - y)
-            developBand(frame, sensor, color, resolved, y, rows, band, shading)
+            developBand(frame, sensor, color, resolved, y, rows, band, shading, grid)
             bitmap.setPixels(band, 0, w, 0, y, w, rows)
             y += rows
         }
@@ -208,11 +222,12 @@ object RawDeveloper {
         rows: Int,
         out: IntArray,
         shading: ShadingMap?,
+        grid: BilateralGrid? = null,
     ) {
         val w = frame.width
         val h = frame.height
         parallelRows(rows) { rStart, rEnd ->
-            renderRows(frame, sensor, color, params, w, h, yOffset + rStart, yOffset + rEnd, out, yOffset, shading)
+            renderRows(frame, sensor, color, params, w, h, yOffset + rStart, yOffset + rEnd, out, yOffset, shading, grid)
         }
     }
 
@@ -232,8 +247,9 @@ object RawDeveloper {
         val out = IntArray(w * h)
         correctDefects(frame, sensor, params)
         val resolved = params.copy(exposureGain = resolveGain(frame, sensor, color, params))
+        val grid = if (resolved.localTone > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
         parallelRows(h) { yStart, yEnd ->
-            renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading)
+            renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading, grid)
         }
         // Geometry before anything that reads a neighbourhood. Both of the
         // passes below decide what a pixel is from the pixels around it, and
@@ -263,6 +279,7 @@ object RawDeveloper {
         out: IntArray,
         rowBase: Int,
         shading: ShadingMap?,
+        grid: BilateralGrid? = null,
     ) {
         val m = color.matrix
         val rgb = FloatArray(3)
@@ -284,6 +301,11 @@ object RawDeveloper {
                 rgb[0] = r * params.exposureGain
                 rgb[1] = g * params.exposureGain
                 rgb[2] = b * params.exposureGain
+                // The local operator, before the global curve: REFERENCE §3.5.
+                if (grid != null) {
+                    val k = grid.gain(x, y, BilateralGrid.luminance(rgb[0], rgb[1], rgb[2]), params.localTone)
+                    rgb[0] *= k; rgb[1] *= k; rgb[2] *= k
+                }
                 ToneCurve.renderLinear(rgb, params)
 
                 out[(y - rowBase) * w + x] = (0xFF shl 24) or

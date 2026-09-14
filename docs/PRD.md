@@ -237,6 +237,10 @@ output is 263 MP. Practically, overlap reduces this; the default cap is 80 MP /
 
 #### 2.3.2 User-Selectable Matrices
 
+**Built (Phase 4).** `SweepPreset`, remembered in `AppSettings.sweepPreset`;
+`MosaicPlanner.planGrid`, `planRegion` and `planPreset`; the `SWEEP 2×2 /
+3×3 / CUSTOM` pill in the PRO panel.
+
 Three presets replace the fixed 7x7 grid:
 
 | Preset | Grid | Tiles | Use Case | Approx. Output |
@@ -253,6 +257,16 @@ planner computes the minimum tile grid that covers the rectangle at the
 telephoto's resolution, with the required overlap.
 
 #### 2.3.3 Reticle/Dot Guidance System
+
+**Built (Phase 4).** `GuidedSweep` is the lock rule as a pure state machine,
+`MosaicCapture.run` drives it against the live ring, `SweepGuidance` draws it.
+Two refinements to the list below, both from building it: a lock needs a
+*hold*, not just a position -- a quarter of a second inside the radius without
+drifting more than the radius, because a pan that sweeps through the dot is
+exactly the blurred frame -- and the dots are placed by registering each
+preview frame against the tiles so far, which cannot drift, rather than by the
+gyroscope, which would. A frame that cannot be registered reads FINDING and
+locks nothing.
 
 **This replaces the free-roam panning arrow concept.**
 
@@ -280,6 +294,11 @@ When the sweep begins:
 - Works for 4 tiles (Detail Boost) without feeling heavy.
 
 #### 2.3.4 Capture and Assembly Pipeline
+
+**Built (Phase 4), except bundle adjustment,** which `SUPERRES.md` explains
+is not needed at these grid sizes and stays out. Registration is against the
+anchor and every placed neighbour (`MosaicAssembler.locate`), which is what
+keeps a 3x3 from drifting. The blending is `REFERENCE.md` §3.4.3 as built.
 
 For each locked tile:
 
@@ -563,8 +582,8 @@ described is not yet built. This is what those numbers mean.
 | 1 | Foundation & Hardware Truth | **Delivered.** Design tokens, haptic vocabulary, decoupled viewfinder HUD, `LensProfile` discovery, non-invasive DCG noise profiling, gallery and review surface. |
 | 2 | Lens Corrections & Develop Quality | Geometric distortion correction from `LensProfile`, lateral chromatic aberration correction, dual-illuminant colour matrix, HEIF output. |
 | 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel alignment refinement (equiangular, after the parabola was measured biased); sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native tiled strips, parity-verified); coverage prediction from the alignment; the linear develop of the canvas to a JPEG from native memory; the `2X` control, readout and gallery badge; IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. See §5.2. |
-| 4 | GPU Develop & Local Tone Mapping | Vulkan compute develop, bilateral-grid local tone mapping. |
-| 5 | Super-Res UX & Responsive UI | Sweep mode with reticle guidance, configurable tile matrices, responsive layout, accessibility pass. |
+| 4 | Guided Brenizer Engine & Local Tone | **Delivered.** Sweep presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
+| 5 | Responsive UI & GPU Develop | Responsive layout, accessibility pass; Vulkan compute develop if the CPU budget is ever exceeded. |
 | 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
 
 ### 5.1 A note on the Phase 3 and 4 contents
@@ -642,7 +661,44 @@ measured curve is in `REFERENCE.md` §3.3.1. And the strip sweep was bound by
 memory rather than arithmetic, eight cores reaching 1.6× one, until it was
 tiled to fit a cache; `REFERENCE.md` §3.6.4 has the measurements.
 
-**Still open.** The chroma channels of an eight-frame handheld burst leave
+### 5.3 What Phase 4 delivered
+
+**The guided sweep.** `SUPERRES.md` has the flow. Two things it found. A
+mosaic developed one tile at a time with each tile's own automatic gain was a
+mosaic of nine exposures, so the develop gain and colour are now fixed by the
+anchor and each tile is normalised by its own ISO × exposure -- which under the
+sweep's exposure lock should be no correction at all, and holds if it is. And
+registering each preview frame ten times a second, which the dots need, was
+allocating a hundred megabytes of merge accumulator per frame for a luma proxy
+that needs none; one prober now lives for the sweep.
+
+**The blend.** A single feather could hide a step or keep detail, never both;
+three bands do both, in the running-mean form the canvas already had, for an
+eighth again of its memory. The seam test found two things on its first run:
+that a detail band with a plain feather averages the whole overlap exactly as
+a single feather does, so the band needs a hand-off -- the spec's Voronoi
+seam, as a steep weight on depth into the tile -- and that a hand-off's
+weights span a range fixed point cannot hold, so the weight is now stored as
+a logarithm. The null -- one tile identical to the byte in one band and three
+-- is asserted before the seam is measured: step 5.9 → 2.1 codes with the
+texture kept. `REFERENCE.md` §3.4.3.
+
+**The local operator.** The bilateral grid of `REFERENCE.md` §3.5, in Tone.h
+for both develops and in Kotlin as the reference, sliced per pixel between the
+exposure gain and the global curve. Its three promises -- range between
+neighbourhoods compressed, contrast within a neighbourhood preserved, no halo
+at a hard edge -- are each a unit test; native and Kotlin agree within the
+develops' own two codes. It ships off. The PRD's rendering is a global scale
+and a roll-off, and that stays the default; the operator is a choice for the
+scene that needs it, and whether it should be the default is a decision to
+make on real photographs rather than here.
+
+**Not done.** Bundle adjustment (§2.3.4), deliberately. The local operator is
+not applied to sweep tiles, because a base computed per tile differs at every
+seam and the right grid is one over the whole canvas, which the canvas does
+not yet build. And nobody has swept a real scene with it.
+
+**Still open from Phase 3.** The chroma channels of an eight-frame handheld burst leave
 about a fifth of their cells to the fill; a longer burst closes them and the
 frame-count control already exists, but nothing yet suggests it when a capture
 declines on chroma. The optics correction (§2.2) does not run on the 2x path —

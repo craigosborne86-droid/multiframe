@@ -823,7 +823,7 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
                        jint shadingRows, jfloatArray jtone, jfloatArray jsharpen,
                        std::vector<float>& shadingOut, multiframe::linear::Params& p) {
     if (env->GetArrayLength(jblack) < 3 || env->GetArrayLength(jwb) < 3 ||
-        env->GetArrayLength(jmatrix) < 9 || env->GetArrayLength(jtone) < 8 ||
+        env->GetArrayLength(jmatrix) < 9 || env->GetArrayLength(jtone) < 9 ||
         env->GetArrayLength(jsharpen) < 3) {
         return false;
     }
@@ -844,9 +844,10 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     }
 
     // exposureGain, knee, contrast, desatStrength, desatStart, blackPoint,
-    // autoPercentile, autoTarget -- the order NativeSubPixel packs them in.
-    float tone[8];
-    env->GetFloatArrayRegion(jtone, 0, 8, tone);
+    // autoPercentile, autoTarget, localTone -- the order NativeSubPixel packs
+    // them in.
+    float tone[9];
+    env->GetFloatArrayRegion(jtone, 0, 9, tone);
     p.tone.exposureGain = tone[0];
     p.tone.knee = tone[1];
     p.tone.contrast = tone[2];
@@ -855,6 +856,7 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     p.tone.blackPoint = tone[5];
     p.autoPercentile = tone[6];
     p.autoTarget = tone[7];
+    p.localTone = tone[8];
 
     float sharpen[3];
     env->GetFloatArrayRegion(jsharpen, 0, 3, sharpen);

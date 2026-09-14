@@ -297,40 +297,45 @@ class ZslStreamDeviceTest {
     /**
      * The mosaic orchestration, against the real camera.
      *
-     * A stationary phone cannot produce a sweep, so this does not test
-     * stitching -- that is covered against synthetic scenes, where the answer is
-     * known. What it tests is everything around it: that the sweep locks
-     * exposure, pulls frames from the live ring, registers them, correctly
-     * refuses the ones that add nothing, and comes back with a result instead
-     * of hanging or falling over.
+     * A stationary phone cannot pan, so this does not test the panning -- that
+     * is covered against scripted reticle paths, where the answer is known.
+     * What it tests is everything around it against the live camera: that the
+     * sweep locks exposure, anchors on the first frame, registers the frames
+     * that follow, sees the reticle holding on the one node a 1x1 grid has,
+     * takes the burst, merges, develops, composites, saves, and comes back
+     * with a result instead of hanging or falling over.
      */
     @Test
-    fun aSweepRunsAgainstTheLiveCameraAndStopsCleanly() {
+    fun aGuidedSweepRunsAgainstTheLiveCameraAndCompletesItsOneNode() {
         val s = openStream() ?: return
         stream = s
         assertThat(waitForFrames(s, 10)).isTrue()
 
         val lenses = LensCatalog.enumerate(manager)
         val target = LensCatalog.default(lenses)!!
-        // A small canvas: this is about the orchestration, and an 80 megapixel
-        // one would spend the test's time on memory.
-        val plan = MosaicPlanner.plan(
+        // One node, at the centre, which is where a phone that does not move
+        // is pointing. A small canvas: this is about the orchestration.
+        val plan = MosaicPlanner.planGrid(
             target = target,
             capture = s.lens.copy(equivalent35mm = target.equivalent35mm * 3),
             tileWidth = s.config.width,
             tileHeight = s.config.height,
+            columns = 1, rows = 1,
             maxMegapixels = 24.0,
         )!!
         val session = MosaicSession.start(plan, s.config.width, s.config.height)
         assumeTrue("canvas could not be allocated", session != null)
 
-        val deadline = System.currentTimeMillis() + 4000
+        val events = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var lastView: GuidedSweepView? = null
+        val deadline = System.currentTimeMillis() + 12_000
         val result = session!!.use {
             runBlocking {
                 MosaicCapture.run(
                     context = context,
                     stream = s,
                     session = it,
+                    sweep = GuidedSweep(plan),
                     settings = ManualSettings(),
                     caps = CameraCapabilities(
                         hasManualSensor = true, isoMin = null, isoMax = null,
@@ -341,7 +346,10 @@ class ZslStreamDeviceTest {
                         sensorOrientation = 90, supportsRaw = true,
                         supportedOutputFormats = emptySet(),
                     ),
-                    onProgress = { },
+                    frames = 4,
+                    lensProfile = null,
+                    onView = { v -> lastView = v },
+                    onEvent = { e -> events.add(e.toString()) },
                     shouldContinue = { System.currentTimeMillis() < deadline },
                 )
             }
@@ -349,17 +357,23 @@ class ZslStreamDeviceTest {
 
         Log.i(
             TAG,
-            "sweep: ${result.message} | ${result.tiles} tiles, ${result.rejected} rejected, " +
-                "%.0f MP, %.1fs".format(result.megapixels, result.elapsedMillis / 1000.0),
+            "guided sweep: ${result.message} | ${result.tiles} tiles, ${result.rejected} rejected, " +
+                "%.0f MP, %.1fs; events $events".format(result.megapixels, result.elapsedMillis / 1000.0),
         )
 
-        // The first frame anchors the mosaic; a stationary camera then offers
-        // nothing new, so the rest must be refused rather than piled up.
-        assertThat(result.tiles).isAtLeast(1)
-        assertThat(result.rejected).isGreaterThan(0)
+        // Anchored, then the one node locked, captured and the sweep completed.
+        assertThat(events.first()).isEqualTo("Anchored")
+        assertThat(events.any { it.startsWith("Locked") }).isTrue()
+        assertThat(events.any { it.startsWith("Captured") }).isTrue()
+        assertThat(events.last()).isEqualTo("Complete")
+        assertThat(result.tiles).isEqualTo(1)
+        assertThat(result.savedName).isNotNull()
         assertThat(result.coverage).isGreaterThan(0f)
-        // And it must have stopped when asked rather than run to its deadline.
-        assertThat(result.elapsedMillis).isLessThan(15_000)
+        // The screen was told where the node was, on the frame it was seen in.
+        val node = lastView!!.nodes.single()
+        assertThat(node.state).isEqualTo(GuidedSweep.NodeState.DONE)
+        // Done well inside the deadline: a stationary phone locks in a quarter second.
+        assertThat(result.elapsedMillis).isLessThan(10_000)
         // Exposure has to be handed back, or the viewfinder stays frozen after.
         assertThat(s.isLocked).isFalse()
     }

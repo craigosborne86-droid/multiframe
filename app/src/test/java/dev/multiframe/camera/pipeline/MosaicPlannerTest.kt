@@ -175,4 +175,102 @@ class MosaicPlannerTest {
         assertThat(plan.canvasBytes).isGreaterThan(100L * 1024 * 1024)
         println("100 MP canvas costs %.0f MB".format(plan.canvasBytes / (1024.0 * 1024.0)))
     }
+
+    // --- the presets and their nodes --------------------------------------
+
+    @Test
+    fun `a fixed grid is sized to the grid, not the framing`() {
+        val plan = MosaicPlanner.planGrid(main, tele, tileW, tileH, columns = 2, rows = 2)!!
+        assertThat(plan.columns).isEqualTo(2)
+        assertThat(plan.rows).isEqualTo(2)
+        // Two tiles at the default overlap span 1 + 0.65 tile widths.
+        val expectedW = tileW * (1.0 + 0.65)
+        assertThat(plan.canvasWidth.toDouble()).isWithin(2.0).of(kotlin.math.ceil(expectedW))
+        assertThat(plan.capped).isFalse()
+        assertThat(plan.tileScale).isWithin(1e-6f).of(1f)
+        // Twenty-odd megapixels, which is what the PRD promised for Detail Boost.
+        assertThat(plan.megapixels).isGreaterThan(15.0)
+        assertThat(plan.megapixels).isLessThan(40.0)
+    }
+
+    @Test
+    fun `the nodes are the tile centres, laid out around the canvas centre`() {
+        val plan = MosaicPlanner.planGrid(main, tele, tileW, tileH, columns = 3, rows = 3)!!
+        assertThat(plan.nodes).hasSize(9)
+        val centre = plan.nodes[4]
+        assertThat(centre.column).isEqualTo(1)
+        assertThat(centre.row).isEqualTo(1)
+        assertThat(centre.canvasX).isWithin(0.5f).of(plan.canvasWidth / 2f)
+        assertThat(centre.canvasY).isWithin(0.5f).of(plan.canvasHeight / 2f)
+        // Neighbours a step apart, and a step is a tile less its overlap.
+        val right = plan.nodes[5]
+        assertThat(right.canvasX - centre.canvasX).isWithin(0.5f).of(tileW * (1f - plan.overlap))
+        assertThat(right.canvasY).isWithin(0.5f).of(centre.canvasY)
+        // Row-major, top-left first.
+        assertThat(plan.nodes[0].canvasX).isLessThan(plan.nodes[1].canvasX)
+        assertThat(plan.nodes[0].canvasY).isLessThan(plan.nodes[3].canvasY)
+        // And a tile centred on the corner node still lies on the canvas.
+        val corner = plan.nodes[0]
+        assertThat(corner.canvasX - tileW / 2f).isAtLeast(-1f)
+        assertThat(corner.canvasY - tileH / 2f).isAtLeast(-1f)
+    }
+
+    @Test
+    fun `the presets plan their grids`() {
+        val boost = MosaicPlanner.planPreset(SweepPreset.DETAIL_BOOST, main, tele, tileW, tileH)!!
+        assertThat(boost.tileCount).isEqualTo(4)
+        val large = MosaicPlanner.planPreset(SweepPreset.LARGE_FORMAT, main, tele, tileW, tileH)!!
+        assertThat(large.tileCount).isEqualTo(9)
+        assertThat(large.megapixels).isGreaterThan(boost.megapixels)
+        // Custom with no region drawn yet is not a plan.
+        assertThat(MosaicPlanner.planPreset(SweepPreset.CUSTOM, main, tele, tileW, tileH)).isNull()
+    }
+
+    @Test
+    fun `a custom region is covered by the smallest grid that reaches it`() {
+        // The whole framing, as a region, is the full plan's grid.
+        val full = MosaicPlanner.plan(main, tele, tileW, tileH, maxMegapixels = 0.0)!!
+        val whole = MosaicPlanner.planRegion(main, tele, tileW, tileH, 1f, 1f)!!
+        assertThat(whole.columns).isEqualTo(full.columns)
+        assertThat(whole.rows).isEqualTo(full.rows)
+
+        // A region the size of one tile needs one tile.
+        val oneTile = MosaicPlanner.planRegion(
+            main, tele, tileW, tileH,
+            regionWidth = tileW.toFloat() / full.canvasWidth,
+            regionHeight = tileH.toFloat() / full.canvasHeight,
+        )!!
+        assertThat(oneTile.columns).isEqualTo(1)
+        assertThat(oneTile.rows).isEqualTo(1)
+
+        // Half the framing each way is between the two.
+        val half = MosaicPlanner.planRegion(main, tele, tileW, tileH, 0.5f, 0.5f)!!
+        assertThat(half.columns).isGreaterThan(1)
+        assertThat(half.columns).isLessThan(full.columns)
+        assertThat(half.nodes).hasSize(half.columns * half.rows)
+    }
+
+    @Test
+    fun `a custom region of nothing is not a plan`() {
+        assertThat(MosaicPlanner.planRegion(main, tele, tileW, tileH, 0f, 0.5f)).isNull()
+        assertThat(MosaicPlanner.planRegion(main, tele, tileW, tileH, 0.5f, -1f)).isNull()
+    }
+
+    @Test
+    fun `a grid over a pointless pairing is refused too`() {
+        assertThat(MosaicPlanner.planGrid(tele, main, tileW, tileH, 2, 2)).isNull()
+        assertThat(MosaicPlanner.planGrid(main, main, tileW, tileH, 2, 2)).isNull()
+    }
+
+    @Test
+    fun `the preset cycles and reads back by name`() {
+        assertThat(SweepPreset.DETAIL_BOOST.next()).isEqualTo(SweepPreset.LARGE_FORMAT)
+        assertThat(SweepPreset.CUSTOM.next()).isEqualTo(SweepPreset.DETAIL_BOOST)
+        assertThat(SweepPreset.named("LARGE_FORMAT")).isEqualTo(SweepPreset.LARGE_FORMAT)
+        assertThat(SweepPreset.named("nonsense")).isEqualTo(SweepPreset.DETAIL_BOOST)
+        assertThat(SweepPreset.named(null)).isEqualTo(SweepPreset.DETAIL_BOOST)
+        assertThat(SweepPreset.DETAIL_BOOST.gridSide).isEqualTo(2)
+        assertThat(SweepPreset.LARGE_FORMAT.gridSide).isEqualTo(3)
+        assertThat(SweepPreset.CUSTOM.gridSide).isEqualTo(0)
+    }
 }

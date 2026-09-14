@@ -113,22 +113,62 @@ void buildGainRow(const Params& p, int sensorRow, int width, int height,
     }
 }
 
-/** Black level to linear, gain row, matrix, exposure, tone, display: one row. */
-void developRow(const uint16_t* src, int width, const Params& p, const float* gainRow,
-                float invRange, const ShoulderLut& shoulder, const DisplayLut& display,
-                uint8_t* dst) {
+/** Black level to linear, gain row, matrix, exposure: one pixel's linear RGB after the gain. */
+inline void linearPixel(const uint16_t* s, const float* gr, const Params& p, float invRange,
+                        float& r, float& g, float& b) {
     const float* m = p.matrix;
     const float gain = p.tone.exposureGain;
+    const float r0 = std::max((static_cast<float>(s[0]) - p.black[0]) * invRange, 0.0f) * gr[0];
+    const float g0 = std::max((static_cast<float>(s[1]) - p.black[1]) * invRange, 0.0f) * gr[1];
+    const float b0 = std::max((static_cast<float>(s[2]) - p.black[2]) * invRange, 0.0f) * gr[2];
+    r = (m[0] * r0 + m[1] * g0 + m[2] * b0) * gain;
+    g = (m[3] * r0 + m[4] * g0 + m[5] * b0) * gain;
+    b = (m[6] * r0 + m[7] * g0 + m[8] * b0) * gain;
+}
+
+/**
+ * The bilateral grid for the canvas, from each 2x2 block's mean linear RGB
+ * after the gain -- the same chain as the pixels, at a quarter of them.
+ * Mirrors BilateralGrid.fromCanvas.
+ */
+void buildGrid(const uint16_t* rgb16, int width, int height, const Params& p, float invRange,
+               BilateralGrid& grid) {
+    grid.init(width, height);
+    std::vector<float> gainRow;
+    for (int by = 0; by + 1 < height; by += 2) {
+        buildGainRow(p, by >> 1, width, height, gainRow);
+        const uint16_t* row0 = rgb16 + static_cast<size_t>(by) * width * 3;
+        const uint16_t* row1 = row0 + static_cast<size_t>(width) * 3;
+        for (int bx = 0; bx + 1 < width; bx += 2) {
+            float r = 0, g = 0, b = 0;
+            for (int dy = 0; dy < 2; ++dy) {
+                const uint16_t* row = dy ? row1 : row0;
+                for (int dx = 0; dx < 2; ++dx) {
+                    float pr, pg, pb;
+                    linearPixel(row + static_cast<size_t>(bx + dx) * 3,
+                                gainRow.data() + static_cast<size_t>(bx + dx) * 3, p, invRange, pr, pg, pb);
+                    r += 0.25f * pr; g += 0.25f * pg; b += 0.25f * pb;
+                }
+            }
+            grid.splat(bx, by, 0.2126f * r + 0.7152f * g + 0.0722f * b);
+        }
+    }
+    grid.finish();
+}
+
+/** Black level to linear, gain row, matrix, exposure, local tone, tone, display: one row. */
+void developRow(const uint16_t* src, int width, int y, const Params& p, const float* gainRow,
+                float invRange, const ShoulderLut& shoulder, const DisplayLut& display,
+                const BilateralGrid* grid, uint8_t* dst) {
     for (int x = 0; x < width; ++x) {
         const uint16_t* s = src + static_cast<size_t>(x) * 3;
         const float* gr = gainRow + static_cast<size_t>(x) * 3;
-        const float r0 = std::max((static_cast<float>(s[0]) - p.black[0]) * invRange, 0.0f) * gr[0];
-        const float g0 = std::max((static_cast<float>(s[1]) - p.black[1]) * invRange, 0.0f) * gr[1];
-        const float b0 = std::max((static_cast<float>(s[2]) - p.black[2]) * invRange, 0.0f) * gr[2];
-
-        float r = (m[0] * r0 + m[1] * g0 + m[2] * b0) * gain;
-        float g = (m[3] * r0 + m[4] * g0 + m[5] * b0) * gain;
-        float b = (m[6] * r0 + m[7] * g0 + m[8] * b0) * gain;
+        float r, g, b;
+        linearPixel(s, gr, p, invRange, r, g, b);
+        if (grid != nullptr) {
+            const float k = grid->gain(x, y, 0.2126f * r + 0.7152f * g + 0.0722f * b, p.localTone);
+            r *= k; g *= k; b *= k;
+        }
         renderLinear(r, g, b, p.tone, shoulder);
 
         uint8_t* d = dst + static_cast<size_t>(x) * 3;
@@ -310,6 +350,17 @@ bool developToRgb8(uint16_t* rgb16, int width, int height, const Params& params,
     ShoulderLut shoulder;
     buildShoulderLut(shoulder, p.tone);
 
+    // The local operator's grid, when asked for, built before any strip of
+    // the canvas is released: it reads the whole canvas.
+    BilateralGrid grid;
+    const BilateralGrid* gridPtr = nullptr;
+    const int64_t tGrid = nowMicros();
+    if (p.localTone > 0.0f) {
+        buildGrid(rgb16, width, height, p, invRange, grid);
+        gridPtr = &grid;
+        LOGI("linear develop: local tone grid %lldms", static_cast<long long>((nowMicros() - tGrid) / 1000));
+    }
+
     for (int s0 = 0; s0 < height; s0 += kStripRows) {
         const int s1 = std::min(s0 + kStripRows, height);
         parallelBands(s1 - s0, [&](int b0, int b1) {
@@ -321,8 +372,8 @@ bool developToRgb8(uint16_t* rgb16, int width, int height, const Params& params,
                     buildGainRow(p, sensorRow, width, height, gainRow);
                     builtFor = sensorRow;
                 }
-                developRow(rgb16 + static_cast<size_t>(y) * width * 3, width, p, gainRow.data(),
-                           invRange, shoulder, display, out + static_cast<size_t>(y) * outStride);
+                developRow(rgb16 + static_cast<size_t>(y) * width * 3, width, y, p, gainRow.data(),
+                           invRange, shoulder, display, gridPtr, out + static_cast<size_t>(y) * outStride);
             }
         });
         if (release) releaseRows(rgb16, width, s0, s1);

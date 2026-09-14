@@ -133,6 +133,9 @@ object LinearDeveloper {
         val grid = shading?.rgbGrid()
         val sensorW = width / 2
         val sensorH = height / 2
+        val localGrid = if (resolved.localTone > 0f) {
+            BilateralGrid.fromCanvas(rgb16, width, height, profile, color, resolved, shading)
+        } else null
 
         val out = IntArray(width * height)
         Bands.rows(height) { y0, y1 ->
@@ -158,6 +161,10 @@ object LinearDeveloper {
                     local[0] = (m[0] * r0 + m[1] * g0 + m[2] * b0) * gain
                     local[1] = (m[3] * r0 + m[4] * g0 + m[5] * b0) * gain
                     local[2] = (m[6] * r0 + m[7] * g0 + m[8] * b0) * gain
+                    if (localGrid != null) {
+                        val k = localGrid.gain(x, y, BilateralGrid.luminance(local[0], local[1], local[2]), resolved.localTone)
+                        local[0] *= k; local[1] *= k; local[2] *= k
+                    }
                     ToneCurve.renderLinear(local, resolved)
                     out[y * width + x] = (0xFF shl 24) or
                         (encode(local[0], resolved) shl 16) or

@@ -38,12 +38,31 @@ data class AppSettings(
      */
     val superRes: Boolean = false,
     /**
+     * How much of the framing a telephoto sweep covers. See [SweepPreset].
+     * Remembered because the grid is a decision about the kind of picture,
+     * not about the shot.
+     */
+    val sweepPreset: SweepPreset = SweepPreset.DETAIL_BOOST,
+    /**
+     * Whether the bilateral-grid local tone operator runs in the develop.
+     *
+     * Off by default. The PRD's rendering is a global scale and a roll-off,
+     * which is what keeps a photograph looking photographed rather than
+     * processed; the operator is there for the scene that needs it -- a room
+     * and its window -- and is a choice to make, not a default to inherit.
+     */
+    val localTone: Boolean = false,
+    /**
      * What the developed image is written as. The DNG is unaffected.
      *
      * JPEG by default, for the compatibility reason in [OutputFormat].
      */
     val outputFormat: OutputFormat = OutputFormat.JPEG,
 ) {
+
+    /** The develop's parameters as these settings ask for them. */
+    val developParams: DevelopParams
+        get() = DevelopParams(localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f)
 
     /**
      * Reduces to strings, which is the whole persistence format.
@@ -67,6 +86,8 @@ data class AppSettings(
         KEY_GUARD to highlightGuard.toString(),
         KEY_ZSL to zslEnabled.toString(),
         KEY_SUPER_RES to superRes.toString(),
+        KEY_SWEEP_PRESET to sweepPreset.name,
+        KEY_LOCAL_TONE to localTone.toString(),
         KEY_MODE to captureMode.name,
         KEY_TIMER to timerSeconds.toString(),
         KEY_GUIDES to guides,
@@ -93,6 +114,8 @@ data class AppSettings(
         const val KEY_GUIDES = "guides"
         const val KEY_DCG = "dcg"
         const val KEY_SUPER_RES = "superRes"
+        const val KEY_SWEEP_PRESET = "sweepPreset"
+        const val KEY_LOCAL_TONE = "localTone"
         const val KEY_FORMAT = "outputFormat"
 
         private const val PREFERENCES = "multiframe.settings"
@@ -149,6 +172,8 @@ data class AppSettings(
                 guides = stored[KEY_GUIDES]?.takeIf { it.isNotBlank() } ?: defaults.guides,
                 dcgEnabled = bool(KEY_DCG, defaults.dcgEnabled),
                 superRes = bool(KEY_SUPER_RES, defaults.superRes),
+                sweepPreset = SweepPreset.named(stored[KEY_SWEEP_PRESET]),
+                localTone = bool(KEY_LOCAL_TONE, defaults.localTone),
                 outputFormat = OutputFormat.named(stored[KEY_FORMAT]),
             )
         }

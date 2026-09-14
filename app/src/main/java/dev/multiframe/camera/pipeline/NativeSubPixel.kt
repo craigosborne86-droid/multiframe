@@ -162,6 +162,7 @@ class NativeSubPixel private constructor(
     private fun toneArray(p: DevelopParams) = floatArrayOf(
         p.exposureGain, p.shoulderKnee, p.contrast, p.highlightDesaturation,
         p.desaturationStart, p.blackPoint, p.highlightPercentile, p.highlightTarget,
+        p.localTone,
     )
 
     private fun sharpenArray(p: DevelopParams) = floatArrayOf(
