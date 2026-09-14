@@ -215,6 +215,11 @@ class ZslRawStream private constructor(
      */
     @Volatile
     private var locked = false
+
+    // The mosaic's pinned exposure while locked, and whether the lock turned
+    // dual conversion gain off to be turned back on.
+    private var sweepExposure: Pair<Int, Long>? = null
+    private var dcgSuspended = false
     private val histogramBins = IntArray(64)
     private var lastSettings: ManualSettings? = null
     private var lastCaps: CameraCapabilities? = null
@@ -349,21 +354,68 @@ class ZslRawStream private constructor(
      * Focus too: a mosaic of a distant scene should stay at one focus distance,
      * and refocusing between tiles changes magnification slightly as well as
      * sharpness, which registration then has to absorb.
+     *
+     * And the shutter is floored. Auto exposure on a dim scene chooses 1/30 s
+     * without a thought for the lens; on the telephoto a hand's tremor moves
+     * the image forty pixels in that time and every tile is smeared. Where
+     * the converged exposure is longer than the lens's floor
+     * ([StabilityGate.shutterFloorNs]), the stream is pinned at the floor with
+     * the ISO raised to keep the same light -- the merge takes the noise out,
+     * nothing takes the blur out. Where the ISO runs out the frame is under,
+     * and the anchor's measured develop gain makes it up. A manual exposure
+     * is the photographer's and is left alone. Dual conversion gain is
+     * suspended for the duration: the mosaic's merge weighs every frame alike.
      */
     fun lockForSweep(settings: ManualSettings, caps: CameraCapabilities) {
         if (closed || locked) return
         locked = true
-        Log.i(TAG, "locking exposure, white balance and focus for a mosaic")
+        sweepExposure = sweepExposureFor(settings, caps)
+        if (dcg) {
+            dcgSuspended = true
+            dcg = false
+        }
+        Log.i(
+            TAG,
+            "locking exposure, white balance and focus for a mosaic" +
+                (sweepExposure?.let { (iso, ns) -> "; shutter floored at 1/%d s, ISO %d".format((1e9 / ns).toInt(), iso) } ?: ""),
+        )
         applySettings(settings, caps)
     }
 
     fun unlock(settings: ManualSettings, caps: CameraCapabilities) {
         if (closed || !locked) return
         locked = false
+        sweepExposure = null
+        if (dcgSuspended) {
+            dcgSuspended = false
+            dcg = true
+        }
         applySettings(settings, caps)
     }
 
+    /** The exposure a locked mosaic is pinned at, ISO and nanoseconds, or null where the converged one stands. */
+    val sweepExposureOrNull: Pair<Int, Long>? get() = if (locked) sweepExposure else null
+
+    /**
+     * What the mosaic's lock pins the sensor at, from the exposure the camera
+     * has converged on: the lens's shutter floor, and the ISO scaled to keep
+     * the light, clamped to what the sensor offers. Null where the converged
+     * exposure is already short enough, where the sensor cannot be told, or
+     * where the photographer set the exposure by hand.
+     */
+    internal fun sweepExposureFor(settings: ManualSettings, caps: CameraCapabilities): Pair<Int, Long>? {
+        if (settings.manualExposureActive(caps)) return null
+        if (!caps.hasManualSensor || !caps.hasIsoRange) return null
+        val isoMin = caps.isoMin ?: return null
+        val isoMax = caps.isoMax ?: return null
+        val (iso, exposureNs) = latestExposure() ?: return null
+        return StabilityGate.sweepExposure(iso, exposureNs, lens.equivalent35mm, isoMin, isoMax, caps.exposureMinNs ?: 0L)
+    }
+
     val isLocked: Boolean get() = locked
+
+    /** Whether the stream has been closed: a mosaic reads this to stop with its camera. */
+    val isClosed: Boolean get() = closed
 
     /** Digital zoom on top of whichever lens is selected. */
     fun setZoom(ratio: Float, settings: ManualSettings, caps: CameraCapabilities) {
@@ -740,13 +792,15 @@ class ZslRawStream private constructor(
             builder.set(CaptureRequest.CONTROL_AWB_LOCK, true)
         }
 
-        if (settings.manualExposureActive(caps)) {
+        // The mosaic's floored shutter is a manual exposure the mosaic chose.
+        val pinned = if (locked) sweepExposure else null
+        if (settings.manualExposureActive(caps) || pinned != null) {
             builder.set(
                 CaptureRequest.CONTROL_AE_MODE,
                 android.hardware.camera2.CameraMetadata.CONTROL_AE_MODE_OFF,
             )
-            builder.set(CaptureRequest.SENSOR_SENSITIVITY, settings.effectiveIso(caps))
-            val exposure = settings.effectiveExposureTimeNs(caps)
+            builder.set(CaptureRequest.SENSOR_SENSITIVITY, pinned?.first ?: settings.effectiveIso(caps))
+            val exposure = pinned?.second ?: settings.effectiveExposureTimeNs(caps)
             builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
             // Frame duration must cover the exposure or the stream slows to it.
             builder.set(

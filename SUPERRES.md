@@ -100,38 +100,52 @@ to tell the user this in the interface rather than let them discover it.
 | Match verification | Done | Brown-Lowe criterion; refuses noise and repeated patterns |
 | Capture planning and geometry | Done | 12 unit tests; presets 2x2, 3x3 and a drawn region, 7 more |
 | Native compositing canvas, three-band blending | Done | One tile is identical to the byte in one band and three; two tiles a quarter-stop and a pixel apart keep their texture and lose their step (`MosaicBlendDeviceTest`) |
-| Reticle and dot guidance, with a stability gate | Done, revised after the first field test | 16 unit tests on the lock rule against scripted pans, including a hand still settling and a gyroscope veto; the overlay draws the canvas outline and each node where the frame's registration puts it |
+| Reticle and dot guidance, from the attitude, with a stability gate | Done, revised after two field tests | 18 unit tests on the lock rule against scripted pans, including a hand still settling, a gyroscope veto and the magnet; 7 on the attitude geometry, turning the phone by known angles and reading the dots; the overlay draws the canvas outline and each node where the attitude puts it |
+| The mode's lifecycle and the back gesture | Done, after the second field test's deadlock | `SuperResMachine` walked stop → re-arm → run by 7 unit tests; `BackNavigation` as a rule (6) and as plumbing on the device (2) |
+| The shutter floor | Done | 1/250 s at 105mm, scaled by focal length, ISO raised to keep the light; 3 unit tests |
 | Burst per node, merged and lens-corrected | Done | The same merge as a shutter press, the Phase 2 optics before the homography |
 | Exposure, white balance, colour and develop gain locking | Done | `lockForSweep`; colour and gain fixed by the anchor, tiles normalised by ISO × exposure |
 | Writing the result out | Done | 3 device tests; compresses from the canvas's own pages |
 
-Every piece of it is built. What has not happened is the part no table can
-record: nobody has swept a real scene with it. The stitching is tested against
-synthetic frames cut from a generated image, which is the right way to test the
-algorithm and no substitute for pointing it at a building.
+Every piece of it is built, and it has been pointed at a real scene twice:
+the second field test produced a genuine full-colour 33 MP canvas, and found
+the app around it unusable in the hand -- which is what the lifecycle, the
+attitude guidance and the gate's second calibration answer. The stitching is
+also tested against synthetic frames cut from a generated image, which is the
+right way to test the algorithm.
 
 ## How the capture works
 
-1. The user presses MOSAIC, on whatever lens they are on. The app switches to
-   the longest raw lens and says so; the outline of the whole picture and its
-   tile nodes are drawn on the viewfinder, and the 2x2/3x3 choice is on the
-   HUD under the count. Nothing has been taken: the user is composing.
+1. The user selects SUPER RES in the mode carousel under the shutter, on
+   whatever lens they are on. The app switches to the longest raw lens and
+   says so, switches the raw ring on if it was off, draws the outline of the
+   whole picture and its tile nodes on the viewfinder, and puts the grid pill
+   -- `2×2 · 33 MP | 3×3 · 75 MP` -- directly above the shutter. Nothing has
+   been taken: the user is composing. Another mode, or the back gesture, puts
+   the lens and the ring back.
 2. The shutter anchors it. The app waits for the camera's exposure and white
-   balance to converge, **locks exposure, focus and white balance**, and takes
-   the anchor: wherever the reticle points becomes the centre of the canvas,
-   the develop gain and colour are measured from that frame and held, and the
-   nodes are laid out around it.
+   balance to converge, **locks exposure, focus and white balance** -- pinning
+   the shutter at 1/250 s with the ISO raised if auto exposure had chosen
+   slower -- and takes the anchor: wherever the reticle points becomes the
+   centre of the canvas, the develop gain and colour are measured from that
+   frame and held, and the nodes are laid out around it as directions in the
+   world, from the phone's attitude at that instant.
 3. A reticle sits at the centre of the viewfinder and a dot is drawn at each
-   node, where the frame's own registration says that part of the scene is.
-   The user pans the reticle onto a dot and holds *still*: the ring around the
-   dot fills over the hold and empties the moment the gyroscope or the
-   registration reads movement. Still for the settle time -- longer than the
-   burst, so the burst is the hold -- locks it: the burst is taken from the
-   ring, then a haptic. Pan too fast and the phone says so.
+   node, where the phone's attitude says that direction now falls in the
+   frame -- thirty times a second, from the rotation vector, whatever the
+   scene shows. The user pans the reticle onto a dot and holds *still*: the
+   dot snaps to the reticle, the ring around it fills over 170 ms and empties
+   the moment the gyroscope reads more than six degrees a second or the
+   reticle drifts more than that would move it. Still for the settle time --
+   longer than the burst, so the burst is the hold -- fires it: the burst is
+   taken from the ring, then a haptic. Pan too fast and the phone says so.
+   STOP, or the back gesture, ends the capture keeping what was taken.
 4. Each burst is merged like any other photograph, developed with the anchor's
    colour and gain (the gain scaled by its own ISO and exposure), corrected
    for the lens's geometry, and composited where its reference frame
-   registered -- against the anchor and every tile so far, not chained.
+   registered -- against the anchor and every tile so far, not chained. Where
+   it registered, against where the attitude said it was, is the attitude's
+   drift, and the dots are corrected by it from then on.
 5. Compositing is in three frequency bands: the fine detail is handed from
    one tile to the next along the line where they are equally deep, the broad
    differences between them are spread over six hundred pixels, so the texture

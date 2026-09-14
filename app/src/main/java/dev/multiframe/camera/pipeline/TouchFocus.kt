@@ -100,6 +100,24 @@ object TouchFocus {
     }
 
     /**
+     * The inverse of [toDisplayPoint]: a point on the displayed image, as
+     * fractions of its width and height, back to fractions of the sensor's
+     * frame. The IMU guidance projects into the display's frame -- the one
+     * the device's axes are stated in -- and hands the result over in the
+     * sensor's, which is what the rest of the mosaic speaks.
+     */
+    fun toSensorFraction(
+        displayX: Float,
+        displayY: Float,
+        sensorOrientation: Int,
+    ): Pair<Float, Float> = when (((sensorOrientation % 360) + 360) % 360) {
+        90 -> displayY to (1f - displayX)
+        180 -> (1f - displayX) to (1f - displayY)
+        270 -> (1f - displayY) to displayX
+        else -> displayX to displayY
+    }
+
+    /**
      * A metering rectangle around a tap, clamped inside the crop region.
      *
      * Clamping rather than centring: a tap near the edge of the frame must

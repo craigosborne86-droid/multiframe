@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -100,6 +101,18 @@ fun GalleryScreen(
 
     val cache = remember { ThumbnailCache() }
     DisposableEffect(Unit) { onDispose { cache.clear() } }
+
+    // The back gesture, from the top down: a delete being confirmed is
+    // called off, a picture being reviewed is put back in the grid, and only
+    // from the grid does back close the gallery. Before this the gesture
+    // reached the activity and quit the app from inside the gallery.
+    BackHandler {
+        when {
+            confirming != null -> confirming = null
+            opened != null -> opened = null
+            else -> onDismiss()
+        }
+    }
 
     Box(
         modifier = Modifier

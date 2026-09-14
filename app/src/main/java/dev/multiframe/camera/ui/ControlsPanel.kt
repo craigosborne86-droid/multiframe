@@ -38,25 +38,22 @@ import androidx.compose.ui.unit.dp
 import dev.multiframe.camera.pipeline.CameraCapabilities
 import dev.multiframe.camera.pipeline.ManualSettings
 import dev.multiframe.camera.pipeline.OutputFormat
-import dev.multiframe.camera.pipeline.MosaicPreset
 import kotlin.math.ln
 import kotlin.math.exp
 
 /**
  * The manual controls, and everything else you set once.
  *
- * The division against the row over the viewfinder is deliberate: that row is
- * what a photographer changes between shots, and this is what they set and
- * leave. `A/B` and `GUARD` live here for that reason -- neither is touched
- * while composing, and in the row they were pushing things off the edge of the
- * screen.
+ * The division against the viewfinder is deliberate: what a photographer
+ * changes between shots -- the mode, the lens, the grid -- is on the
+ * viewfinder, and this is what they set and leave. `A/B`, `GUARD` and `DCG`
+ * live here for that reason: none is touched while composing.
  *
  * ### The panel does not draw its own ground
  *
- * It used to, with rounded top corners, while the action strip and the shutter
- * stayed outside it -- so the surface stopped in mid-air and the photograph
- * reappeared beneath it before the shutter. The screen now puts one ground
- * under the panel, the strip and the shutter together. See `CameraScreen`.
+ * It is a section of the settings screen, which supplies the ground; see
+ * [SettingsScreen]. The Super Res grid is not here: it is chosen above the
+ * shutter, where the outline it changes is in view.
  */
 @Composable
 fun ControlsPanel(
@@ -75,9 +72,6 @@ fun ControlsPanel(
     /** Null where the device cannot hold a 2x canvas of this sensor, or has no native library. */
     superRes: Boolean? = null,
     onSuperRes: (Boolean) -> Unit = {},
-    /** Null where no telephoto exists to shoot a mosaic with. */
-    mosaicPreset: MosaicPreset? = null,
-    onMosaicPreset: (MosaicPreset) -> Unit = {},
     localTone: Boolean = false,
     onLocalTone: (Boolean) -> Unit = {},
     /** Null where the device cannot write HEIF, in which case there is no choice. */
@@ -197,14 +191,6 @@ fun ControlsPanel(
             // rather than about the shot, hence set once.
             superRes?.let { on ->
                 Toggle("2X ${if (on) "ON" else "OFF"}", on) { onSuperRes(!on) }
-            }
-            // How much of the framing a mosaic covers: 2x2, 3x3, or a box the
-            // user draws. Shown as a pill because it is a setting; the mosaic
-            // itself is the SUPER RES action on the bar.
-            mosaicPreset?.let { preset ->
-                Toggle("MOSAIC ${preset.label}", preset != MosaicPreset.DETAIL_BOOST) {
-                    onMosaicPreset(preset.next())
-                }
             }
             // The bilateral-grid local tone operator. A rendering decision
             // rather than a shot decision: set once.

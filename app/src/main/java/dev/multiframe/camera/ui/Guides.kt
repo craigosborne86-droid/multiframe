@@ -323,7 +323,15 @@ fun MosaicGuidance(
             val fx = node.frameX
             val fy = node.frameY
             if (fx == null || fy == null) continue
-            val raw = display(fx, fy)
+            val projected = display(fx, fy)
+            // The magnet's visual half: a node that is locking is drawn *at*
+            // the reticle, not a few pixels off it where the tremor has the
+            // attitude putting it. The gate has latched; the eye should see
+            // the latch, not the jitter it is absorbing. Every other state is
+            // drawn where it is.
+            val locking = node.state == dev.multiframe.camera.pipeline.MosaicGuide.NodeState.LOCKING ||
+                node.state == dev.multiframe.camera.pipeline.MosaicGuide.NodeState.CAPTURING
+            val raw = if (locking) Offset(cx, cy) else projected
             // Clamped to the frame, with a margin so a dot at the edge is whole.
             val x = raw.x.coerceIn(margin, w - margin)
             val y = raw.y.coerceIn(margin, h - margin)
@@ -375,9 +383,13 @@ fun MosaicGuidance(
 }
 
 /**
- * The grid, chosen on the HUD: 2x2, 3x3, and a drawn region where a wider
- * lens is there to draw it on. A pill, since it is a setting; selection by
- * weight, as every other setting here.
+ * The grid, chosen above the shutter: `2×2 · 33 MP | 3×3 · 75 MP`.
+ *
+ * Each grid carries what the canvas would be on this lens, so the choice is
+ * between two pictures rather than two numbers of tiles. The megapixels are
+ * the planner's, from the same call the capture makes; the pill draws what it
+ * is given and draws no badge where it is given none. Selection by weight:
+ * the chosen grid is filled bone, the other is the pane.
  */
 @Composable
 fun MosaicPresetPill(
@@ -385,6 +397,8 @@ fun MosaicPresetPill(
     customOffered: Boolean,
     onPreset: (dev.multiframe.camera.pipeline.MosaicPreset) -> Unit,
     modifier: Modifier = Modifier,
+    /** The canvas each grid would make, in megapixels, where known. */
+    megapixels: Map<dev.multiframe.camera.pipeline.MosaicPreset, Double> = emptyMap(),
 ) {
     val options = buildList {
         add(dev.multiframe.camera.pipeline.MosaicPreset.DETAIL_BOOST)
@@ -399,20 +413,34 @@ fun MosaicPresetPill(
     ) {
         for (option in options) {
             val selected = option == preset
-            Box(
+            val badge = megapixels[option]?.let { "%.0f MP".format(it) }
+            val description = "super res ${option.label}" + (badge?.let { " · $it" } ?: "")
+            Row(
                 modifier = Modifier
-                    .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 42.dp)
                     .background(if (selected) Ink.Bone else Color.Transparent, RoundedCornerShape(21.dp))
                     .clickable { onPreset(option) }
-                    .semantics { contentDescription = "mosaic ${option.label}" }
+                    .semantics { contentDescription = description }
                     .padding(horizontal = 14.dp),
-                contentAlignment = Alignment.Center,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     text = option.label,
                     style = Type.Control,
                     color = if (selected) Ink.Ground else Ink.Bone,
                 )
+                badge?.let {
+                    Text(
+                        text = " · ",
+                        style = Type.Dot,
+                        color = if (selected) Ink.OnBoneMuted else Ink.Muted,
+                    )
+                    Text(
+                        text = it,
+                        style = Type.Badge,
+                        color = if (selected) Ink.OnBone else Ink.Amber,
+                    )
+                }
             }
         }
     }

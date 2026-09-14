@@ -85,12 +85,13 @@ class MosaicGuideTest {
         val s = sweep()
         val node = plan.nodes[0]
         val r = s.lockRadius
-        // Inside the radius throughout, moving a third of it each poll: a
-        // degree a second on the telephoto, and a smeared frame.
+        // Inside the radius throughout, moving half of it each poll: two and
+        // a half percent of the tile in a tenth of a second, five degrees a
+        // second on the telephoto, and a smeared frame.
         var t = 0L
         var dx = -r * 0.9f
         var decision: MosaicGuide.Decision = MosaicGuide.Decision.Idle
-        for (i in 0 until 6) {
+        for (i in 0 until 4) {
             decision = s.at(node, dx = dx, t = t)
             assertThat(decision).isEqualTo(MosaicGuide.Decision.Idle)
             assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.LOCKING)
@@ -98,7 +99,7 @@ class MosaicGuideTest {
             // The first poll has nothing to be still relative to; every one
             // after it is seen moving.
             if (i > 0) assertThat(s.unsteadyReason).isEqualTo(MosaicGuide.Unsteady.DRIFTING)
-            dx += r * 0.3f
+            dx += r * 0.5f
             t += 100
         }
         assertThat(s.holdProgress(t)).isEqualTo(0f)
@@ -160,12 +161,63 @@ class MosaicGuideTest {
     fun `a slow tracker is allowed proportionately more jitter, never more than a radius`() {
         val s = sweep()
         val node = plan.nodes[0]
-        // Polls 300 ms apart: three times the nominal interval, so three
-        // times the still distance is still -- and a whole radius is not.
+        // Polls 300 ms apart: three times the nominal interval, so up to
+        // three times the still distance is still -- but never more than a
+        // radius, whatever the interval.
         s.at(node, t = 0)
         s.at(node, dx = s.stillDistance * 2.5f, t = 300)
         assertThat(s.steady).isTrue()
-        s.at(node, dx = s.stillDistance * 2.5f + s.lockRadius * 0.95f, t = 600)
+        s.at(node, dx = s.stillDistance * 2.5f - s.lockRadius * 1.1f, t = 600)
+        assertThat(s.steady).isFalse()
+    }
+
+    /**
+     * The magnet. A hand on the dot trembles a few pixels over the radius and
+     * back; the lock has to survive that, or the ring flickers and the hold
+     * restarts on every tremor. It does not survive a real departure.
+     */
+    @Test
+    fun `a locked node keeps its lock a little past the radius and loses it past the magnet`() {
+        val s = sweep()
+        val node = plan.nodes[0]
+        val r = s.lockRadius
+        s.at(node, t = 0)
+        s.at(node, dx = 2f, t = 100)
+        assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.LOCKING)
+        // Over the edge by a fifth: still locking -- and still steady, since
+        // the tremor is small.
+        s.at(node, dx = r * 1.2f, t = 200)
+        assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.LOCKING)
+        assertThat(s.lockingNodeOrNull).isEqualTo(node)
+        // Well past the magnet's reach: near, and the hold is gone.
+        s.at(node, dx = r * 1.8f, t = 300)
+        assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.NEAR)
+        assertThat(s.lockingNodeOrNull).isNull()
+        // A node that was not locking does not get the magnet's reach.
+        val other = plan.nodes[1]
+        s.at(other, dx = r * 1.2f, t = 400)
+        assertThat(s.stateOf(other)).isEqualTo(MosaicGuide.NodeState.NEAR)
+    }
+
+    /**
+     * With the lens known the drift allowance is the gyroscope's ceiling
+     * expressed in canvas pixels, so the two measures cannot disagree.
+     */
+    @Test
+    fun `with the lens known the drift allowance is what the angular ceiling would move the reticle`() {
+        val s = sweep()
+        val node = plan.nodes[0]
+        // 0.1 rad/s at 10,000 canvas px/rad: 100 px per 100 ms poll.
+        s.configureGate(maxAngularSpeed = 0.1f, settleMillis = 170L, canvasPixelsPerRadian = 10_000f)
+        s.at(node, t = 0)
+        s.at(node, dx = 90f, t = 100)
+        assertThat(s.steady).isTrue()
+        s.at(node, dx = 90f + 110f, t = 200)
+        assertThat(s.steady).isFalse()
+        assertThat(s.unsteadyReason).isEqualTo(MosaicGuide.Unsteady.DRIFTING)
+        // A poll a third as long is allowed a third as far.
+        s.at(node, dx = 90f + 110f, t = 300)
+        s.at(node, dx = 90f + 110f + 40f, t = 333)
         assertThat(s.steady).isFalse()
     }
 
@@ -173,9 +225,11 @@ class MosaicGuideTest {
     fun `the settle time covers the burst`() {
         // Eight frames at 33 ms is 267 ms; the hold has to be longer than the
         // burst it will hand over, so that every frame was taken during it.
-        assertThat(MosaicGuide.settleFor(8, 33_333_333L)).isEqualTo(326L)
-        assertThat(MosaicGuide.settleFor(4, 33_333_333L)).isEqualTo(250L)
-        assertThat(MosaicGuide.settleFor(0, 33_333_333L)).isEqualTo(250L)
+        // Three frames is 100 ms, under the 170 ms floor.
+        assertThat(MosaicGuide.settleFor(8, 33_333_333L)).isEqualTo(306L)
+        assertThat(MosaicGuide.settleFor(3, 33_333_333L)).isEqualTo(MosaicGuide.DEFAULT_SETTLE_MILLIS)
+        assertThat(MosaicGuide.settleFor(0, 33_333_333L)).isEqualTo(MosaicGuide.DEFAULT_SETTLE_MILLIS)
+        assertThat(MosaicGuide.DEFAULT_SETTLE_MILLIS).isIn(150L..180L)
     }
 
     @Test

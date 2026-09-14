@@ -26,9 +26,9 @@ data class NodeView(
     val state: MosaicGuide.NodeState,
     /**
      * Where the node's centre falls in the current frame, as fractions of the
-     * sensor frame's width and height, or null when the frame could not be
-     * registered. May lie outside 0..1: a node off the edge of the view is
-     * drawn at the edge, pointing the way.
+     * sensor frame's width and height, or null when the phone's attitude is
+     * unknown or the node is behind the camera. May lie outside 0..1: a node
+     * off the edge of the view is drawn at the edge, pointing the way.
      */
     val frameX: Float?,
     val frameY: Float?,
@@ -39,7 +39,7 @@ data class MosaicGuideView(
     val nodes: List<NodeView>,
     val captured: Int,
     val total: Int,
-    /** Whether the current frame registered against the mosaic so far. */
+    /** Whether the reticle's place on the canvas is known this poll: the attitude has been read. */
     val located: Boolean,
     /** Fraction of the canvas covered, as the assembler counts it. */
     val coverage: Float,
@@ -47,8 +47,8 @@ data class MosaicGuideView(
      * The canvas's four corners in the current frame, as fractions of the
      * frame's width and height, top-left, top-right, bottom-right,
      * bottom-left -- the outline of the photograph being composed. Under a
-     * homography it is a quadrilateral, not a rectangle. Null when the frame
-     * could not be registered.
+     * rotation it is a quadrilateral, not a rectangle. Null when the attitude
+     * is unknown or a corner is behind the camera.
      */
     val canvasCorners: List<Pair<Float, Float>>?,
     /** How far the hold on the locking node has progressed, 0 to 1. */
@@ -91,24 +91,28 @@ sealed interface MosaicEvent {
  *
  * The first frame after the mosaic starts is the anchor: wherever the user is
  * pointing becomes the centre of the canvas, and the plan's nodes -- one per
- * tile -- are laid out around it. Then, ten times a second, the newest preview
- * frame is registered against the anchor and every tile placed so far, which
- * says where the reticle is pointing on the canvas; [MosaicGuide] turns that
- * into node states and, when the reticle has held on a node, the decision to
- * capture. A capture is a burst from the ring, merged and developed like any
- * other photograph, corrected for the lens, and composited at the place its
- * reference frame registered to. Registration is against *frames*, not the
- * nodes' ideal positions: a node says where to point, the frame says where
- * the tile actually is.
+ * tile -- are laid out around it as directions in the world, fixed from the
+ * phone's attitude at that moment. Then, thirty times a second, the attitude
+ * is read and [ImuGuidance] says where the reticle points on the canvas and
+ * where each node falls in the frame; [MosaicGuide] turns that into node
+ * states and, when the reticle has held on a node, the decision to capture. A
+ * capture is a burst from the ring, merged and developed like any other
+ * photograph, corrected for the lens, and composited at the place its
+ * reference frame *registers* to against the tiles already placed. The node
+ * says where to point, the attitude says where the phone points, and the
+ * frame's own pixels say where the tile actually is.
  *
- * ### Why registration runs on every poll
+ * ### Why the guidance is inertial and the placement is visual
  *
- * The dots have to be drawn where the tiles are in the current view, and the
- * only thing that knows where the current view is relative to the canvas is
- * a registration of the current frame. The gyroscope could say so faster and
- * would drift; the frame cannot drift. Registration runs on a proxy a few
- * hundred pixels across and costs tens of milliseconds, which is under the
- * poll interval.
+ * The first version registered every preview frame to draw the dots. On a
+ * lens seven degrees across, a pan of a few degrees carries the anchor's
+ * features out of the frame and the registration fails or clings; the dots
+ * swam, stuck and vanished, and a hand cannot follow a dot that does that.
+ * The attitude never fails to answer -- it does not look at the scene -- and
+ * it answers in a millisecond. It drifts, slowly, in yaw; each tile's
+ * registration measures the drift, as the difference between where the
+ * attitude said the burst was and where its pixels say, and the guidance
+ * absorbs it. Nothing about where a tile is placed comes from the attitude.
  *
  * ### Why only bursts are developed
  *
@@ -143,15 +147,18 @@ object MosaicCapture {
     }
 
     /**
-     * The tracking view's size. Registration at this size costs about 25 ms a
-     * poll on the phone (see `ZslStreamDeviceTest.trackingIsPricedAgainstAnIdleStream`),
-     * against a quarter of a second for the 3 MP proxy it replaced.
+     * The registration view's size: what a burst's reference frame and the
+     * anchor are reduced to before they are registered. Registration at this
+     * size costs about 25 ms (see `ZslStreamDeviceTest.trackingIsPricedAgainstAnIdleStream`).
      */
     const val TRACK_WIDTH = 320
     const val TRACK_HEIGHT = 240
 
-    /** How often to look for a new frame. Faster than a person can pan. */
-    private const val POLL_MILLIS = 90L
+    /** How often the attitude is read and the dots redrawn: the viewfinder's own rate. */
+    const val POLL_MILLIS = 33L
+
+    /** How often to look for the anchor frame before the mosaic has one. */
+    private const val ANCHOR_POLL_MILLIS = 90L
 
     /** How long to wait for the camera's controls to settle before locking them. */
     private const val CONVERGENCE_TIMEOUT_MILLIS = 3_000L
@@ -175,12 +182,36 @@ object MosaicCapture {
         onView: (MosaicGuideView) -> Unit,
         onEvent: (MosaicEvent) -> Unit,
         shouldContinue: () -> Boolean,
-        /** The gyroscope, for the stability gate; null where there is none, and the registration is the gate. */
+        /**
+         * The inertial sensors: the attitude for the guidance and the
+         * gyroscope for the gate. The mode is not offered on a phone without
+         * an attitude sensor, so a null here or a sensor that reports none is
+         * a refusal, not a fallback.
+         */
         motion: MotionSensor? = null,
     ): MosaicResult {
         val started = System.currentTimeMillis()
+        if (motion == null || !motion.hasAttitude) {
+            return MosaicResult(0, 0, 0f, session.plan.megapixels, null, 0L, "no attitude sensor for the guidance")
+        }
         val profile = SensorProfile.from(stream.characteristics)
         val captureLabel = stream.lens.label
+        val sensorOrientation = stream.characteristics.get(
+            android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION,
+        ) ?: 90
+        // Whether the camera stamps frames on the sensors' clock; where it
+        // does, a frame is paired with the attitude it was exposed at.
+        val realtimeStamps = stream.characteristics.get(
+            android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE,
+        ) == android.hardware.camera2.CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+
+        // The sensors first, before anything is waited on: the rotation
+        // vector's fusion starts from nowhere and takes most of a second to
+        // converge, and an anchor taken before it has lays the canvas tens of
+        // degrees from where the phone points. The screen usually has them
+        // running already, from the moment the mode was armed; this is a
+        // no-op then.
+        motion.start()
 
         // The camera's controls have to have settled before they are pinned.
         // Locked on a fresh stream -- a lens the user just switched to -- they
@@ -205,37 +236,27 @@ object MosaicCapture {
             TAG,
             "stability gate: exposure %.1f ms, %.0f px/rad, ceiling %.3f rad/s (%.1f deg/s), gyro %s".format(
                 exposureNs / 1e6, pixelsPerRadian, maxSpeed, Math.toDegrees(maxSpeed.toDouble()),
-                if (motion?.isAvailable == true) "present" else "absent",
+                if (motion.isAvailable) "present" else "absent",
             ),
         )
-        guide.configureGate(maxAngularSpeed = maxSpeed, settleMillis = MosaicGuide.settleFor(frames, stream.config.minFrameDurationNs))
-        motion?.start()
+        guide.configureGate(
+            maxAngularSpeed = maxSpeed,
+            settleMillis = MosaicGuide.settleFor(frames, stream.config.minFrameDurationNs),
+            canvasPixelsPerRadian = pixelsPerRadian * session.plan.tileScale,
+        )
+        val imu = ImuGuidance(session.plan, pixelsPerRadian, sensorOrientation)
 
-        var lastTimestamp = -1L
-        var anchored = false
-        var lastLocated: MosaicAssembler.Located? = null
-        var lastPollNs = motion?.nowNs() ?: 0L
+        var lastPollNs = motion.nowNs()
         var anchorAttempts = 0
+        var settleAttempts = 0
         var lastGateLog = 0L
-        var heldPolls = 0
-        var heldValid = false
 
-        // The tracking view, read in place from the ring into one array for
-        // the whole guide. See ZslRawStream.trackingLuma for what it replaced.
-        val track = ByteArray(TRACK_WIDTH * TRACK_HEIGHT)
+        // The registration view's scale: full frame to registration pixels.
         val scale = stream.config.width.toFloat() / TRACK_WIDTH
 
         try {
             while (shouldContinue() && !guide.complete) {
-                val timestamp = stream.trackingLuma(track, TRACK_WIDTH, TRACK_HEIGHT)
-                if (timestamp < 0 || timestamp == lastTimestamp) {
-                    delay(POLL_MILLIS)
-                    continue
-                }
-                lastTimestamp = timestamp
-                val proxy = Plane(TRACK_WIDTH, TRACK_HEIGHT, track.copyOf())
-
-                if (!anchored) {
+                if (!imu.anchored) {
                     // The colour and the exposure every tile will be developed
                     // with, and the origin. The gain is measured from the anchor
                     // frame the way a single capture would measure it, and then
@@ -247,14 +268,22 @@ object MosaicCapture {
                     val result = burst.referenceResult
                     val color = ColorProfile.calibrated(stream.characteristics, result)
                     val buffer = burst.frames.buffer(0)
-                    if (burst.count == 0 || buffer == null || result == null ||
+                    // And the attitude has to be reporting and settled, or
+                    // there is nothing to anchor the directions to. Waited
+                    // for up to a few seconds; a fusion that never settles is
+                    // anchored anyway and said so, and the tiles' corrections
+                    // then carry what they can.
+                    val settled = motion.attitudeSettled() || settleAttempts++ >= MAX_SETTLE_WAIT_POLLS
+                    val rotation = frameRotation(motion, result, realtimeStamps)
+                    if (burst.count == 0 || buffer == null || result == null || rotation == null || !settled ||
                         (color.isNeutralGains && anchorAttempts++ < MAX_ANCHOR_WAIT_POLLS)
                     ) {
                         burst.close()
-                        delay(POLL_MILLIS)
+                        delay(ANCHOR_POLL_MILLIS)
                         continue
                     }
                     if (color.isNeutralGains) Log.w(TAG, "anchoring with unity white balance: the result carried no gains")
+                    if (!motion.attitudeSettled()) Log.w(TAG, "anchoring on an attitude that has not settled")
                     val stride = burst.frames.rowStride
                     session.lockColour(color, ShadingMap.from(result))
                     NativeMerge.create(stream.config.width, stream.config.height, profile)?.use { m ->
@@ -269,69 +298,41 @@ object MosaicCapture {
                         anchorTrack, TRACK_WIDTH, TRACK_HEIGHT, profile)
                     burst.close()
                     session.anchor(Plane(TRACK_WIDTH, TRACK_HEIGHT, anchorTrack))
-                    anchored = true
+                    // The directions of the nodes are fixed from the attitude
+                    // the anchor frame was exposed at.
+                    imu.anchor(rotation)
                     Log.i(TAG, "anchored: gains %s, develop gain %.2f".format(
                         color.gains.joinToString(",") { "%.2f".format(it) }, session.developGain))
                     onEvent(MosaicEvent.Anchored)
-                    onView(viewOf(guide, session, null, captureLabel, System.currentTimeMillis()))
-                    lastPollNs = motion?.nowNs() ?: 0L
+                    onView(imuView(guide, session, imu, rotation, captureLabel, System.currentTimeMillis()))
+                    lastPollNs = motion.nowNs()
                     delay(POLL_MILLIS)
                     continue
                 }
 
-                // Registered against the newest tile and its nearest neighbour
-                // only: enough to know where the reticle is, and a third of the
-                // cost of every neighbour.
-                val registered = session.locate(proxy, scale, maxCandidates = TRACK_CANDIDATES)
-
-                // The gyroscope's peak since the last poll: the fastest the
-                // phone turned while these frames were exposed.
-                val nowNs = motion?.nowNs() ?: 0L
-                val peak = motion?.peakSpeedSince(lastPollNs) ?: Float.NaN
+                // The attitude now, and the gyroscope's peak since the last
+                // poll: the fastest the phone turned in between.
+                val rotation = motion.rotation()
+                val nowNs = motion.nowNs()
+                val peak = motion.peakSpeedSince(lastPollNs)
                 lastPollNs = nowNs
 
-                // A frame the registration could not place, on a phone the
-                // gyroscope says has not moved since the last frame it did
-                // place, is where that frame was. Registration fails on a plain
-                // wall or a patch of sky, and a hold on a node needs the dots
-                // to stay put through it; the held transform is only ever used
-                // to draw and to judge the hold. The burst's own reference
-                // frame is registered afresh when it is taken, and a burst that
-                // cannot be placed is rejected, so a held transform can never
-                // place a tile. Any movement since the last registration ends
-                // the hold: a transform from before a move says nothing about
-                // where the phone points now -- the first version held one
-                // across a move and drew the dots on the wrong scene.
-                val stillByGyro = !peak.isNaN() && peak < guide.maxAngularSpeed * HELD_STILL_FRACTION
-                if (!stillByGyro) heldValid = false
-                if (registered != null) heldValid = true
-                val located = registered ?: lastLocated?.takeIf { heldValid && stillByGyro && heldPolls < MAX_HELD_POLLS }
-                heldPolls = if (registered == null && located != null) heldPolls + 1 else 0
-                lastLocated = registered ?: lastLocated
-
                 val now = System.currentTimeMillis()
-                val decision = if (located != null) {
-                    val centre = located.transform.apply(stream.config.width / 2f, stream.config.height / 2f)
-                    guide.observe(centre[0], centre[1], now, peak)
-                } else {
-                    guide.observe(null, null, now, peak)
-                }
-                onView(viewOf(guide, session, located?.transform, captureLabel, now))
+                val reticle = rotation?.let { imu.reticleOnCanvas(it) }
+                val decision = guide.observe(reticle?.first, reticle?.second, now, peak)
+                onView(imuView(guide, session, imu, rotation, captureLabel, now))
                 // The gate's readings, once a second: what the hold is waiting on.
                 if (now - lastGateLog > 1000L) {
                     lastGateLog = now
                     Log.i(
                         TAG,
-                        "gate: %s, gyro peak %.4f rad/s of %.4f, %s%s, hold %.2f".format(
-                            when {
-                                registered != null -> "registered (%d inliers)".format(registered.inliers)
-                                located != null -> "held by gyro (%d polls)".format(heldPolls)
-                                else -> "not registered: ${session.lastLocateFailure}"
-                            },
+                        "gate: reticle %s, gyro peak %.4f rad/s of %.4f, %s%s, hold %.2f, correction (%.0f, %.0f)".format(
+                            reticle?.let { "(%.0f, %.0f)".format(it.first, it.second) } ?: "off-canvas",
                             peak, guide.maxAngularSpeed,
                             if (guide.steady) "steady" else "unsteady",
                             guide.unsteadyReason?.let { " ($it)" } ?: "",
                             guide.holdProgress(now),
+                            imu.correctionX, imu.correctionY,
                         ),
                     )
                 }
@@ -340,7 +341,7 @@ object MosaicCapture {
                     is MosaicGuide.Decision.TooFast -> onEvent(MosaicEvent.TooFast)
                     is MosaicGuide.Decision.Capture -> {
                         val outcome = runCatching {
-                            captureNode(stream, session, profile, frames, lensProfile, scale) {
+                            captureNode(stream, session, profile, frames, lensProfile, scale, imu, motion, realtimeStamps) {
                                 // The burst is in hand: the haptic can fire.
                                 onEvent(MosaicEvent.Locked(decision.node))
                             }
@@ -354,16 +355,19 @@ object MosaicCapture {
                             guide.rejected(decision.node, System.currentTimeMillis())
                             onEvent(MosaicEvent.Rejected(decision.node, outcome))
                         }
-                        onView(viewOf(guide, session, lastLocated?.transform, captureLabel, System.currentTimeMillis()))
+                        onView(imuView(guide, session, imu, motion.rotation(), captureLabel, System.currentTimeMillis()))
                         // The capture took time; the gyroscope's window restarts.
-                        lastPollNs = motion?.nowNs() ?: 0L
+                        lastPollNs = motion.nowNs()
                     }
                     MosaicGuide.Decision.Idle -> Unit
                 }
                 delay(POLL_MILLIS)
             }
         } finally {
-            motion?.close()
+            // Whatever ended the loop: the stream is given back its exposure,
+            // its white balance and its focus. The sensors are the caller's --
+            // the screen keeps them running while the mode is armed, so the
+            // next run anchors on an attitude that has long since settled.
             stream.unlock(settings, caps)
         }
 
@@ -390,16 +394,54 @@ object MosaicCapture {
     }
 
     /**
-     * The screen's view of the mosaic: every node's state and, when the frame
-     * registered, where each falls in it.
+     * The screen's view of a running mosaic: every node's state and, from the
+     * attitude, where each falls in the frame and where the canvas's outline
+     * is. With no attitude yet, the states alone.
      */
-    private fun viewOf(
+    private fun imuView(
         guide: MosaicGuide,
         session: MosaicSession,
-        transform: Homography?,
+        imu: ImuGuidance,
+        rotation: FloatArray?,
         captureLabel: String,
         nowMillis: Long,
-    ): MosaicGuideView = viewOf(guide, session.plan, transform, captureLabel, nowMillis, session.progress.coverage, anchored = true)
+    ): MosaicGuideView {
+        val positions = rotation?.let { imu.nodesInFrame(it) }
+        val nodes = guide.nodes.mapIndexed { i, node ->
+            val p = positions?.getOrNull(i)
+            NodeView(node = node, state = guide.stateOf(node), frameX = p?.first, frameY = p?.second)
+        }
+        return MosaicGuideView(
+            nodes = nodes,
+            captured = guide.captured,
+            total = guide.total,
+            located = rotation != null,
+            coverage = session.progress.coverage,
+            canvasCorners = rotation?.let { imu.cornersInFrame(it) },
+            holdProgress = guide.holdProgress(nowMillis),
+            steady = guide.steady,
+            unsteady = if (guide.lockingNodeOrNull != null) guide.unsteadyReason else null,
+            captureLensLabel = captureLabel,
+            anchored = true,
+        )
+    }
+
+    /**
+     * The attitude the phone had when [result]'s frame was exposed, where the
+     * camera stamps frames on the sensors' clock; the current attitude where
+     * it does not. Null before the attitude sensor has reported.
+     */
+    private fun frameRotation(
+        motion: MotionSensor,
+        result: android.hardware.camera2.TotalCaptureResult?,
+        realtimeStamps: Boolean,
+    ): FloatArray? {
+        val stamp = result?.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP)
+        val exposure = result?.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
+        // The stamp is the start of exposure; the middle is the attitude the
+        // frame's centre of mass was taken at.
+        return if (realtimeStamps && stamp != null) motion.rotationAt(stamp + exposure / 2) else motion.rotation()
+    }
 
     /**
      * The screen's view of the mosaic: every node's state and, when the frame
@@ -485,21 +527,18 @@ object MosaicCapture {
         else StabilityGate.pixelsPerRadianFromEquivalent(stream.lens.equivalent35mm, stream.config.width)
     }
 
-    private const val TRACK_CANDIDATES = 2
-
-    /** A held transform needs the gyroscope well under the gate's ceiling, not merely under it. */
-    private const val HELD_STILL_FRACTION = 0.5f
-
-    /** And it is not held forever: after this many polls the frame is lost, whatever the gyroscope says. */
-    private const val MAX_HELD_POLLS = 30
-
     /** Polls to wait for a frame whose result carries white balance gains before anchoring without. */
     private const val MAX_ANCHOR_WAIT_POLLS = 30
+
+    /** Polls to wait for the attitude to settle before anchoring on it as it is: about four seconds. */
+    private const val MAX_SETTLE_WAIT_POLLS = 45
 
     /**
      * Takes the burst for a node: the ring's newest [frames], merged, developed
      * with the mosaic's locked colour, corrected for the lens, and composited at
-     * the place the burst's reference frame registered to.
+     * the place the burst's reference frame registered to. Where the frame
+     * registered, against where the attitude said it was, is the guidance's
+     * drift, and is handed back to it.
      *
      * Returns null on success, or the reason it could not be used.
      */
@@ -510,6 +549,9 @@ object MosaicCapture {
         frames: Int,
         lensProfile: LensProfile?,
         proxyScale: Float,
+        imu: ImuGuidance,
+        motion: MotionSensor,
+        realtimeStamps: Boolean,
         onSnapshotted: () -> Unit,
     ): String? {
         val burst = stream.snapshot(frames)
@@ -554,6 +596,17 @@ object MosaicCapture {
             burst.close()
             val located = session.locate(small, proxyScale)
             if (located == null) return@use "could not register the burst"
+
+            // The drift: the attitude at the reference frame's exposure put
+            // the reticle here, and its pixels put it there. The guidance
+            // absorbs the difference for every dot from now on.
+            val predicted = frameRotation(motion, referenceResult, realtimeStamps)?.let { imu.reticleOnCanvas(it) }
+            if (predicted != null) {
+                val actual = located.transform.apply(stream.config.width / 2f, stream.config.height / 2f)
+                imu.correct(predicted.first, predicted.second, actual[0], actual[1])
+                Log.i(TAG, "tile registered %.0f px from where the attitude put it".format(
+                    kotlin.math.hypot(actual[0] - predicted.first, actual[1] - predicted.second)))
+            }
 
             val (merged, _) = m.finish()
             val color = session.color ?: ColorProfile.NEUTRAL

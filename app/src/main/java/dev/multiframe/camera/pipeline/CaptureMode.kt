@@ -11,14 +11,26 @@ enum class CaptureMode {
     NIGHT,
 
     /** Something is moving; spend light to stop it. */
-    ACTION;
+    ACTION,
+
+    /**
+     * A picture larger than the sensor: a grid of telephoto tiles, each a
+     * merged burst, composited into one canvas. The mode's exposure is the
+     * mosaic's own -- locked, floored -- so as a capture plan it is AUTO's.
+     * See `MosaicCapture`.
+     */
+    SUPER_RES;
 
     val label: String
         get() = when (this) {
             AUTO -> "AUTO"
             NIGHT -> "NIGHT"
             ACTION -> "ACTION"
+            SUPER_RES -> "SUPER RES"
         }
+
+    /** Whether this mode is a single burst from the ring, as against a mosaic of them. */
+    val isSingleCapture: Boolean get() = this != SUPER_RES
 
     fun next(): CaptureMode = entries[(ordinal + 1) % entries.size]
 }
@@ -88,7 +100,9 @@ object CaptureModes {
         val ceiling = availableFrames.coerceAtLeast(1)
 
         val resolved = when (mode) {
-            CaptureMode.AUTO -> resolveAuto(analysis)
+            // A Super Res tile is exposed by the mosaic's lock, not by a plan;
+            // as a plan it is the ordinary one.
+            CaptureMode.AUTO, CaptureMode.SUPER_RES -> resolveAuto(analysis)
             else -> mode
         }
 
@@ -113,7 +127,7 @@ object CaptureModes {
                 reason = "freezing motion",
             )
 
-            CaptureMode.AUTO -> CapturePlan(
+            CaptureMode.AUTO, CaptureMode.SUPER_RES -> CapturePlan(
                 frames = requestedFrames.coerceIn(1, ceiling),
                 maxExposureNs = AUTO_EXPOSURE_NS,
                 protectHighlights = true,

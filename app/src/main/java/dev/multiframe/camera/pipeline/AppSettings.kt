@@ -23,6 +23,12 @@ data class AppSettings(
      * made the app feel slower than it is, for no benefit but a smaller ring.
      */
     val zslEnabled: Boolean = true,
+    /**
+     * The mode the viewfinder opens in. Never [CaptureMode.SUPER_RES]: that
+     * mode holds the telephoto and the ring while it is selected, and an app
+     * that reopened holding them would be reopening mid-gesture. The screen
+     * stores AUTO in its place.
+     */
     val captureMode: CaptureMode = CaptureMode.AUTO,
     /** Self-timer delay in seconds; zero is off. */
     val timerSeconds: Int = 0,
@@ -43,6 +49,13 @@ data class AppSettings(
      * not about the shot.
      */
     val mosaicPreset: MosaicPreset = MosaicPreset.DETAIL_BOOST,
+    /**
+     * Whether the live histogram is drawn under the exposure gauge. Off by
+     * default: the viewfinder shows the picture and the three numbers that
+     * describe its exposure, and the plot is for the photographer who wants
+     * to see the distribution behind them.
+     */
+    val histogram: Boolean = false,
     /**
      * Whether the bilateral-grid local tone operator runs in the develop.
      *
@@ -93,6 +106,7 @@ data class AppSettings(
         KEY_GUIDES to guides,
         KEY_DCG to dcgEnabled.toString(),
         KEY_FORMAT to outputFormat.name,
+        KEY_HISTOGRAM to histogram.toString(),
     ) + (lensId?.let { mapOf(KEY_LENS to it) } ?: emptyMap())
 
     companion object {
@@ -117,6 +131,7 @@ data class AppSettings(
         const val KEY_MOSAIC_PRESET = "mosaicPreset"
         const val KEY_LOCAL_TONE = "localTone"
         const val KEY_FORMAT = "outputFormat"
+        const val KEY_HISTOGRAM = "histogram"
 
         private const val PREFERENCES = "multiframe.settings"
 
@@ -162,7 +177,7 @@ data class AppSettings(
                 // costs the mode rather than the whole configuration.
                 captureMode = stored[KEY_MODE]?.let { name ->
                     CaptureMode.entries.firstOrNull { it.name == name }
-                } ?: defaults.captureMode,
+                }?.takeIf { it != CaptureMode.SUPER_RES } ?: defaults.captureMode,
                 // A self-timer that forgets is worse than none, because you
                 // find out by missing the shot. Clamped to the delays the
                 // control can actually cycle to, so a stored value from
@@ -177,6 +192,7 @@ data class AppSettings(
                 mosaicPreset = MosaicPreset.named(stored[KEY_MOSAIC_PRESET] ?: stored["sweepPreset"]),
                 localTone = bool(KEY_LOCAL_TONE, defaults.localTone),
                 outputFormat = OutputFormat.named(stored[KEY_FORMAT]),
+                histogram = bool(KEY_HISTOGRAM, defaults.histogram),
             )
         }
 

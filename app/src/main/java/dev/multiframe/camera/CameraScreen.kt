@@ -27,8 +27,6 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.AndroidExternalSurface
 import androidx.compose.foundation.AndroidExternalSurfaceZOrder
 import androidx.compose.foundation.background
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.border
@@ -157,9 +155,14 @@ import dev.multiframe.camera.ui.MosaicPresetPill
 import dev.multiframe.camera.ui.MosaicGuidance
 import dev.multiframe.camera.ui.ControlsPanel
 import dev.multiframe.camera.ui.ActionStrip
+import dev.multiframe.camera.ui.BackNavigation
+import dev.multiframe.camera.ui.ChromeOpeners
 import dev.multiframe.camera.ui.ControlBar
 import dev.multiframe.camera.ui.ControlBarState
-import dev.multiframe.camera.ui.ControlRow
+import dev.multiframe.camera.ui.ModeCarousel
+import dev.multiframe.camera.ui.SettingsScreen
+import dev.multiframe.camera.pipeline.SuperResMachine
+import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
@@ -211,9 +214,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var status by remember { mutableStateOf("") }
     var mergeEnabled by remember { mutableStateOf(restored.mergeEnabled) }
     var abMode by remember { mutableStateOf(false) }
-    var showControls by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var showGallery by remember { mutableStateOf(false) }
+    var showHistogram by remember { mutableStateOf(restored.histogram) }
     var rawCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var characteristics by remember { mutableStateOf<CameraCharacteristics?>(null) }
     // DngCreator needs the capture metadata that produced the frame, which
@@ -284,26 +288,35 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var focusAtMillis by remember { mutableLongStateOf(0L) }
     var digitalZoom by remember { mutableFloatStateOf(1f) }
 
-    // Telephoto mosaic: a grid of telephoto tiles, each held still, composed
-    // into one picture. Two stages. Armed: the capture lens is up, the outline
-    // of the picture and its nodes are on the viewfinder, the 2x2/3x3 choice is
-    // on the HUD, and nothing has been taken -- the user is composing. Running:
-    // the shutter has anchored it and the guidance is live.
-    var mosaicArmed by remember { mutableStateOf(false) }
-    var mosaicRunning by remember { mutableStateOf(false) }
+    // Super Res: a grid of telephoto tiles, each held still, composed into
+    // one picture. Its life is `SuperResMachine`'s: selected in the carousel
+    // it is ARMED -- the capture lens is up, the outline of the picture and
+    // its nodes are on the viewfinder, the 2x2/3x3 choice is above the
+    // shutter, nothing has been taken; the shutter makes it RUNNING, and STOP
+    // or the back gesture STOPPING until the run lands. The run is a job,
+    // not an effect: see `startSuperRes`.
+    var superResPhase by remember { mutableStateOf(SuperResMachine.Phase.IDLE) }
+    var superResJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var mosaicView by remember { mutableStateOf<MosaicGuideView?>(null) }
-    // The lens the user was on when they armed it: the framing the mosaic
-    // records when it is wider than the capture lens, and the lens to return
-    // to afterwards.
+    // The lens the user was on when they chose the mode: the framing the
+    // mosaic records when it is wider than the capture lens, and the lens to
+    // return to on leaving.
     var mosaicReturnLens by remember { mutableStateOf<Lens?>(null) }
-    var mosaicPreset by remember { mutableStateOf(restored.mosaicPreset) }
-    // The custom preset's region, as fractions of the wide frame, drawn by
-    // the user before the mosaic; null until they have drawn one.
-    var customRegion by remember { mutableStateOf<Pair<Float, Float>?>(null) }
-    var drawingRegion by remember { mutableStateOf(false) }
-    var regionDrag by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
+    // The ring setting as the user left it, while Super Res holds the ring on
+    // over it; null when the mode is not holding it.
+    var zslBeforeSuperRes by remember { mutableStateOf<Boolean?>(null) }
+    var mosaicPreset by remember {
+        // The drawn-region preset is not offered on the pill; a saved one
+        // falls back to the smaller grid.
+        mutableStateOf(restored.mosaicPreset.takeIf { it != MosaicPreset.CUSTOM } ?: MosaicPreset.DETAIL_BOOST)
+    }
     // A failed capture flashes its dot for a beat; this is the beat.
     var mosaicFlashUntil by remember { mutableLongStateOf(0L) }
+    // Until when a finished capture's summary owns the status line: the
+    // return to ARMED would otherwise overwrite "complete: 9 of 9 tiles" with
+    // "aim, then press the shutter" on the next frame, and the result would
+    // never be read.
+    var superResSummaryUntil by remember { mutableLongStateOf(0L) }
 
     // Composition aids. One control cycles them rather than several toggles.
     var guides by remember {
@@ -990,11 +1003,28 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // The lens Super Res shoots its tiles with: the longest raw rear lens.
+    val mosaicCaptureLens = remember(lenses) { MosaicPlanner.captureLens(lenses) }
+    // The inertial sensors, for the guidance and the gate. Opened once; the
+    // mode is not offered on a phone whose attitude cannot be read.
+    val motion = remember { MotionSensor(context) }
+    DisposableEffect(motion) { onDispose { motion.close() } }
+    val superResOffered = mosaicCaptureLens != null && zslDecision is ZslDecision.Stream && motion.hasAttitude
+
+    // The sensors run for as long as the mode is selected, not just during a
+    // capture: the rotation vector takes most of a second to converge after
+    // it is registered, and a capture that started it would anchor on an
+    // attitude still swinging. Armed, they are converged long before the
+    // shutter; idle, they are off.
+    LaunchedEffect(superResPhase.selected) {
+        if (superResPhase.selected) motion.start() else motion.stop()
+    }
+
     // The plan for the armed mosaic: the preset's grid on the capture lens,
-    // with the lens the user armed it from as the framing where that is wider.
+    // with the lens the user came from as the framing where that is wider.
     // Null until the stream is up on the capture lens.
-    val mosaicPlan = remember(mosaicArmed, mosaicPreset, customRegion, zslStream, lens, mosaicReturnLens) {
-        if (!mosaicArmed) null else {
+    val mosaicPlan = remember(superResPhase, mosaicPreset, zslStream, lens, mosaicReturnLens) {
+        if (!superResPhase.selected) null else {
             val stream = zslStream
             if (stream == null || stream.lensId != lens?.cameraId) null
             else MosaicPlanner.planPreset(
@@ -1003,141 +1033,222 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 capture = stream.lens,
                 tileWidth = stream.config.width,
                 tileHeight = stream.config.height,
-                customRegion = customRegion,
             )
         }
     }
 
+    // The megapixel badge for each grid on the pill: what the canvas would be
+    // on this lens, from the same planner the capture uses.
+    val presetMegapixels = remember(zslStream, mosaicCaptureLens) {
+        val capture = mosaicCaptureLens ?: return@remember emptyMap<MosaicPreset, Double>()
+        val w = zslStream?.config?.width ?: return@remember emptyMap<MosaicPreset, Double>()
+        val h = zslStream?.config?.height ?: return@remember emptyMap<MosaicPreset, Double>()
+        listOf(MosaicPreset.DETAIL_BOOST, MosaicPreset.LARGE_FORMAT).mapNotNull { preset ->
+            MosaicPlanner.planPreset(preset, null, capture, w, h)?.let { preset to it.megapixels }
+        }.toMap()
+    }
+
     // Armed and not yet running: the outline and the nodes as the anchor would
     // place them, so the user sees the picture they are about to compose.
-    LaunchedEffect(mosaicArmed, mosaicRunning, mosaicPlan) {
-        if (mosaicArmed && !mosaicRunning) {
+    LaunchedEffect(superResPhase, mosaicPlan) {
+        if (superResPhase == SuperResMachine.Phase.ARMED) {
             mosaicView = mosaicPlan?.let { MosaicCapture.armedView(it, it.captureLens.label) }
-            val stream = zslStream
-            status = when {
-                mosaicPlan == null && mosaicPreset == MosaicPreset.CUSTOM ->
-                    "draw the region from a wider lens"
-                mosaicPlan == null -> "switching to the telephoto…"
-                stream != null -> "%s · %d tiles · aim, then press the shutter".format(
-                    mosaicPlan.captureLens.label, mosaicPlan.tileCount,
-                )
-                else -> "…"
+            if (System.currentTimeMillis() >= superResSummaryUntil) {
+                status = when {
+                    mosaicPlan == null -> "switching to the telephoto…"
+                    else -> "%s · %d tiles · aim, then press the shutter".format(
+                        mosaicPlan.captureLens.label, mosaicPlan.tileCount,
+                    )
+                }
             }
-        } else if (!mosaicArmed && !mosaicRunning) {
+        } else if (superResPhase == SuperResMachine.Phase.IDLE) {
             mosaicView = null
         }
     }
 
-    // The mosaic. Waits for the stream to actually be running on the capture
-    // lens before starting, because switching lens tears the session down and
-    // builds a new one, and a mosaic assembled across that boundary would mix
-    // two focal lengths.
-    LaunchedEffect(mosaicRunning, zslStream, lens) {
-        if (!mosaicRunning) return@LaunchedEffect
-        val stream = zslStream ?: return@LaunchedEffect
-        val c = caps ?: return@LaunchedEffect
-        if (stream.lensId != lens?.cameraId) return@LaunchedEffect
-
-        val plan = MosaicPlanner.planPreset(
-            preset = mosaicPreset,
-            target = mosaicReturnLens,
-            capture = stream.lens,
-            tileWidth = stream.config.width,
-            tileHeight = stream.config.height,
-            customRegion = customRegion,
-        )
-        if (plan == null) {
-            status = "no mosaic to take from here"
-            mosaicRunning = false
-            return@LaunchedEffect
+    /**
+     * Leaves Super Res for [mode], or enters it. Entering switches the lens to
+     * the telephoto and, if the ring is off, turns it on -- the mode needs the
+     * ring and asks nobody to know that. Leaving puts both back.
+     */
+    val selectMode: (CaptureMode) -> Unit = { mode ->
+        if (mode == CaptureMode.SUPER_RES) {
+            if (superResOffered && superResPhase == SuperResMachine.Phase.IDLE) {
+                superResPhase = SuperResMachine.apply(superResPhase, SuperResMachine.Event.Select)
+                captureMode = mode
+                val capture = mosaicCaptureLens
+                mosaicReturnLens = lens
+                if (!zslWanted) {
+                    zslBeforeSuperRes = zslWanted
+                    zslWanted = true
+                }
+                if (capture != null && lens?.cameraId != capture.cameraId) {
+                    lens = capture
+                    status = "switching to ${capture.label}…"
+                }
+            }
+        } else if (superResPhase.controlsEnabled) {
+            if (superResPhase == SuperResMachine.Phase.ARMED) {
+                superResPhase = SuperResMachine.apply(superResPhase, SuperResMachine.Event.Deselect)
+                mosaicReturnLens?.let { lens = it }
+                mosaicReturnLens = null
+                zslBeforeSuperRes?.let { zslWanted = it }
+                zslBeforeSuperRes = null
+            }
+            captureMode = mode
+            status = ""
         }
+    }
 
-        val rot = c.let { orientation.captureRotation(it.sensorOrientation) }
-        val session = MosaicSession.start(plan, stream.config.width, stream.config.height, rot)
-        if (session == null) {
-            status = "not enough memory for a %.0f MP canvas".format(plan.megapixels)
-            mosaicRunning = false
-            return@LaunchedEffect
+    // An armed Super Res whose ground has gone -- the ring refused, the lens
+    // list changed, the stream fell back -- is left for AUTO rather than kept
+    // armed with nothing to arm. Not while running: the run ends itself when
+    // its stream closes, and lands on ARMED, where this then applies.
+    LaunchedEffect(superResOffered, zslWanted, superResPhase) {
+        if (superResPhase == SuperResMachine.Phase.ARMED && (!superResOffered || !zslWanted)) {
+            selectMode(CaptureMode.AUTO)
+            status = "super res needs the raw ring and the telephoto"
         }
+    }
 
-        busy = true
-        status = "hold still to anchor"
-        val guide = MosaicGuide(plan)
-        val result = withContext(MosaicCapture.dispatcher) {
-            session.use {
-                MosaicCapture.run(
-                    context = context,
-                    stream = stream,
-                    session = it,
-                    guide = guide,
-                    settings = settings,
-                    caps = c,
-                    frames = burstFrames,
-                    lensProfile = lensProfiles[stream.lensId],
-                    motion = MotionSensor(context),
-                    onView = { v -> mosaicView = v },
-                    onEvent = { event ->
-                        // Haptics from the main thread, and only after the
-                        // frames a haptic could blur have already been taken:
-                        // Locked fires once the burst is snapshotted from the
-                        // ring, not before.
-                        scope.launch {
-                            when (event) {
-                                is MosaicEvent.Anchored -> {
-                                    Haptics.segment(view)
-                                    status = "pan the reticle onto each dot and hold"
-                                }
-                                is MosaicEvent.Locked -> Haptics.confirm(view)
-                                is MosaicEvent.Captured -> Haptics.tick(view)
-                                is MosaicEvent.Rejected -> {
-                                    Haptics.reject(view)
-                                    mosaicFlashUntil = System.currentTimeMillis() + 600
-                                    status = "tile ${event.node.index + 1}: ${event.reason}"
-                                }
-                                is MosaicEvent.TooFast -> {
-                                    val now = System.currentTimeMillis()
-                                    if (now > mosaicFlashUntil) {
-                                        Haptics.reject(view)
-                                        mosaicFlashUntil = now + 800
-                                    }
-                                }
-                                is MosaicEvent.Complete -> Haptics.confirm(view)
+    /** Asks a running Super Res to stop, keeping what it has. The run's finally does the rest. */
+    val stopSuperRes: () -> Unit = {
+        superResPhase = SuperResMachine.apply(superResPhase, SuperResMachine.Event.Stop)
+    }
+
+    /**
+     * Runs the mosaic, as a job.
+     *
+     * A job and not a `LaunchedEffect` keyed on the running flag, which is
+     * what it was. Flipping that flag to stop it *cancelled the effect*, and
+     * with it the lines after the run that reset the state and re-enabled the
+     * controls; the screen stayed busy and armed with nothing left that could
+     * reach it. Here the loop is stopped by [SuperResMachine.Phase.shouldContinue]
+     * reading false and returning normally, and everything the screen must
+     * have back -- the controls, the lens, the view -- is in a `finally` that
+     * runs whether the mosaic completed, was stopped, failed, or the stream
+     * went away under it. The stream's own lock and the sensors are released
+     * in the runner's `finally`, and the canvas in `session.use`.
+     */
+    val startSuperRes: () -> Unit = {
+        val stream = zslStream
+        val c = caps
+        val plan = mosaicPlan
+        if (superResPhase != SuperResMachine.Phase.ARMED || stream == null || c == null || plan == null ||
+            stream.lensId != lens?.cameraId
+        ) {
+            Haptics.reject(view)
+        } else {
+            Haptics.shutter(view)
+            superResPhase = SuperResMachine.apply(superResPhase, SuperResMachine.Event.Shutter)
+            busy = true
+            status = "hold still to anchor"
+            superResJob = scope.launch {
+                var summary = ""
+                try {
+                    val rot = orientation.captureRotation(c.sensorOrientation)
+                    val session = MosaicSession.start(plan, stream.config.width, stream.config.height, rot)
+                    if (session == null) {
+                        summary = "not enough memory for a %.0f MP canvas".format(plan.megapixels)
+                    } else {
+                        val guide = MosaicGuide(plan)
+                        val result = withContext(MosaicCapture.dispatcher) {
+                            session.use {
+                                MosaicCapture.run(
+                                    context = context,
+                                    stream = stream,
+                                    session = it,
+                                    guide = guide,
+                                    settings = settings,
+                                    caps = c,
+                                    frames = burstFrames,
+                                    lensProfile = lensProfiles[stream.lensId],
+                                    motion = motion,
+                                    onView = { v -> mosaicView = v },
+                                    onEvent = { event ->
+                                        // Haptics from the main thread, and only
+                                        // after the frames a haptic could blur have
+                                        // already been taken: Locked fires once the
+                                        // burst is snapshotted from the ring.
+                                        scope.launch {
+                                            when (event) {
+                                                is MosaicEvent.Anchored -> {
+                                                    Haptics.segment(view)
+                                                    status = "pan the reticle onto each dot and hold"
+                                                }
+                                                is MosaicEvent.Locked -> Haptics.confirm(view)
+                                                is MosaicEvent.Captured -> Haptics.tick(view)
+                                                is MosaicEvent.Rejected -> {
+                                                    Haptics.reject(view)
+                                                    mosaicFlashUntil = System.currentTimeMillis() + 600
+                                                    status = "tile ${event.node.index + 1}: ${event.reason}"
+                                                }
+                                                is MosaicEvent.TooFast -> {
+                                                    val now = System.currentTimeMillis()
+                                                    if (now > mosaicFlashUntil) {
+                                                        Haptics.reject(view)
+                                                        mosaicFlashUntil = now + 800
+                                                    }
+                                                }
+                                                is MosaicEvent.Complete -> Haptics.confirm(view)
+                                            }
+                                        }
+                                    },
+                                    // Stopped by the phase, and by the stream
+                                    // closing under it -- the activity stopping
+                                    // -- so a run never outlives its camera.
+                                    shouldContinue = { superResPhase.shouldContinue && !stream.isClosed },
+                                )
                             }
                         }
-                    },
-                    shouldContinue = { mosaicRunning },
-                )
+                        Log.i(TAG, "super res result: $result")
+                        summary = "%s  %.0f MP  %.1fs".format(
+                            result.message, result.megapixels, result.elapsedMillis / 1000.0,
+                        )
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    summary = "super res cancelled"
+                    throw e
+                } catch (e: Throwable) {
+                    Log.e(TAG, "super res failed", e)
+                    summary = "super res failed: ${e.message ?: e.javaClass.simpleName}"
+                } finally {
+                    // Guaranteed, whatever happened above: the machine back to
+                    // ARMED, the controls free, the armed outline back on the
+                    // viewfinder. The lens stays on the telephoto because the
+                    // mode is still selected; leaving the mode returns it.
+                    if (summary.isNotEmpty()) {
+                        status = summary
+                        superResSummaryUntil = System.currentTimeMillis() + 6_000L
+                    }
+                    superResPhase = SuperResMachine.apply(superResPhase, SuperResMachine.Event.Finished)
+                    busy = false
+                    superResJob = null
+                }
             }
         }
-        Log.i(TAG, "mosaic result: $result")
-        status = "%s  %.0f MP  %.1fs".format(
-            result.message, result.megapixels, result.elapsedMillis / 1000.0,
-        )
-        mosaicView = null
-        mosaicRunning = false
-        mosaicArmed = false
-        // Back to the framing the user was composing with.
-        mosaicReturnLens?.let { lens = it }
-        mosaicReturnLens = null
-        busy = false
     }
 
     // Written whenever anything worth remembering changes. Cheap: a dozen
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(
-        settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, captureMode,
-        timerSeconds, guides, dcgEnabled, superRes, mosaicPreset, localTone, outputFormat,
+        settings, burstFrames, lens, mergeEnabled, highlightGuard, zslWanted, zslBeforeSuperRes, captureMode,
+        timerSeconds, guides, dcgEnabled, superRes, mosaicPreset, localTone, outputFormat, showHistogram,
+        mosaicReturnLens,
     ) {
         AppSettings.save(
             context,
             AppSettings(
                 manual = settings,
                 burstFrames = burstFrames,
-                lensId = lens?.cameraId,
+                // What the user chose, not what Super Res is holding for the
+                // moment: the app reopens in an ordinary mode on the lens they
+                // were on, with the ring as they left it.
+                lensId = (mosaicReturnLens ?: lens)?.cameraId,
                 mergeEnabled = mergeEnabled,
                 highlightGuard = highlightGuard,
-                zslEnabled = zslWanted,
-                captureMode = captureMode,
+                zslEnabled = zslBeforeSuperRes ?: zslWanted,
+                captureMode = if (captureMode == CaptureMode.SUPER_RES) CaptureMode.AUTO else captureMode,
                 timerSeconds = timerSeconds,
                 guides = guides.name,
                 dcgEnabled = dcgEnabled,
@@ -1145,6 +1256,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 mosaicPreset = mosaicPreset,
                 localTone = localTone,
                 outputFormat = outputFormat,
+                histogram = showHistogram,
             ),
         )
     }
@@ -1324,110 +1436,66 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         // any lens, including that one -- the first version offered the mode
         // only from a wider lens and hid it on the telephoto, which is the
         // lens it uses.
-        val mosaicCaptureLens = remember(lenses) { MosaicPlanner.captureLens(lenses) }
 
         // What the controls are is decided in one place and what they do in
         // another, joined by an id. That is what lets `ControlBar` be plain
         // data -- and so lets a phone without raw support, which this one is
         // not, be tested on the JVM instead of held in the hand.
+        val resolvedLabel = capturePlan?.resolved?.label
         val barState = ControlBarState(
             busy = busy,
             mergeEnabled = mergeEnabled,
-            abMode = abMode,
             burstFrames = burstFrames,
             timerSeconds = timerSeconds,
             guidesLabel = guides.valueLabel,
             guidesOn = guides != GuideMode.OFF,
-            proOpen = showControls,
+            histogramOn = showHistogram,
+            settingsOpen = showSettings,
             aboutOpen = showAbout,
-            captureModeLabel = if (zslStream == null) null else {
-                val plan = capturePlan
-                if (captureMode == CaptureMode.AUTO &&
-                    plan != null && plan.resolved != CaptureMode.AUTO
-                ) {
-                    // Say what AUTO settled on, not just that it is AUTO.
-                    "AUTO/${plan.resolved.label}"
-                } else {
-                    captureMode.label
-                }
-            },
-            captureModeActive = captureMode != CaptureMode.AUTO,
-            highlightGuardOffered = zslStream != null,
-            highlightGuardOn = highlightGuard,
-            guardPull = guardPull,
+            mode = captureMode.label,
+            // Say what AUTO settled on, not just that it is AUTO.
+            resolvedMode = resolvedLabel?.takeIf { zslStream != null },
             // Only offered where the hardware said yes. On a camera that stalls
-            // on raw the control never appears and nothing changes.
-            zslOffered = zslDecision is ZslDecision.Stream,
+            // on raw the ring is never offered and nothing changes.
+            streamOffered = zslDecision is ZslDecision.Stream,
             zslOn = zslWanted,
-            mosaicOffered = mosaicCaptureLens != null && zslStream != null,
-            mosaicArmed = mosaicArmed && !mosaicRunning,
-            mosaicRunning = mosaicRunning,
+            superResOffered = superResOffered,
+            superRes = superResPhase,
             rawBurstOffered = rawCapture != null && characteristics != null,
             dngOffered = rawCapture != null,
         )
 
-        val handleControl: (String) -> Unit = { id ->
+        val handleControl: (String) -> Unit = handle@{ id ->
             // Every control in the row and the strip is a detent except the two
             // openers, which change nothing and whose panel animation is its own
             // feedback. The actions get one too: the tick is acknowledging the
             // press, and the capture it starts is asynchronous -- nothing is
             // vibrating while the sensor is integrating.
-            if (id != ControlBar.PRO && id != ControlBar.ABOUT) {
+            if (id != ControlBar.SETTINGS && id != ControlBar.ABOUT) {
                 Haptics.segment(view)
+            }
+            ControlBar.modeOf(id)?.let { mode ->
+                selectMode(mode)
+                return@handle
             }
             when (id) {
                 ControlBar.MERGE -> mergeEnabled = !mergeEnabled
-                ControlBar.AB -> abMode = !abMode
                 ControlBar.FRAMES -> {
                     // Only counts the heap-sized ring can actually hold.
                     val ceiling = zslStream?.maxBurst ?: buffer.capacity
                     burstFrames = ControlBar.nextBurst(burstFrames, ceiling)
                 }
-                ControlBar.CAPTURE_MODE -> captureMode = captureMode.next()
                 ControlBar.ZSL -> {
                     zslWanted = !zslWanted
                     status = if (zslWanted) "engaging raw ring…"
                     else "sequential capture"
                 }
-                ControlBar.GUARD -> highlightGuard = !highlightGuard
                 ControlBar.TIMER -> timerSeconds = ControlBar.nextTimer(timerSeconds)
                 ControlBar.GUIDES -> guides = guides.next()
-                ControlBar.PRO -> showControls = !showControls
+                ControlBar.HISTOGRAM -> showHistogram = !showHistogram
+                ControlBar.SETTINGS -> showSettings = !showSettings
                 ControlBar.ABOUT -> showAbout = true
-
-                ControlBar.MOSAIC -> {
-                    val capture = mosaicCaptureLens
-                    if (mosaicRunning) {
-                        // Stop, keeping what was taken.
-                        mosaicRunning = false
-                    } else if (mosaicArmed) {
-                        // Disarm: back to the lens the user came from.
-                        mosaicArmed = false
-                        mosaicReturnLens?.let { lens = it }
-                        mosaicReturnLens = null
-                        status = "mosaic off"
-                    } else if (drawingRegion) {
-                        drawingRegion = false
-                        status = "region cancelled"
-                    } else if (capture != null) {
-                        val here = lens
-                        val wider = here != null && here.equivalent35mm < capture.equivalent35mm
-                        if (mosaicPreset == MosaicPreset.CUSTOM && customRegion == null && wider) {
-                            // The custom grid is sized from a rectangle the
-                            // user draws on the wide frame; it arms when they
-                            // lift their finger.
-                            drawingRegion = true
-                            status = "drag a box over what the mosaic should cover"
-                        } else {
-                            mosaicReturnLens = here
-                            mosaicArmed = true
-                            if (here?.cameraId != capture.cameraId) {
-                                lens = capture
-                                status = "switching to ${capture.label}…"
-                            }
-                        }
-                    }
-                }
+                ControlBar.STOP -> stopSuperRes()
 
                 ControlBar.RAW_BURST -> {
                     busy = true
@@ -1507,8 +1575,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 .padding(top = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            ControlRow(ControlBar.modes(barState), onControl = handleControl)
-
             // The EV label and the manual flag are settings, not sensor
             // readings: they change when the user changes them and not
             // otherwise, so they are pushed into the holder from here rather
@@ -1521,10 +1587,25 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 gauges.setEv(evLabel, manualExposure)
             }
 
-            ExposureGauge(
-                gauges = gauges,
-                modifier = Modifier.padding(top = 10.dp),
-            )
+            // The top of the viewfinder: the exposure gauge, and one opener.
+            //
+            // It was a row of six settings chips with the gauge under it. The
+            // chips are behind the opener now, on a screen of their own, and
+            // the gauge -- ISO, shutter, EV, monospaced -- is the only text
+            // over the top of the photograph. See `ControlBar.chrome`.
+            Box(modifier = Modifier.fillMaxWidth()) {
+                ExposureGauge(
+                    gauges = gauges,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+                ChromeOpeners(
+                    specs = ControlBar.chrome(barState),
+                    onControl = handleControl,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 12.dp),
+                )
+            }
 
             // With the exposure readout, not pinned to the opposite corner.
             //
@@ -1539,7 +1620,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // the reference keeps them together in the top chrome for that
             // reason. Same ground and radius as the readout, so the two read
             // as one instrument rather than two overlays.
-            HistogramGauge(gauges = gauges, modifier = Modifier.padding(top = 8.dp))
+            if (showHistogram) {
+                HistogramGauge(gauges = gauges, modifier = Modifier.padding(top = 8.dp))
+            }
 
             if (status.isNotEmpty()) {
                 Text(
@@ -1560,8 +1643,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // Lens strip. Labelled in millimetres, because that is what tells a
             // photographer what the frame will look like; the zoom factor is
             // there for anyone who thinks in phone terms.
+            // Not with Super Res selected: the telephoto is doing the taking,
+            // and the strip would offer a choice the mode has already made.
             val rearLenses = remember(lenses) { LensCatalog.rear(lenses) }
-            if (rearLenses.size > 1) {
+            if (rearLenses.size > 1 && !superResPhase.selected) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1582,88 +1667,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 }
             }
 
-            // Everything below the lens strip shares one ground. With the
-            // manual panel open that ground is opaque and runs to the bottom
-            // edge of the screen, so the panel reads as a surface the controls
-            // stand on rather than as a slab hanging in the middle of the
-            // photograph -- which is what it looked like when the panel drew
-            // its own background and the shutter was left outside it.
-            // The panel is only a surface when it has something on it.
-            //
-            // `ControlsPanel` draws nothing at all until the camera has
-            // reported its capabilities, which is right -- but the ground and
-            // the handle were drawn by this column regardless, so opening PRO
-            // before the camera was ready gave an empty slab with a grab
-            // handle and no controls. Seen on a device with no capabilities to
-            // report, that is the whole feature.
-            val panelOpen = showControls && caps != null
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .then(
-                        if (panelOpen) {
-                            Modifier.background(Ink.Panel, PanelShape)
-                        } else {
-                            Modifier
-                        }
-                    )
                     .navigationBarsPadding(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                if (panelOpen) DragHandle()
-                if (showControls) {
-                    ControlsPanel(
-                        settings = settings,
-                        caps = caps,
-                        onChange = { settings = it },
-                        abMode = abMode,
-                        onAbMode = { if (!busy) abMode = it },
-                        highlightGuard = if (zslStream != null) highlightGuard else null,
-                        onHighlightGuard = { if (!busy) highlightGuard = it },
-                        dcgEnabled = if (caps?.supportsBracketing == true) dcgEnabled else null,
-                        onDcgEnabled = { if (!busy) dcgEnabled = it },
-                        // Only with a stream to accumulate from: the 2x path is
-                        // a property of the ZSL burst.
-                        superRes = if (caps?.supportsSuperRes == true && zslStream != null) superRes else null,
-                        onSuperRes = { if (!busy) superRes = it },
-                        // Only where there is a telephoto to shoot the tiles with.
-                        mosaicPreset = if (mosaicCaptureLens != null) mosaicPreset else null,
-                        onMosaicPreset = {
-                            if (!busy) {
-                                mosaicPreset = it
-                                // A new preset means a new region to draw.
-                                if (it == MosaicPreset.CUSTOM) customRegion = null
-                            }
-                        },
-                        localTone = localTone,
-                        onLocalTone = { if (!busy) localTone = it },
-                        outputFormat = if (HeifEncoder.isAvailable) outputFormat else null,
-                        onOutputFormat = { if (!busy) outputFormat = it },
-                        onReset = {
-                            // Back to what the app ships with. The save effect above
-                            // is watching every one of these, so persisting it needs
-                            // no separate step.
-                            val fresh = AppSettings()
-                            settings = fresh.manual
-                            burstFrames = fresh.burstFrames
-                            mergeEnabled = fresh.mergeEnabled
-                            highlightGuard = fresh.highlightGuard
-                            zslWanted = fresh.zslEnabled
-                            captureMode = fresh.captureMode
-                            timerSeconds = fresh.timerSeconds
-                            guides = GuideMode.OFF
-                            abMode = false
-                            dcgEnabled = fresh.dcgEnabled
-                            superRes = fresh.superRes
-                            mosaicPreset = fresh.mosaicPreset
-                            customRegion = null
-                            localTone = fresh.localTone
-                            outputFormat = fresh.outputFormat
-                            status = "settings reset"
-                        },
-                    )
-                }
-
                 // The captures that are not the shutter. Squared off rather than
                 // pilled, and here rather than in the row at the top, because every
                 // one of them writes a photograph the moment it is touched and the
@@ -1674,6 +1683,24 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     modifier = Modifier.padding(bottom = 4.dp),
                 )
 
+                // The grid, directly above the shutter while Super Res is
+                // armed, where the outline it changes is in view and the
+                // thumb that will press the shutter is already. Each grid
+                // carries what the canvas would be, in megapixels. Not while
+                // running: the nodes are laid out and some are taken.
+                if (superResPhase == SuperResMachine.Phase.ARMED) {
+                    MosaicPresetPill(
+                        preset = mosaicPreset,
+                        customOffered = false,
+                        megapixels = presetMegapixels,
+                        onPreset = {
+                            Haptics.segment(view)
+                            mosaicPreset = it
+                        },
+                        modifier = Modifier.padding(bottom = 6.dp),
+                    )
+                }
+
                 // Thumbnail, shutter and the space opposite share one row, so
                 // they share one centre line. The thumbnail was positioned against
                 // the bottom of the screen on its own, independently of the column
@@ -1683,7 +1710,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 12.dp, bottom = 28.dp),
+                        .padding(top = 12.dp, bottom = 10.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     LastShotThumb(
@@ -1719,16 +1746,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             }
                             if (busy) return@ShutterButton
 
-                            // An armed mosaic: the shutter anchors it where the
+                            // Super Res: the shutter anchors it where the
                             // reticle points and the guidance takes over. The
                             // stream has to be on the capture lens already.
-                            if (mosaicArmed) {
-                                if (mosaicPlan == null) {
-                                    Haptics.reject(view)
-                                    return@ShutterButton
-                                }
-                                Haptics.shutter(view)
-                                mosaicRunning = true
+                            if (superResPhase.selected) {
+                                startSuperRes()
                                 return@ShutterButton
                             }
 
@@ -1859,6 +1881,16 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         },
                     )
                 }
+
+                // The modes, under the shutter: one tap to any of them, the
+                // selected one the heavy one. Drawn only where there is a
+                // choice; a phone with no ring and no telephoto has AUTO and
+                // no dial. See `ControlBar.carousel`.
+                ModeCarousel(
+                    specs = ControlBar.carousel(barState),
+                    onControl = handleControl,
+                    modifier = Modifier.padding(bottom = 10.dp),
+                )
             }
         }
 
@@ -1946,24 +1978,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         )
                     }
                 }
-                // The grid, chosen on the HUD while armed, where the outline
-                // it changes is in view. Not while running: the nodes are
-                // laid out and some are taken.
-                if (mosaicArmed && !mosaicRunning) {
-                    val wider = mosaicReturnLens?.let { r ->
-                        mosaicCaptureLens?.let { c -> r.equivalent35mm < c.equivalent35mm }
-                    } ?: false
-                    MosaicPresetPill(
-                        preset = mosaicPreset,
-                        customOffered = wider,
-                        onPreset = {
-                            Haptics.segment(view)
-                            mosaicPreset = it
-                            if (it == MosaicPreset.CUSTOM) customRegion = null
-                        },
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
                 // The hold's hint: what the gate is waiting for.
                 v.unsteady?.let { why ->
                     Text(
@@ -1979,78 +1993,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             .padding(horizontal = 10.dp, vertical = 5.dp),
                     )
                 }
-            }
-        }
-
-        // The custom region, being drawn: a rectangle from the first touch to
-        // the finger, in the guide's own faint ink, and the mosaic begins when
-        // the finger lifts.
-        if (drawingRegion) {
-            val bounds = previewBounds
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(bounds) {
-                        detectDragGestures(
-                            onDragStart = { start -> regionDrag = start to start },
-                            onDrag = { change, _ ->
-                                regionDrag = regionDrag?.let { it.first to change.position }
-                            },
-                            onDragEnd = {
-                                val drag = regionDrag
-                                val b = bounds
-                                regionDrag = null
-                                if (drag != null && b != null && b.width > 0f && b.height > 0f) {
-                                    val w = kotlin.math.abs(drag.second.x - drag.first.x) / b.width
-                                    val h = kotlin.math.abs(drag.second.y - drag.first.y) / b.height
-                                    // The region is drawn on the upright
-                                    // display; the plan wants fractions of
-                                    // the sensor's frame, which a quarter
-                                    // turn swaps.
-                                    val swaps = (caps?.sensorOrientation ?: 90) % 180 != 0
-                                    val region = if (swaps) h to w else w to h
-                                    if (region.first > 0.05f && region.second > 0.05f) {
-                                        customRegion = region
-                                        drawingRegion = false
-                                        mosaicCaptureLens?.let { capture ->
-                                            mosaicReturnLens = lens
-                                            mosaicArmed = true
-                                            if (lens?.cameraId != capture.cameraId) {
-                                                lens = capture
-                                                status = "switching to ${capture.label}…"
-                                            }
-                                        }
-                                    } else {
-                                        status = "too small a box; drag a larger one"
-                                    }
-                                }
-                            },
-                            onDragCancel = { regionDrag = null },
-                        )
-                    },
-            ) {
-                regionDrag?.let { (a, b) ->
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val left = minOf(a.x, b.x)
-                        val top = minOf(a.y, b.y)
-                        val w = kotlin.math.abs(b.x - a.x)
-                        val h = kotlin.math.abs(b.y - a.y)
-                        drawRect(
-                            color = Ink.GuideBright,
-                            topLeft = Offset(left, top),
-                            size = androidx.compose.ui.geometry.Size(w, h),
-                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx()),
-                        )
-                    }
-                }
-                Text(
-                    text = "DRAG A BOX",
-                    style = Type.Instruction,
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .background(Ink.Readout, RoundedCornerShape(6.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                )
             }
         }
 
@@ -2070,6 +2012,62 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             }
         }
 
+        // Everything set once, on a screen of its own over the viewfinder.
+        // The chips are the same objects the top row used to draw, and the
+        // manual panel is the one the PRO chip used to slide up.
+        if (showSettings) {
+            SettingsScreen(
+                chips = ControlBar.settings(barState),
+                onControl = handleControl,
+                onDismiss = {
+                    Haptics.segment(view)
+                    showSettings = false
+                },
+            ) {
+                ControlsPanel(
+                    settings = settings,
+                    caps = caps,
+                    onChange = { settings = it },
+                    abMode = abMode,
+                    onAbMode = { if (!busy) abMode = it },
+                    highlightGuard = if (zslStream != null) highlightGuard else null,
+                    onHighlightGuard = { if (!busy) highlightGuard = it },
+                    dcgEnabled = if (caps?.supportsBracketing == true) dcgEnabled else null,
+                    onDcgEnabled = { if (!busy) dcgEnabled = it },
+                    // Only with a stream to accumulate from: the 2x path is
+                    // a property of the ZSL burst.
+                    superRes = if (caps?.supportsSuperRes == true && zslStream != null) superRes else null,
+                    onSuperRes = { if (!busy) superRes = it },
+                    localTone = localTone,
+                    onLocalTone = { if (!busy) localTone = it },
+                    outputFormat = if (HeifEncoder.isAvailable) outputFormat else null,
+                    onOutputFormat = { if (!busy) outputFormat = it },
+                    onReset = {
+                        // Back to what the app ships with. The save effect above
+                        // is watching every one of these, so persisting it needs
+                        // no separate step.
+                        val fresh = AppSettings()
+                        settings = fresh.manual
+                        burstFrames = fresh.burstFrames
+                        mergeEnabled = fresh.mergeEnabled
+                        highlightGuard = fresh.highlightGuard
+                        if (!superResPhase.selected) zslWanted = fresh.zslEnabled else zslBeforeSuperRes = fresh.zslEnabled
+                        if (superResPhase.controlsEnabled) selectMode(fresh.captureMode)
+                        timerSeconds = fresh.timerSeconds
+                        guides = GuideMode.OFF
+                        abMode = false
+                        dcgEnabled = fresh.dcgEnabled
+                        superRes = fresh.superRes
+                        mosaicPreset = fresh.mosaicPreset
+                        localTone = fresh.localTone
+                        outputFormat = fresh.outputFormat
+                        showHistogram = fresh.histogram
+                        status = "settings reset"
+                    },
+                )
+            }
+        }
+
         if (showAbout) {
             AboutSheet(onDismiss = { showAbout = false })
         }
@@ -2081,35 +2079,41 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // deleted in there -- see the refresh effect above.
             GalleryScreen(context = context, onDismiss = { showGallery = false })
         }
+
+        // The system back gesture, from the top of the stack down: a sheet,
+        // the gallery, the settings, then Super Res -- stopped if running,
+        // left if armed -- and only on a bare viewfinder in an ordinary mode
+        // does it reach the system and leave. The gallery's own review
+        // overlay closes itself first, with its own handler. The order is
+        // `BackNavigation`'s, and is tested there.
+        val backScreen = BackNavigation.Screen(
+            aboutOpen = showAbout,
+            galleryOpen = showGallery,
+            settingsOpen = showSettings,
+            superRes = superResPhase,
+        )
+        BackHandler(enabled = BackNavigation.intercepts(backScreen)) {
+            when (BackNavigation.resolve(backScreen)) {
+                BackNavigation.Action.CLOSE_ABOUT -> showAbout = false
+                BackNavigation.Action.CLOSE_GALLERY -> showGallery = false
+                BackNavigation.Action.CLOSE_SETTINGS -> showSettings = false
+                BackNavigation.Action.STOP_SUPER_RES -> {
+                    Haptics.segment(view)
+                    stopSuperRes()
+                }
+                BackNavigation.Action.LEAVE_SUPER_RES -> {
+                    Haptics.segment(view)
+                    selectMode(CaptureMode.AUTO)
+                }
+                BackNavigation.Action.WAIT -> Unit
+                BackNavigation.Action.EXIT -> Unit
+            }
+        }
     }
 }
 
 /** Every lens chip is this circle. See [LensChip]. */
 private val LensChipSize = 72.dp
-
-/** The manual panel's top corners, and the only place the radius is stated. */
-private val PanelShape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-
-/**
- * The handle on the manual panel.
- *
- * The panel had no affordance of any kind: no title, no handle, and no way to
- * tell it was dismissible except remembering which chip opened it. This is the
- * Material convention for "this surface can be put away", and it costs 4dp.
- */
-@Composable
-private fun DragHandle() {
-    Box(
-        modifier = Modifier
-            .padding(top = 10.dp, bottom = 2.dp)
-            .size(width = 32.dp, height = 4.dp)
-            .clip(RoundedCornerShape(2.dp))
-            // Hairline is the colour of an edge, and at 0x26 on a panel this
-            // dark the handle was invisible in a screenshot -- an affordance
-            // nobody can see is not one.
-            .background(Ink.Muted),
-    )
-}
 
 /**
  * The last shot, which is also the way into the gallery.

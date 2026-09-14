@@ -68,13 +68,24 @@ class MosaicGuide(
         private set
 
     /**
+     * Canvas pixels per radian of turn, when the runner knows the lens: with
+     * it the reticle's allowed movement per poll is what the angular ceiling
+     * would move it, so the two measures of stillness agree. Zero means the
+     * fixed [stillDistance] applies.
+     */
+    var canvasPixelsPerRadian: Float = 0f
+        private set
+
+    /**
      * Sets the gate from what the runner learns once the stream is locked:
      * the exposure decides the angular ceiling, the burst length the settle
-     * time. Before any node has locked, so nothing in progress is moved.
+     * time, the lens the reticle's allowance. Before any node has locked, so
+     * nothing in progress is moved.
      */
-    fun configureGate(maxAngularSpeed: Float, settleMillis: Long) {
+    fun configureGate(maxAngularSpeed: Float, settleMillis: Long, canvasPixelsPerRadian: Float = 0f) {
         this.maxAngularSpeed = maxAngularSpeed
         this.settleMillis = settleMillis
+        this.canvasPixelsPerRadian = canvasPixelsPerRadian
     }
 
     enum class NodeState {
@@ -197,7 +208,12 @@ class MosaicGuide(
         // radius, which is the point where it is not a hold at all. A first
         // observation has nothing to be still relative to and is not still.
         val elapsed = if (hasPrevious) (nowMillis - lastNow).coerceAtLeast(1L) else NOMINAL_POLL_MILLIS
-        val allowed = (stillDistance * (elapsed.toFloat() / NOMINAL_POLL_MILLIS)).coerceAtMost(lockRadius)
+        val allowed = if (canvasPixelsPerRadian > 0f) {
+            // What the angular ceiling would move the reticle in this poll.
+            (maxAngularSpeed * (elapsed / 1000f) * canvasPixelsPerRadian).coerceIn(1f, lockRadius)
+        } else {
+            (stillDistance * (elapsed.toFloat() / NOMINAL_POLL_MILLIS)).coerceAtMost(lockRadius)
+        }
         val drifting = hasPrevious && moved > allowed
         val turning = !angularSpeed.isNaN() && angularSpeed > maxAngularSpeed
         steady = hasPrevious && !drifting && !turning
@@ -211,7 +227,10 @@ class MosaicGuide(
         lastNow = nowMillis
 
         // Every pending node's state follows from its distance; only one can
-        // be locking, and it is the nearest.
+        // be locking, and it is the nearest. A node that is already locking
+        // keeps the lock a little past the radius -- the magnet: once the
+        // reticle is on the dot, the tremor that carries it a few pixels over
+        // the edge does not lose it. The reticle has to leave by a margin.
         val nearest = nearestPending(reticleX, reticleY)
         for (node in plan.nodes) {
             val s = states[node.index]
@@ -223,8 +242,10 @@ class MosaicGuide(
                 states[node.index] = NodeState.PENDING
             }
             val d = distance(node, reticleX, reticleY)
+            val holding = lockingNode == node.index && s == NodeState.LOCKING
+            val radius = if (holding) lockRadius * MAGNET_MULTIPLE else lockRadius
             states[node.index] = when {
-                node === nearest && d <= lockRadius -> NodeState.LOCKING
+                node === nearest && d <= radius -> NodeState.LOCKING
                 d <= lockRadius * NEAR_MULTIPLE -> NodeState.NEAR
                 else -> NodeState.PENDING
             }
@@ -287,8 +308,15 @@ class MosaicGuide(
         /** Within this many radii the dot reads as approached. */
         const val NEAR_MULTIPLE = 3f
 
-        /** Hold this long, still, inside the radius before the burst fires. */
-        const val DEFAULT_SETTLE_MILLIS = 250L
+        /** A locking node keeps its lock out to this many radii: the magnet's reach. */
+        const val MAGNET_MULTIPLE = 1.5f
+
+        /**
+         * Hold this long, still, inside the radius before the burst fires.
+         * Was 250 ms; 170 is what a hand holds without the ring seeming to
+         * stall, and the settle time still stretches to cover the burst.
+         */
+        const val DEFAULT_SETTLE_MILLIS = 170L
 
         /** The poll interval the still distance is stated at. */
         const val NOMINAL_POLL_MILLIS = 100L
@@ -301,7 +329,7 @@ class MosaicGuide(
          */
         fun settleFor(frames: Int, frameIntervalNs: Long): Long {
             val span = (frames.coerceAtLeast(1) * frameIntervalNs) / 1_000_000L
-            return maxOf(DEFAULT_SETTLE_MILLIS, span + 60L)
+            return maxOf(DEFAULT_SETTLE_MILLIS, span + 40L)
         }
 
         /** How long a failed node reads as failed before it is asked for again. */

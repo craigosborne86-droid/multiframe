@@ -338,6 +338,18 @@ class ZslStreamDeviceTest {
         var turning = 0
         val deadline = System.currentTimeMillis() + 15_000
         var colour: ColorProfile? = null
+        // What auto exposure had chosen before the lock, and what the lock
+        // pinned: the shutter floor is exercised here with the sensor's real
+        // ranges, on whatever light the phone is lying in.
+        val converged = s.latestExposure()
+        var pinned: Pair<Int, Long>? = null
+        var pinnedReadout: Pair<Int, Long>? = null
+        val isoRange = s.characteristics.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        val exposureRange = s.characteristics.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        // The sensors the guidance reads. The mode is not offered without an
+        // attitude sensor, so a phone without one has nothing to test here.
+        val motion = MotionSensor(context)
+        assumeTrue("no attitude sensor", motion.hasAttitude)
         val result = session!!.use {
             val r = runBlocking {
                 MosaicCapture.run(
@@ -347,8 +359,8 @@ class ZslStreamDeviceTest {
                     guide = MosaicGuide(plan),
                     settings = ManualSettings(),
                     caps = CameraCapabilities(
-                        hasManualSensor = true, isoMin = null, isoMax = null,
-                        exposureMinNs = null, exposureMaxNs = null,
+                        hasManualSensor = true, isoMin = isoRange?.lower, isoMax = isoRange?.upper,
+                        exposureMinNs = exposureRange?.lower, exposureMaxNs = exposureRange?.upper,
                         minFocusDiopters = 0f, awbModes = listOf(1),
                         afModes = emptyList(), noiseReductionModes = emptyList(),
                         edgeModes = emptyList(), evMin = 0, evMax = 0, evStep = 0f,
@@ -357,7 +369,7 @@ class ZslStreamDeviceTest {
                     ),
                     frames = 4,
                     lensProfile = null,
-                    motion = MotionSensor(context),
+                    motion = motion,
                     onView = { v ->
                         lastView = v
                         if (v.holdProgress > 0f) sawHold = true
@@ -366,13 +378,22 @@ class ZslStreamDeviceTest {
                             if (v.unsteady == MosaicGuide.Unsteady.TURNING) turning++
                         }
                     },
-                    onEvent = { e -> events.add(e.toString()) },
+                    onEvent = { e ->
+                        events.add(e.toString())
+                        if (e is MosaicEvent.Anchored) {
+                            // The lock is in force: what it pinned, and what
+                            // the sensor now reports it is doing.
+                            pinned = s.sweepExposureOrNull
+                            pinnedReadout = s.latestExposure()
+                        }
+                    },
                     shouldContinue = { System.currentTimeMillis() < deadline },
                 )
             }
             colour = it.color
             r
         }
+        motion.close()
         Log.i(
             TAG,
             "guided mosaic: ${result.message} | ${result.tiles} tiles, ${result.rejected} rejected, " +
@@ -411,6 +432,24 @@ class ZslStreamDeviceTest {
         assertThat(lastView!!.canvasCorners).isNotNull()
         // Exposure has to be handed back, or the viewfinder stays frozen after.
         assertThat(s.isLocked).isFalse()
+        assertThat(s.sweepExposureOrNull).isNull()
+
+        // The shutter floor. Where auto exposure had chosen slower than the
+        // lens's floor, the lock pinned the floor and raised the ISO to keep
+        // the light; where it was already fast enough, nothing was pinned.
+        val floor = StabilityGate.shutterFloorNs(s.lens.equivalent35mm)
+        Log.i(TAG, "shutter floor: converged $converged, floor ${floor / 1e6} ms, pinned $pinned, readout $pinnedReadout")
+        if (converged != null && isoRange != null && converged.second > floor) {
+            assertThat(pinned).isNotNull()
+            assertThat(pinned!!.second).isEqualTo(maxOf(floor, exposureRange?.lower ?: 0L))
+            assertThat(pinned!!.first).isAtLeast(converged.first)
+            assertThat(pinned!!.first).isAtMost(isoRange.upper)
+            // And the sensor obeyed: the frames under the lock were exposed at the floor.
+            assertThat(pinnedReadout).isNotNull()
+            assertThat(pinnedReadout!!.second).isWithin(pinned!!.second / 20).of(pinned!!.second)
+        } else if (converged != null && isoRange != null) {
+            assertThat(pinned).isNull()
+        }
 
         // The file: the newest mosaic in the library, decoded small. Not
         // green: on a scene the camera balanced, green is not more than a

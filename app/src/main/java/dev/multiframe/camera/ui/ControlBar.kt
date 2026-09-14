@@ -1,5 +1,8 @@
 package dev.multiframe.camera.ui
 
+import dev.multiframe.camera.pipeline.CaptureMode
+import dev.multiframe.camera.pipeline.SuperResMachine
+
 /**
  * What the controls over the viewfinder are, as distinct from what they look
  * like.
@@ -18,11 +21,13 @@ package dev.multiframe.camera.ui
  * while both are built by the same call.
  *
  * So a control now declares what kind of thing it is, and the kinds are kept
- * apart by construction: [modes] cannot return an [ControlKind.Action] and
- * [actions] cannot return anything else. The row over the picture renders
- * `modes`; the strip beside the shutter renders `actions`. An action cannot
- * appear among the toggles by mistake, because the function that builds the
- * toggles cannot express one.
+ * apart by construction: [ControlBar.settings], [ControlBar.chrome] and
+ * [ControlBar.carousel] cannot return an [ControlKind.Action] and
+ * [ControlBar.actions] cannot return anything else. The settings screen
+ * renders `settings`; the top of the viewfinder renders `chrome`; the row
+ * under the shutter renders `carousel`; the strip beside the shutter renders
+ * `actions`. An action cannot appear among the toggles by mistake, because
+ * the function that builds the toggles cannot express one.
  *
  * ### Why it is here rather than in the screen
  *
@@ -63,7 +68,7 @@ sealed interface ControlKind {
  * One control, as data.
  *
  * Carries no lambda deliberately. The screen dispatches on [id], which keeps
- * this list comparable in a test: two runs of [ControlBar.modes] over the same
+ * this list comparable in a test: two runs of [ControlBar.settings] over the same
  * state produce equal lists, and a lambda would make that impossible.
  */
 data class ControlSpec(
@@ -85,7 +90,7 @@ data class ControlSpec(
 )
 
 /**
- * Everything the control bar needs to know, and nothing else.
+ * Everything the controls need to know, and nothing else.
  *
  * Deliberately primitives and strings. The screen holds camera characteristics,
  * capture plans and stream handles; none of that belongs in a decision about
@@ -95,25 +100,27 @@ data class ControlSpec(
 data class ControlBarState(
     val busy: Boolean = false,
     val mergeEnabled: Boolean = true,
-    val abMode: Boolean = false,
     val burstFrames: Int = 4,
     val timerSeconds: Int = 0,
     val guidesLabel: String = "OFF",
     val guidesOn: Boolean = false,
-    val proOpen: Boolean = false,
+    val histogramOn: Boolean = false,
+    val settingsOpen: Boolean = false,
     val aboutOpen: Boolean = false,
-    /** Null where there is no zero-shutter-lag stream to have a mode for. */
-    val captureModeLabel: String? = null,
-    val captureModeActive: Boolean = false,
-    val highlightGuardOffered: Boolean = false,
-    val highlightGuardOn: Boolean = false,
-    val guardPull: Float = 0f,
-    val zslOffered: Boolean = false,
+    /** The selected capture mode, by label. */
+    val mode: String = "AUTO",
+    /** What AUTO settled on for this scene, when it settled on something other than itself. */
+    val resolvedMode: String? = null,
+    /**
+     * Whether this camera can run the zero-shutter-lag raw ring at all. The
+     * burst modes and Super Res are plans for the ring, so without it there
+     * is only AUTO.
+     */
+    val streamOffered: Boolean = false,
     val zslOn: Boolean = false,
-    val mosaicOffered: Boolean = false,
-    /** Armed: the capture lens is up and the outline is on the viewfinder, waiting for the shutter. */
-    val mosaicArmed: Boolean = false,
-    val mosaicRunning: Boolean = false,
+    /** Whether Super Res is offered: a longer raw lens, a ring, and an attitude sensor. */
+    val superResOffered: Boolean = false,
+    val superRes: SuperResMachine.Phase = SuperResMachine.Phase.IDLE,
     val rawBurstOffered: Boolean = false,
     val dngOffered: Boolean = false,
 )
@@ -170,19 +177,24 @@ object Detents {
 object ControlBar {
 
     const val MERGE = "merge"
-    const val AB = "ab"
     const val FRAMES = "frames"
-    const val CAPTURE_MODE = "captureMode"
     const val ZSL = "zsl"
-    const val GUARD = "guard"
     const val TIMER = "timer"
     const val GUIDES = "guides"
-    const val PRO = "pro"
+    const val HISTOGRAM = "histogram"
+    const val SETTINGS = "settings"
     const val ABOUT = "about"
 
-    const val MOSAIC = "mosaic"
+    const val STOP = "stop"
     const val RAW_BURST = "rawBurst"
     const val DNG = "dng"
+
+    /** The id of a mode carousel entry, and the mode it stands for. */
+    private const val MODE_PREFIX = "mode."
+    fun modeId(mode: CaptureMode): String = MODE_PREFIX + mode.name
+    fun modeOf(id: String): CaptureMode? =
+        if (!id.startsWith(MODE_PREFIX)) null
+        else CaptureMode.entries.firstOrNull { it.name == id.removePrefix(MODE_PREFIX) }
 
     /** Burst sizes offered, filtered against what the ring can actually hold. */
     val BURST_STEPS = listOf(1, 2, 4, 8, 12, 16, 24, 28, 32)
@@ -205,25 +217,39 @@ object ControlBar {
     }
 
     /**
-     * The row over the picture: what the next capture will be, then what is
-     * drawn over it, then the two openers.
+     * What sits over the picture: one opener, and nothing else.
      *
-     * Grouped rather than in the order the features happened to be built. The
-     * first group is the capture itself, which is what a photographer changes
-     * between shots; the guides are about the display and nothing else; the
-     * openers come last because they are the only ones that lead somewhere.
-     *
-     * **Six, because a phone shows six.** It was nine, and on a Pixel 9 Pro XL
-     * about two and a half were visible before the pinned openers — a row that
-     * reads as unfinished however carefully the rest of it is drawn. `A/B` and
-     * `GUARD` moved into the PRO panel, which gives that panel a meaning it did
-     * not have: *what you set once*, against *what you change between shots*.
-     * Neither is something a photographer touches while composing.
+     * The row was six settings and two openers. Every one of them was a word
+     * on top of the photograph the user was trying to look at, and a
+     * photographer changes none of them while composing -- a frame count, a
+     * self-timer, a grid overlay are set once. They are behind the opener
+     * now, in [settings], and the top of the viewfinder is the exposure
+     * gauge and this.
      */
-    fun modes(state: ControlBarState): List<ControlSpec> = buildList {
+    fun chrome(state: ControlBarState): List<ControlSpec> = listOf(
+        ControlSpec(
+            id = SETTINGS,
+            label = "SETTINGS",
+            kind = ControlKind.Opener,
+            active = state.settingsOpen,
+            // Always reachable: the settings screen's own controls are the
+            // ones that hold still during a capture.
+            enabled = true,
+        ),
+    )
+
+    /**
+     * The settings screen's chips: what the next capture will be, then what
+     * is drawn over it, then the one opener that leads further.
+     *
+     * The capture group first, because it is what a photographer sets; the
+     * ring is a developer's switch and comes after; the display last. Every
+     * one is gated on the hardware where the hardware has a say.
+     */
+    fun settings(state: ControlBarState): List<ControlSpec> = buildList {
         // Nothing here may change while a capture is in flight: these are read
         // by the capture that is already running.
-        val settled = !state.busy
+        val settled = !state.busy && !state.superRes.inFlight
 
         add(
             ControlSpec(
@@ -244,29 +270,6 @@ object ControlBar {
                 enabled = settled,
             )
         )
-        state.captureModeLabel?.let { label ->
-            add(
-                ControlSpec(
-                    id = CAPTURE_MODE,
-                    label = "MODE",
-                    kind = ControlKind.Cycle,
-                    value = label,
-                    active = state.captureModeActive,
-                    enabled = settled,
-                )
-            )
-        }
-        if (state.zslOffered) {
-            add(
-                ControlSpec(
-                    id = ZSL,
-                    label = if (state.zslOn) "ZSL ON" else "ZSL OFF",
-                    kind = ControlKind.Mode,
-                    active = state.zslOn,
-                    enabled = settled,
-                )
-            )
-        }
         add(
             ControlSpec(
                 id = TIMER,
@@ -278,6 +281,19 @@ object ControlBar {
                 enabled = settled,
             )
         )
+        if (state.streamOffered) {
+            add(
+                ControlSpec(
+                    id = ZSL,
+                    label = if (state.zslOn) "ZSL ON" else "ZSL OFF",
+                    kind = ControlKind.Mode,
+                    active = state.zslOn,
+                    // Super Res needs the ring and switches it on itself; while
+                    // the mode is selected the switch is not the user's.
+                    enabled = settled && !state.superRes.selected,
+                )
+            )
+        }
         add(
             ControlSpec(
                 id = GUIDES,
@@ -293,10 +309,10 @@ object ControlBar {
         )
         add(
             ControlSpec(
-                id = PRO,
-                label = "PRO",
-                kind = ControlKind.Opener,
-                active = state.proOpen,
+                id = HISTOGRAM,
+                label = if (state.histogramOn) "HISTOGRAM ON" else "HISTOGRAM OFF",
+                kind = ControlKind.Mode,
+                active = state.histogramOn,
                 enabled = true,
             )
         )
@@ -312,34 +328,69 @@ object ControlBar {
     }
 
     /**
-     * The strip beside the shutter: the things that take a photograph.
+     * The mode carousel under the shutter: AUTO, NIGHT, ACTION, SUPER RES.
+     *
+     * The modes are what a photographer changes between shots, and they were
+     * a chip in the top row that cycled on each tap -- three taps to get from
+     * NIGHT back to AUTO, reading the label each time. Laid out, every mode
+     * is one tap away and the selected one is the heavy one. AUTO carries
+     * what it settled on as its reading, so the user sees the camera's
+     * decision without having to make it.
+     *
+     * NIGHT and ACTION are plans for the ring and are not offered without one;
+     * SUPER RES is offered where there is a longer lens to take the tiles
+     * with and an attitude sensor to guide them. A phone with neither has an
+     * AUTO that is not a choice, and no carousel is drawn for it.
+     */
+    fun carousel(state: ControlBarState): List<ControlSpec> = buildList {
+        // Switching mode reconfigures the capture; not while one is in flight.
+        val settled = !state.busy && state.superRes.controlsEnabled
+        fun mode(m: CaptureMode, value: String? = null) = ControlSpec(
+            id = modeId(m),
+            label = m.label,
+            kind = ControlKind.Mode,
+            value = value,
+            active = state.mode == m.label,
+            enabled = settled,
+        )
+        add(mode(CaptureMode.AUTO, state.resolvedMode?.takeIf { it != "AUTO" && state.mode == "AUTO" }))
+        if (state.streamOffered) {
+            add(mode(CaptureMode.NIGHT))
+            add(mode(CaptureMode.ACTION))
+        }
+        if (state.superResOffered || state.superRes.selected) {
+            add(mode(CaptureMode.SUPER_RES))
+        }
+    }
+
+    /**
+     * The strip beside the shutter: the things that take a photograph, and
+     * the one that stops taking one.
      *
      * All of these write a file the moment they are touched, which is why they
-     * are not in the row above. Every one is gated on the hardware having said
-     * yes -- a phone that cannot deliver raw offers no raw control at all,
-     * rather than a control that sends a request the camera will reject.
+     * are not among the settings. Every one is gated on the hardware having
+     * said yes -- a phone that cannot deliver raw offers no raw control at all,
+     * rather than a control that sends a request the camera will reject. With
+     * Super Res selected the shutter is the only capture, and the strip is
+     * STOP while one runs and nothing otherwise.
      */
     fun actions(state: ControlBarState): List<ControlSpec> = buildList {
-        if (state.mosaicOffered || state.mosaicArmed || state.mosaicRunning) {
-            // "Mosaic", not "sweep": a sweep is a pan, and a pan is the blurred
-            // frame this mode exists to avoid. The word says what the picture
-            // is -- tiles, each held still.
+        val phase = state.superRes
+        if (phase.inFlight) {
+            // Stopping must stay available while a capture runs, or the only
+            // way out is to leave the app. Once asked for, it is landing, and
+            // the chip says so rather than taking a second tap.
             add(
                 ControlSpec(
-                    id = MOSAIC,
-                    label = when {
-                        state.mosaicRunning -> "STOP MOSAIC"
-                        state.mosaicArmed -> "MOSAIC ARMED"
-                        else -> "MOSAIC"
-                    },
+                    id = STOP,
+                    label = if (phase == SuperResMachine.Phase.STOPPING) "STOPPING" else "STOP",
                     kind = ControlKind.Action,
-                    active = state.mosaicRunning || state.mosaicArmed,
-                    // Stopping a mosaic must stay available while one runs, or
-                    // the only way out is to leave the app.
-                    enabled = state.mosaicRunning || state.mosaicArmed || !state.busy,
+                    active = true,
+                    enabled = phase == SuperResMachine.Phase.RUNNING,
                 )
             )
         }
+        if (phase.selected) return@buildList
         if (state.rawBurstOffered) {
             add(
                 ControlSpec(

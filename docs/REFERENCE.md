@@ -42,7 +42,7 @@ not about the interface.
 | `Hairline` | `#FFFFFF` | 15% | Control borders. Separates from dark photographs |
 | `Muted` | `#9BA1A7` | 100% | Secondary text, labels. Present, not competing |
 | `Amber` | `#FFB020` | 100% | The one accent. Values, sliders, live readings only |
-| `Panel` | `#0A0C0E` | 94% | PRO panel background. Opaque enough to read controls |
+| `Panel` | `#0A0C0E` | 94% | A panel over the picture, where one is drawn. Opaque enough to read controls |
 | `OnBone` | `#0B0D0F` | 100% | Text on a Bone fill |
 | `OnBoneMuted` | `#06121F` | 80% | Secondary text on Bone fill (lens zoom label) |
 | `Edge` | `#FFFFFF` | 40% | Border of image-containing elements (thumbnail) |
@@ -90,7 +90,7 @@ not about the interface.
 | `BoneDim` | `#F2F0EA` | 50% | Tertiary text, disabled labels | Same warmth as Bone, reduced presence |
 | `AmberDim` | `#FFB020` | 40% | Pressed/focused state of Amber elements | Communicates interaction without full accent |
 | `Danger` | `#E85B5B` | 100% | Destructive actions outside the viewfinder (delete in gallery) | Never on the viewfinder. Only in modal/gallery contexts |
-| `Confirm` | `#5BC87A` | 100% | Success states outside the viewfinder (sweep tile lock) | Never on the viewfinder except during active sweep guidance |
+| `Confirm` | `#5BC87A` | 100% | Success states outside the viewfinder (Super Res tile captured) | Never on the viewfinder except during active Super Res guidance |
 | `PaneSolid` | `#0F1215` | 100% | Non-overlay screen backgrounds (gallery, settings) | For screens that don't sit on the photograph |
 
 #### 1.1.3 Color Usage Rules
@@ -107,8 +107,8 @@ not about the interface.
    `Muted`. This prevents "TIMER OFF" from looking like "TIMER is running."
 
 4. `Danger` and `Confirm` are **never** used on the viewfinder during normal
-   operation. They appear only in: gallery delete confirmation, sweep tile
-   guidance (during active sweep only), and error dialogs.
+   operation. They appear only in: gallery delete confirmation, Super Res tile
+   guidance (during an active capture only), and error dialogs.
 
 ---
 
@@ -174,18 +174,20 @@ object Haptics {
 |---|---|---|---|
 | Shutter pressed | `onClick` on shutter button | `Haptics.shutter` | Strong confirmation: a photograph was taken |
 | Self-timer tick | Each countdown second | `Haptics.tick` | Light metronome, not distracting |
-| Mode toggle | MERGE, DCG, ZSL, A/B, GUARD, 2X, LOCAL TONE, MOSAIC 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
-| Cycle value | FRAMES, MODE, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
+| Mode toggle | MERGE, DCG, ZSL, A/B, GUARD, 2X, LOCAL TONE, HISTOGRAM, SUPER RES 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
+| Cycle value | FRAMES, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
+| Mode selected | AUTO, NIGHT, ACTION or SUPER RES chosen in the carousel | `Haptics.segment` | A dial detent; selecting SUPER RES also switches the lens, which has the same detent |
+| Super Res stopped | STOP tapped, or the back gesture while running | `Haptics.segment` | Acknowledging the request; the stop itself lands a moment later and is not felt |
 | Slider at detent | ISO at round number (100, 200, ...), EV at 0 | `Haptics.tick` | Subtle stop point, not every pixel of drag |
 | Lens switch | New lens selected in strip | `Haptics.segment` | Camera is physically switching |
-| Sweep anchored | First frame taken; the dots appear | `Haptics.segment` | The sweep has begun; same detent as the lens switch that preceded it |
+| Super Res anchored | First frame taken; the dots appear | `Haptics.segment` | The capture has begun; same detent as the lens switch that preceded it |
 | Mosaic tile locked | Reticle has held still on a dot through the stability gate; the burst is being taken | `Haptics.confirm` | "Got it" — eyes are on the subject. Fires *after* the burst is snapshotted from the ring, never before: the frames a haptic could blur are already in hand |
 | Mosaic tile composited | The node's burst is on the canvas | `Haptics.tick` | Light: the hold is over, move on |
 | Mosaic tile rejected | The burst could not be registered or developed | `Haptics.reject` | "Try again" — also eyes on subject; the dot flashes red for a beat |
 | Mosaic pan too fast | Frame centre moved most of a tile between polls | `Haptics.reject` | Rate-limited to one per 800 ms; a fast pan is a blurred frame everywhere along it |
 | Mosaic complete | Every node captured | `Haptics.confirm` | The mosaic has finished itself |
 | Error action | Tapping a disabled control, invalid state | `Haptics.reject` | Something went wrong |
-| PRO panel open/close | Toggle PRO chip | (none) | Panel animation is sufficient feedback |
+| Settings open/close | The gear over the picture; DONE or the back gesture | (none) opening, `Haptics.segment` closing from DONE | Opening a screen is its own feedback; DONE is a control and gets the detent |
 | Gallery delete confirmed | After confirmation dialog | `Haptics.confirm` | Acknowledge destructive action |
 
 #### 1.3.3 Anti-Patterns
@@ -318,8 +320,9 @@ updates (e.g., DCG toggle appears once `supportsBracketing` is confirmed).
 | No ISO range | `SENSOR_INFO_SENSITIVITY_RANGE` null | Hide: DCG. No ISO bracketing possible. |
 | No `setRepeatingBurst` | `session.setRepeatingBurst()` throws | Disable DCG permanently for this device. Log warning. |
 | Single rear camera | `LensCatalog.rear(lenses).size <= 1` | Hide: lens strip, super-res. |
-| Telephoto has no RAW | `LensProfile.supportsRaw == false` for telephoto | Super-res unavailable. Do not crash — show "unavailable" in sweep UI. |
-| No OIS on telephoto | `LensProfile.hasOis == false` | Allow sweep but warn: "Stabilization unavailable. Use a tripod for best results." |
+| Telephoto has no RAW | `LensProfile.supportsRaw == false` for telephoto | `MosaicPlanner.captureLens` falls to the longest raw lens; with none, SUPER RES is not in the carousel. |
+| No attitude sensor | `MotionSensor.hasAttitude == false` | SUPER RES is not in the carousel: the guidance cannot run. |
+| No OIS on telephoto | `LensProfile.hasOis == false` | Allow Super Res; the stability gate and the shutter floor are what hold the tile sharp. |
 | No distortion data | `LENS_DISTORTION` not reported | Skip distortion correction. Log. Mosaic stitching proceeds without. |
 | Low heap (< 256 MB) | `Runtime.maxMemory()` | Cap burst frames at 4, mosaic canvas at 20 MP. |
 
@@ -822,11 +825,46 @@ than either ramp -- the measurement window straddles the equidistant line, so
 a third of it is the hand-off zone where the two tiles still mix; away from
 that line the detail is one tile's alone.
 
-#### 3.4.4 The Stability Gate and the Tracker
+#### 3.4.4 The Stability Gate and the Attitude Guidance
 
-**As built** (`StabilityGate.kt`, `MotionSensor.kt`, `MosaicGuide.kt`,
-`MosaicCapture.kt`), after the first field test fired every burst while the
-hand was still moving.
+**As built** (`StabilityGate.kt`, `MotionSensor.kt`, `ImuGuidance.kt`,
+`MosaicGuide.kt`, `MosaicCapture.kt`, `SuperResMachine.kt`), after two field
+tests: the first fired every burst while the hand was still moving; the
+second, with a gate, found a hand at 105mm never completes a hold at the
+gate's first numbers, and found the dots swimming because the tracker that
+placed them was registering seven-degree frames against each other.
+
+**Guidance is inertial; placement is visual.** The dots -- where each node of
+the grid falls in the current frame, and the outline of the canvas -- come
+from the phone's attitude and nothing else. `MotionSensor` reads the game
+rotation vector (`TYPE_GAME_ROTATION_VECTOR`, falling back to
+`TYPE_ROTATION_VECTOR`) at the platform's fastest rate on its own thread and
+keeps the last half second of rotation matrices `R` (device axes → world).
+At the anchor frame, `ImuGuidance.anchor(R₀)` fixes every node as a
+direction in the world: a node at sensor-pixel offset `(sx, sy)` from the
+anchor frame's centre is, in display axes, `(dx, dy)`, and its device-frame
+direction is `normalise(dx, −dy, −f)` with `f = pixelsPerRadian` -- x right,
+y up, the rear camera down −z. Its world direction is `R₀ · v`. In the
+current frame it is `R_nowᵀ · R₀ · v`, projected back as display pixels
+`(f · x / −z, −f · y / −z)` and turned into sensor fractions through
+`TouchFocus.toSensorFraction`. The reticle's place on the canvas is the same
+arithmetic on the optical axis `(0, 0, −1)`. Roll is a rotation like any
+other and costs nothing. The loop runs at 33 ms with no pixel read at all.
+
+The game rotation vector has no magnetometer to hold its yaw, so it drifts
+slowly. Every placed tile measures the drift: where the attitude at the
+burst's reference frame put the reticle, against where the frame's own
+pixels registered it. The difference is added to every reticle position and
+subtracted from every dot (`ImuGuidance.correct`), so the dots stay on the
+tiles. The frame is paired with the attitude *at its exposure* --
+`SENSOR_TIMESTAMP + exposure/2` against the attitude history -- where the
+camera stamps frames on the sensors' clock (`SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME`).
+Nothing about where a tile is placed comes from the attitude: placement is
+registration of the burst's reference frame against the anchor and the
+neighbouring tiles, exactly as before, and a burst that cannot be registered
+is rejected. `ImuGuidanceTest` turns the phone by known angles and reads the
+dots; `TouchFocus.toSensorFraction` is the inverse of `toDisplayPoint` and is
+tested as such.
 
 **Still, in the sensor's numbers.** A frame is blurred by how far the image
 moves during its exposure: through `omega * t` radians at angular speed
@@ -835,52 +873,88 @@ moves during its exposure: through `omega * t` radians at angular speed
 is the speed that moves the image two pixels:
 
 ```
-omega_max = 2 px / (t * pixelsPerRadian)      clamped to [0.035, 0.09] rad/s
+omega_max = 2 px / (t * pixelsPerRadian)      clamped to [0.105, 0.21] rad/s
 ```
 
-The camera publishes the focal length and the sensor's physical size;
-`pixelsPerRadian` on the Pixel 11 Pro's main lens comes out at 2,875 px/rad,
-so at 1/60 s the ceiling there is 0.043 rad/s (2.4°/s), and on the 110mm
-telephoto -- about four times the pixels per radian -- most exposures ask for
-less than the floor. The floor, 2°/s, is the tremor of a hand holding still
-(one to two degrees a second peak, poll to poll); it keeps a long exposure
-from asking for what a hand cannot do while still refusing the pan, which is
-five to twenty. The cap, 5°/s, is where a short exposure would otherwise
-accept a wobble the merge's alignment has to chase. A phone lying on a desk
-reads 0.003 to 0.02 rad/s peak, poll to poll, from the desk's own vibration.
+The floor is 6°/s, from 2°/s: the second field test's hand at 105mm peaked
+at three to five degrees a second poll to poll and never completed a hold;
+two was a tripod's number. Six admits the hand and still refuses the pan,
+which is ten to twenty. Stated honestly, 6°/s at 1/250 s on the telephoto is
+five sensor pixels of blur -- but that is the peak of a single gyroscope
+sample in a 33 ms poll, not the exposure's mean, and the tile lands on the
+canvas at half to two-thirds scale. The cap is 12°/s, where a very short
+exposure would otherwise accept a wobble the merge's alignment has to chase.
+
+**The shutter floor.** What keeps 6°/s at five pixels rather than forty is
+the exposure. Auto exposure on a dim scene chooses 1/30 s without regard to
+the lens. When the mosaic locks the stream (`ZslRawStream.lockForSweep`) and
+the converged exposure is longer than the lens's floor, the stream is pinned
+at the floor with the ISO scaled to keep the light:
+
+```
+t_floor(eq) = 4 ms · 105 / eq       clamped to [2 ms, 16.7 ms]   (1/250 s at 105mm)
+ISO' = ISO · t / t_floor            clamped to the sensor's range
+```
+
+(`StabilityGate.shutterFloorNs`, `StabilityGate.sweepExposure`). Where the
+ISO range runs out the frame is under and the anchor's measured develop gain
+makes it up; the merge removes the noise and nothing removes the blur. A
+manual exposure is the photographer's and is left alone. Dual conversion
+gain is suspended for the lock's duration -- the mosaic's merge weighs every
+frame alike -- and restored on unlock.
 
 **Two measures, both required, every poll.** The gyroscope's *peak* speed
 since the last poll (the peak, not the mean: one frame smeared by a twitch is
-one tile smeared) against the ceiling; and the registration's own reading,
-the frame's centre moving less than 0.75% of a tile per 100 ms poll on the
-canvas, scaled to the poll interval and never more than the lock radius. The
-hold is the settle time of steady polls in a row, at least three of them,
-with the settle time stretched to cover the burst (`settleFor`): the burst
-is the ring's newest frames, so the hold *is* the frames' exposure window.
+one tile smeared) against the ceiling; and the reticle's own movement on the
+canvas between polls, allowed what the ceiling would move it in the same
+time -- `omega_max · Δt · pixelsPerRadian · tileScale`, never more than the
+lock radius -- so the two measures agree by construction (`MosaicGuide.configureGate`).
+Where the lens is unknown the allowance is 2% of a tile per 100 ms. The hold
+is the settle time of steady polls in a row, at least three of them: 170 ms
+(from 250), stretched to cover the burst (`settleFor`: frames × interval +
+40 ms), since the burst is the ring's newest frames and the hold *is* the
+frames' exposure window. The ring fills in proportion and the burst fires
+itself; there is nothing to press.
+
+**The magnet.** A node that is locking keeps its lock out to 1.5 radii
+(`MosaicGuide.MAGNET_MULTIPLE`): a hand on the dot trembles a few pixels
+over the edge and back, and without hysteresis the ring flickered and the
+hold restarted on every tremor. A node that was not locking gets no such
+reach, and a real departure past the magnet loses the lock. The guidance
+draws the locking node's dot at the reticle (the visual latch), so the eye
+reads "held" the moment the gate does.
 
 **Why the old rule fired.** "Inside the radius for 250 ms, drift under a
 radius" -- with the tracker at the time polling every 300 ms, the second
 observation satisfied the clock, and 5% of a frame is a degree of arc: a hand
 arriving on a target is inside it for a quarter second at a degree a second.
 
-**The tracker, priced.** The dots are placed by registering each preview
-frame against the newest tile and its nearest neighbour. That registration
-was measured at 219 ms a poll (`ZslStreamDeviceTest.trackingIsPricedAgainstAnIdleStream`)
-and is now 25: a 320×240 box-averaged view read in place from the ring
-(`RawRing::TrackingLumaNewest`, every second CFA cell of each 12×12-cell
-block, into one reusable array); a linear-time Shi–Tomasi response
-(`FeatureMatcher.strengthMap`: gradient tensor once, sliding box sums) with
-non-maximum suppression and a floor at 2% of the frame's strongest response;
-features extracted once per frame and cached for each placed tile; a match
-that shortlists twelve candidates by a 3×3 block summary before the full
-15×15 correlation; RANSAC that stops once a model explains enough
-(`log 0.01 / log(1 - w^4)` samples, 34 at 60% inliers). The ring's counters
-show no frame dropped or delayed beside an idle stream. Where registration
-fails on a phone the gyroscope says is still (under half the ceiling), the
-last transform is held for up to thirty polls -- for drawing and for the
-hold only; a burst's own reference frame is always registered afresh and a
-burst that cannot be placed is rejected, so a held transform never places a
-tile.
+**Why the tracker was retired from guidance.** Registration of the preview
+frame was measured at 219 ms a poll and brought to 25
+(`ZslStreamDeviceTest.trackingIsPricedAgainstAnIdleStream`; the speedups --
+in-place 320×240 view, linear-time Shi–Tomasi, coarse shortlist, adaptive
+RANSAC -- remain, and are what registers each burst). But on a lens seven
+degrees across a pan of a few degrees carries the anchor's features out of
+the frame; the registration clung to whatever was left at the edge, then
+failed, and the dots stuck, swam, snapped and vanished. A hand cannot follow
+a dot that does that. Registration is the right tool for placing a tile that
+has been taken -- exact, and against the pixels -- and the wrong one for
+saying where the phone points *now*.
+
+**The lifecycle.** Super Res is a mode with a state machine
+(`SuperResMachine`: IDLE → ARMED → RUNNING → STOPPING → ARMED), applied by the
+screen and walked by `SuperResMachineTest`. The run is a coroutine job, not a
+`LaunchedEffect` keyed on a flag: the first version's STOP flipped the flag,
+which cancelled the effect and with it the code after the run that re-enabled
+the controls -- the screen was left armed, busy and unreachable. Now the loop
+returns when `Phase.shouldContinue` reads false or the stream closes, and the
+`finally` puts the machine back to ARMED, frees the controls and clears the
+job whatever happened inside; the runner's own `finally` stops the sensors
+and unlocks the stream; `session.use` frees the canvas. Selecting the mode
+switches to the telephoto and turns the ring on if it was off; leaving it
+puts both back. The system back gesture is `BackNavigation`'s stack: a sheet,
+the gallery, the settings, then STOP if running, then leave the mode, and
+only on a bare viewfinder in an ordinary mode does it exit.
 
 **The colour.** Unrelated to the gate but found by the same test: the lock
 taken before AE and AWB had converged on a fresh stream froze white balance
@@ -927,7 +1001,7 @@ pixel. Native and Kotlin agree within the develops' own bound of two codes
 (`DevelopParityTest.nativeAndKotlinLocalToneAgreeAndAct`,
 `LinearDevelopParityTest.withTheLocalOperatorItAgrees`).
 
-Not applied to sweep tiles: a base computed per tile differs at every seam.
+Not applied to Super Res tiles: a base computed per tile differs at every seam.
 The right grid for a mosaic is one over the canvas, which is future work.
 
 ---
@@ -1258,7 +1332,7 @@ photograph is.
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt` |
 | **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `LensProfile.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |
 | **DCG calibration** | `DcgCalibration.kt`, `DcgProfiler.kt`, `DcgCalibrationStore.kt` |
-| **Mosaic** | `MosaicSession.kt`, `MosaicCapture.kt` (the guided runner), `MosaicGuide.kt` (the lock rule), `MosaicPlanner.kt` (presets, regions, nodes), `MosaicAssembler.kt` (anchor, locate, place), `MosaicCanvas.kt`, `MosaicRefiner.kt` |
+| **Super Res (mosaic)** | `SuperResMachine.kt` (the mode's lifecycle), `MosaicSession.kt`, `MosaicCapture.kt` (the guided runner), `ImuGuidance.kt` (the dots, from the attitude), `MotionSensor.kt` (gyroscope and rotation vector), `StabilityGate.kt` (the ceiling, the shutter floor), `MosaicGuide.kt` (the lock rule, the magnet), `MosaicPlanner.kt` (presets, regions, nodes), `MosaicAssembler.kt` (anchor, locate, place), `MosaicCanvas.kt`, `MosaicRefiner.kt` |
 | **Memory** | `MemoryBudget.kt`, `MemoryPressure.kt` |
 | **Settings** | `AppSettings.kt`, `CaptureReadout.kt`, `RecentCapture.kt`, `CaptureLog.kt` |
 | **GPU** | `GpuCrossing.kt` (benchmark only) |
@@ -1286,11 +1360,13 @@ photograph is.
 |---|---|
 | `Theme.kt` | `Ink` palette, `Type` scale, `Haptics` vocabulary, `MultiframeTheme` |
 | `Gauges.kt` | `GaugeState` holder and the live readouts: exposure, histogram, focus, zoom |
-| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`, mode/action builders |
-| `ControlChips.kt` | Composable rendering of chips: `ControlRow`, `ActionStrip`, `ControlChip` |
-| `ControlsPanel.kt` | PRO panel: manual exposure, focus, WB, toggles, sliders |
-| `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation |
-| `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), the sweep map, and `MosaicGuidance` -- the reticle and the dots |
+| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`; the builders `chrome` (the one opener over the picture), `settings` (the settings screen's chips), `carousel` (AUTO · NIGHT · ACTION · SUPER RES), `actions` (STOP, RAW, DNG) |
+| `ControlChips.kt` | Composable rendering: `ChromeOpeners`, `SettingsChips`, `ModeCarousel`, `ActionStrip`, `ControlChip` |
+| `SettingsScreen.kt` | Everything set once, on a screen of its own: the settings chips and the manual panel |
+| `ControlsPanel.kt` | The manual panel, a section of the settings screen: exposure, focus, WB, the set-once toggles, sliders |
+| `BackNavigation.kt` | What the system back gesture does, given what is open: a pure stack, tested |
+| `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation; its own back handler |
+| `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), `MosaicGuidance` -- the outline, the reticle and the dots -- and `MosaicPresetPill` (`2×2 · 33 MP | 3×3 · 75 MP`) |
 | `AboutSheet.kt` | About/info bottom sheet |
 
 ### Build Configuration

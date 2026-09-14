@@ -22,14 +22,14 @@ class ThemeTest {
     /** Every style that carries a live sensor reading. */
     private val gauges = listOf(
         Type.Gauge, Type.GaugeLarge, Type.GaugeBone, Type.SliderValue,
-        Type.LensFocal, Type.LensZoom, Type.Countdown, Type.Status,
+        Type.LensFocal, Type.LensZoom, Type.Countdown, Type.Status, Type.Badge,
     )
 
     /** Every style that carries words rather than numbers. */
     private val prose = listOf(
         Type.Label, Type.Control, Type.Section, Type.Instruction,
         Type.Action, Type.SliderLabel, Type.Unit, Type.Indicator,
-        Type.Spec, Type.Reset,
+        Type.Spec, Type.Reset, Type.Mode, Type.ModeSelected,
     )
 
     // --- the monospace rule ------------------------------------------------

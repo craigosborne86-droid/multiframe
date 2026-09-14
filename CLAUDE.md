@@ -73,7 +73,7 @@ picture, the sensor saw it in the scene."
 3. **`Amber` is spent only on numerical readings and live values.** Not on
    labels, backgrounds, borders, or icons.
 4. **`Danger` and `Confirm` are never on the viewfinder** during normal
-   operation. They exist for gallery actions and sweep tile guidance only.
+   operation. They exist for gallery actions and Super Res tile guidance only.
 5. A value that is a live reading gets `Amber`. The word for "no reading" (e.g.,
    "OFF") gets `Muted`.
 

@@ -24,22 +24,25 @@ import kotlin.math.sqrt
  *
  *     omega_max = maxBlurPixels / (t * pixelsPerRadian)
  *
- * which is what the gyroscope is compared against, poll by poll. On the 110mm
- * telephoto (about 11,500 pixels per radian) at 1/250 s that is 0.043 rad/s,
- * two and a half degrees a second: a deliberate hold, and one a hand can do.
- * At 1/30 s it would be a fifth of that, which a hand cannot -- a hand
- * holding still peaks at one to two degrees a second, poll to poll -- so the
- * threshold is floored at two degrees a second: the mosaic then accepts the
- * tremor an ordinary handheld capture at that exposure accepts, rather than
- * never firing, while still refusing the pan, which is five to twenty. And it
- * is capped at five, so that a short exposure does not make a wobble the
- * merge's alignment will have to chase acceptable.
+ * which is what the gyroscope is compared against, poll by poll. The rule
+ * gives an answer for the exposure in hand; the clamps say what a hand can do
+ * with it. The floor is six degrees a second: the first field test's floor of
+ * two was a tripod's number -- a hand at 105mm, with its pulse and its tremor,
+ * peaks at three to five degrees a second poll to poll and never completed a
+ * hold. Six admits the hand and still refuses the pan, which is ten to twenty.
+ * Honestly stated, six degrees a second at 1/250 s on the telephoto is five
+ * sensor pixels of blur -- but that is the peak of a single gyroscope sample
+ * in the poll, not the exposure's mean, and the tile lands on the canvas at
+ * half to two-thirds scale; the shutter floor the mosaic locks at (1/250 s,
+ * see `ZslRawStream.lockForSweep`) is what keeps it there and not at forty.
+ * The cap is twelve, so that a very short exposure does not make a wobble the
+ * merge's alignment has to chase acceptable.
  *
- * The registration supplies a second, independent reading of the same thing:
- * how far the frame's centre moved on the canvas between two polls. That is
- * held to [STILL_FRACTION] of a tile per poll, which at ten polls a second on
- * a 4080-pixel tile is thirty pixels a tenth of a second -- and it is the one
- * that works when the gyroscope is absent.
+ * The attitude supplies a second reading of the same thing: how far the
+ * reticle moved on the canvas between two polls. That is held to what the
+ * gyroscope's ceiling would move it in the same time, so the two measures
+ * agree by construction; it is the one that works when the gyroscope is
+ * absent.
  *
  * Pure, so the arithmetic is checkable without a phone in the hand.
  */
@@ -48,24 +51,75 @@ object StabilityGate {
     /** How much motion blur a tile is allowed, in sensor pixels. */
     const val MAX_BLUR_PIXELS = 2f
 
-    /** The angular speed threshold is never below this -- two degrees a second -- or a hand could never satisfy it. */
-    const val MIN_ANGULAR_SPEED = 0.035f
+    /** The angular speed threshold is never below this -- six degrees a second -- or a hand could never satisfy it. */
+    const val MIN_ANGULAR_SPEED = 0.105f
 
-    /** Nor above this, five degrees a second, or a short exposure would accept a visible wobble. */
-    const val MAX_ANGULAR_SPEED = 0.09f
+    /** Nor above this, twelve degrees a second, or a short exposure would accept a visible wobble. */
+    const val MAX_ANGULAR_SPEED = 0.21f
 
-    /** The fallback where the lens's geometry is unknown: two degrees a second. */
-    const val DEFAULT_ANGULAR_SPEED = 0.035f
+    /** The fallback where the lens's geometry is unknown: six degrees a second. */
+    const val DEFAULT_ANGULAR_SPEED = 0.105f
 
     /**
-     * Registration jitter allowed between two polls, as a fraction of the
-     * placed tile's width. Independent of the gyroscope, and the whole gate
-     * where there is none.
+     * Reticle movement allowed between two polls where the gate has no
+     * angular ceiling to derive it from, as a fraction of the placed tile's
+     * width per nominal poll.
      */
-    const val STILL_FRACTION = 0.0075f
+    const val STILL_FRACTION = 0.02f
 
     /** Polls that must read steady, one after another, before a hold counts. */
     const val MIN_STEADY_POLLS = 3
+
+    /**
+     * The shutter floor for a telephoto burst, in nanoseconds: 1/250 s on the
+     * reference telephoto. Auto exposure on a dim scene will happily choose
+     * 1/30 s on a lens where a hand's tremor moves the image forty pixels in
+     * that time; the mosaic asks for the exposure it needs and lets the ISO
+     * rise to pay for it, because the merge removes noise and nothing removes
+     * blur.
+     */
+    const val SHUTTER_FLOOR_NS = 4_000_000L
+
+    /** The lens the floor is stated for: a 105mm-equivalent telephoto. */
+    const val SHUTTER_FLOOR_REFERENCE_MM = 105
+
+    /** The floor is never longer than 1/60 s on any lens, nor shorter than 1/500 s. */
+    const val SHUTTER_FLOOR_MAX_NS = 16_666_666L
+    const val SHUTTER_FLOOR_MIN_NS = 2_000_000L
+
+    /**
+     * The shutter floor for a lens, from its 35mm-equivalent focal length:
+     * blur scales with focal length, so a lens half as long is allowed twice
+     * the exposure for the same movement of the image. 1/250 s at 105mm,
+     * about 1/57 s at 24mm, clamped to [SHUTTER_FLOOR_MIN_NS]..[SHUTTER_FLOOR_MAX_NS].
+     */
+    fun shutterFloorNs(equivalent35mm: Int): Long {
+        if (equivalent35mm <= 0) return SHUTTER_FLOOR_NS
+        val scaled = SHUTTER_FLOOR_NS.toDouble() * SHUTTER_FLOOR_REFERENCE_MM / equivalent35mm
+        return scaled.toLong().coerceIn(SHUTTER_FLOOR_MIN_NS, SHUTTER_FLOOR_MAX_NS)
+    }
+
+    /**
+     * What to pin a mosaic's sensor at, given what auto exposure converged on.
+     * Null where the converged exposure is already at or under the lens's
+     * floor. Otherwise the floor -- raised to the sensor's own shortest
+     * exposure where that is longer -- and the ISO scaled to keep the light,
+     * `iso * exposure / floor`, clamped to the sensor's range: the frame is
+     * under where the range runs out, and the develop gain makes it up.
+     */
+    fun sweepExposure(
+        iso: Int,
+        exposureNs: Long,
+        equivalent35mm: Int,
+        isoMin: Int,
+        isoMax: Int,
+        sensorMinExposureNs: Long = 0L,
+    ): Pair<Int, Long>? {
+        val floor = maxOf(shutterFloorNs(equivalent35mm), sensorMinExposureNs)
+        if (exposureNs <= floor) return null
+        val scaled = (iso.toDouble() * exposureNs / floor).toLong().coerceIn(isoMin.toLong(), isoMax.toLong())
+        return scaled.toInt() to floor
+    }
 
     /**
      * The image's scale in pixels per radian of rotation: the focal length in

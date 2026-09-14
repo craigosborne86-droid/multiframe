@@ -129,6 +129,25 @@ class AppSettingsTest {
         assertThat(AppSettings.decode(stored).captureMode).isEqualTo(CaptureMode.AUTO)
     }
 
+    /**
+     * Super Res holds the telephoto and the ring while it is selected. An app
+     * that reopened holding them would be reopening mid-gesture, so the mode
+     * is never the one it opens in -- whatever a stored value says.
+     */
+    @Test
+    fun `super res is not a mode the app reopens in`() {
+        val stored = AppSettings().encode().toMutableMap()
+        stored[AppSettings.KEY_MODE] = CaptureMode.SUPER_RES.name
+        assertThat(AppSettings.decode(stored).captureMode).isEqualTo(CaptureMode.AUTO)
+    }
+
+    @Test
+    fun `the histogram switch is remembered and off out of the box`() {
+        assertThat(AppSettings().histogram).isFalse()
+        val on = AppSettings(histogram = true)
+        assertThat(AppSettings.decode(on.encode()).histogram).isTrue()
+    }
+
     @Test
     fun `an unknown key is ignored rather than fatal`() {
         val stored = AppSettings().encode() + ("somethingFromTheFuture" to "42")

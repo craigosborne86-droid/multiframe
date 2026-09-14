@@ -7,6 +7,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
@@ -95,16 +96,28 @@ class GuidesTest {
     }
 
     @Test
-    fun theMosaicPresetPillOffersTheGridsAndReportsATap() {
+    fun theSuperResPillOffersTheGridsWithTheirMegapixelsAndReportsATap() {
         var chosen by mutableStateOf(dev.multiframe.camera.pipeline.MosaicPreset.DETAIL_BOOST)
         render {
-            MosaicPresetPill(preset = chosen, customOffered = false, onPreset = { chosen = it })
+            MosaicPresetPill(
+                preset = chosen,
+                customOffered = false,
+                onPreset = { chosen = it },
+                megapixels = mapOf(
+                    dev.multiframe.camera.pipeline.MosaicPreset.DETAIL_BOOST to 33.2,
+                    dev.multiframe.camera.pipeline.MosaicPreset.LARGE_FORMAT to 75.0,
+                ),
+            )
         }
-        compose.onNodeWithContentDescription("mosaic 3×3").performClick()
+        // The badge is part of the grid's name: the choice is between two pictures.
+        compose.onNodeWithContentDescription("super res 2×2 · 33 MP").assertIsDisplayed()
+        compose.onNodeWithContentDescription("super res 3×3 · 75 MP").performClick()
         compose.waitForIdle()
         assertThat(chosen).isEqualTo(dev.multiframe.camera.pipeline.MosaicPreset.LARGE_FORMAT)
-        // No wider lens, no custom.
-        compose.onNodeWithContentDescription("mosaic CUSTOM").assertDoesNotExist()
+        // The drawn region is not on the pill.
+        compose.onNodeWithContentDescription("super res CUSTOM").assertDoesNotExist()
+        // And nothing here is still called a mosaic.
+        compose.onNodeWithContentDescription("mosaic 3×3").assertDoesNotExist()
     }
 
     @Test

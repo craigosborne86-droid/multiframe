@@ -272,6 +272,29 @@ object Type {
         color = Ink.Muted,
     )
 
+    /** A mode in the carousel under the shutter, not selected: an engraving in the metal. */
+    val Mode = TextStyle(
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 1.4.sp,
+        color = Ink.Muted,
+    )
+
+    /** The selected mode: the same engraving, lit. Weight, not hue. */
+    val ModeSelected = TextStyle(
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 1.4.sp,
+        color = Ink.Bone,
+    )
+
+    /** The megapixel badge on a Super Res grid: `33 MP`. A reading, monospaced. */
+    val Badge = TextStyle(
+        fontSize = 10.sp,
+        fontFamily = FontFamily.Monospace,
+        color = Ink.Amber,
+    )
+
     /** Reset button text. */
     val Reset = TextStyle(
         fontSize = 11.sp,

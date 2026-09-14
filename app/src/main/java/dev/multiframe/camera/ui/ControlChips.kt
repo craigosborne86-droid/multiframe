@@ -5,20 +5,27 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -27,6 +34,7 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
@@ -104,31 +112,122 @@ internal fun Modifier.fadedEdges(scroll: ScrollState): Modifier = this
         }
     }
 
-/** The row over the picture. Settings only -- see [ControlBar.modes]. */
+/**
+ * The settings screen's chips, wrapped to the width they have. Settings only
+ * -- see [ControlBar.settings]. Wrapped rather than scrolled: on a screen of
+ * their own there is room for all of them, and a row that has to be scrolled
+ * to be read is the thing the settings screen exists to end.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun ControlRow(
+fun SettingsChips(
     specs: List<ControlSpec>,
     onControl: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val (openers, settings) = specs.partition { it.kind == ControlKind.Opener }
+    FlowRow(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        specs.forEach { spec -> ControlChip(spec) { onControl(spec.id) } }
+    }
+}
+
+/**
+ * The openers over the picture -- see [ControlBar.chrome]. Drawn as an icon
+ * rather than a word: the top of the viewfinder is the one place a label is
+ * clutter, and a pair of sliders is understood without one. A pill, like
+ * every setting, and not a circle: circles are lenses.
+ */
+@Composable
+fun ChromeOpeners(
+    specs: List<ControlSpec>,
+    onControl: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        specs.forEach { spec ->
+            Box(
+                modifier = Modifier
+                    .heightIn(min = MinTouch)
+                    .alpha(if (spec.enabled) 1f else 0.38f)
+                    .clip(PillShape)
+                    .background(if (spec.active) Ink.Bone else Ink.Pane)
+                    .border(1.dp, if (spec.active) Ink.Bone else Ink.Hairline, PillShape)
+                    .clickable(enabled = spec.enabled) { onControl(spec.id) }
+                    .padding(horizontal = 16.dp)
+                    .semantics { contentDescription = spec.label },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = when (spec.id) {
+                        ControlBar.SETTINGS -> Icons.Outlined.Tune
+                        else -> Icons.Outlined.Info
+                    },
+                    contentDescription = null,
+                    tint = if (spec.active) Ink.OnBone else Ink.Bone,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The mode carousel under the shutter -- see [ControlBar.carousel].
+ *
+ * Words, not pills: the selected mode is set in bone and the others in the
+ * muted ink, the way a camera's mode dial shows one engraving lit and the
+ * rest in the metal. AUTO's reading -- what it settled on -- sits beside it in
+ * the accent, small. Every entry is a full touch target whatever its word's
+ * width.
+ */
+@Composable
+fun ModeCarousel(
+    specs: List<ControlSpec>,
+    onControl: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (specs.size < 2) return
     val scroll = rememberScrollState()
     Row(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 6.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .fadedEdges(scroll)
+            .horizontalScroll(scroll)
+            .padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier
-                .weight(1f, fill = false)
-                .fadedEdges(scroll)
-                .horizontalScroll(scroll),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            settings.forEach { spec -> ControlChip(spec) { onControl(spec.id) } }
-        }
-        if (openers.isNotEmpty()) {
-            Spacer(Modifier.width(8.dp))
-            openers.forEach { spec -> ControlChip(spec) { onControl(spec.id) } }
+        specs.forEach { spec ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .alpha(if (spec.enabled) 1f else 0.38f)
+                    .heightIn(min = MinTouch)
+                    .clip(PillShape)
+                    .clickable(enabled = spec.enabled) { onControl(spec.id) }
+                    .padding(horizontal = 14.dp)
+                    .semantics {
+                        contentDescription = spec.value?.let { "${spec.label} $it" } ?: spec.label
+                        selected = spec.active
+                    },
+            ) {
+                Text(
+                    text = spec.label,
+                    style = if (spec.active) Type.ModeSelected else Type.Mode,
+                    color = if (spec.active) Ink.Bone else Ink.Muted,
+                )
+                spec.value?.let { value ->
+                    Text(
+                        text = value,
+                        style = Type.Gauge,
+                        color = Ink.Amber,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -161,7 +260,7 @@ fun ActionStrip(
 }
 
 @Composable
-private fun ControlChip(spec: ControlSpec, onClick: () -> Unit) {
+internal fun ControlChip(spec: ControlSpec, onClick: () -> Unit) {
     val shape: Shape = if (spec.kind == ControlKind.Action) ActionShape else PillShape
     val filled = spec.active && spec.kind != ControlKind.Cycle
     val edge = when {
