@@ -309,4 +309,112 @@ class ExposureStrategyTest {
             assertWithMessage(name).that(total).isEqualTo((w / 4) * (h / 4))
         }
     }
+
+    // --- The guard with a memory ---
+
+    private fun scene(highlight: Float, clipped: Float = 0f) = SceneAnalysis(clipped, highlight, highlight / 8f, 3f)
+
+    /** The meter's response to a pull: the frame the guard sees next is the scene darkened by it. */
+    private fun asSeen(sceneHighlight: Float, guard: ExposureStrategy.Guard, clipped: Float = 0f) =
+        scene((sceneHighlight * Math.pow(2.0, guard.pullStops.toDouble()).toFloat()).coerceAtMost(1f), clipped)
+
+    @Test
+    fun `a dim room with a window does not switch the bias on and off`() {
+        // The eighth field test: bright end at 0.15 -- over the floor -- so
+        // the bias went on; the frame then read 0.075, under it, so the
+        // bias came off, and so on every 700 ms. The scene is the same
+        // scene, and the decision has to be the same decision.
+        val sceneHighlight = 0.15f
+        var guard = ExposureStrategy.Guard.REST
+        val decisions = ArrayList<Float>()
+        repeat(12) {
+            guard = ExposureStrategy.nextGuard(asSeen(sceneHighlight, guard), frameCount = 10, current = guard)
+            decisions.add(guard.pullStops)
+        }
+        assertThat(decisions.first()).isWithin(1e-6f).of(-1f)
+        assertThat(decisions.distinct()).containsExactly(-1f)
+    }
+
+    @Test
+    fun `the bias comes off only when the scene itself has gone dark, with hysteresis`() {
+        var guard = ExposureStrategy.nextGuard(scene(0.5f), 10)
+        assertThat(guard.standing).isTrue()
+        // The scene's bright end falls to 0.08: under the floor but not under
+        // the release fraction of it. The bias stays.
+        guard = ExposureStrategy.nextGuard(asSeen(0.08f, guard), 10, guard)
+        assertThat(guard.standing).isTrue()
+        // To 0.05: released. And a frame at 0.05 with no pull is under the
+        // floor, so it stays released.
+        guard = ExposureStrategy.nextGuard(asSeen(0.05f, guard), 10, guard)
+        assertThat(guard.standing).isFalse()
+        guard = ExposureStrategy.nextGuard(asSeen(0.05f, guard), 10, guard)
+        assertThat(guard.standing).isFalse()
+        assertThat(guard.pullStops).isEqualTo(0f)
+    }
+
+    @Test
+    fun `from rest a clipped scene is pulled as the stateless rule says, then held rather than chased`() {
+        val blown = scene(1f, clipped = 0.05f)
+        val guard = ExposureStrategy.nextGuard(blown, 16)
+        assertThat(guard.pullStops).isWithin(1e-5f).of(
+            ExposureStrategy.recommendedPullStops(blown, 16),
+        )
+        // The pull in force; the next frame has stopped clipping but its
+        // bright end sits at the safety line. Nothing changes.
+        val settled = scene(0.9f)
+        val held = ExposureStrategy.nextGuard(settled, 16, guard)
+        assertThat(held).isEqualTo(guard)
+        // With half a stop of headroom under the line the risk relaxes a
+        // step, and no further while the frame stays there.
+        val roomy = scene(0.6f)
+        val relaxed = ExposureStrategy.nextGuard(roomy, 16, held)
+        assertThat(relaxed.riskStops).isWithin(1e-5f).of((held.riskStops - ExposureStrategy.RISK_RELAX_STEP).coerceAtLeast(0f))
+        assertThat(relaxed.standing).isTrue()
+    }
+
+    @Test
+    fun `the risk grows while clipping survives the pull and never past what the burst affords`() {
+        var guard = ExposureStrategy.nextGuard(scene(1f, clipped = 0.2f), 4)
+        repeat(6) { guard = ExposureStrategy.nextGuard(scene(1f, clipped = 0.2f), 4, guard) }
+        assertThat(-guard.pullStops).isWithin(1e-5f).of(ExposureStrategy.shadowRecoveryStops(4))
+        // A single frame affords nothing, and the guard asks for nothing.
+        assertThat(ExposureStrategy.nextGuard(scene(1f, clipped = 0.2f), 1, guard).pullStops).isEqualTo(0f)
+    }
+
+    @Test
+    fun `a lamp in the frame does not walk the guard to the burst's whole allowance`() {
+        // A light source clips whatever the pull, so the bright end reads
+        // 0.98 tick after tick. The pull it implies is the same each time,
+        // and that is where the guard stays.
+        val lamp = scene(0.98f, clipped = 0.004f)
+        var guard = ExposureStrategy.nextGuard(lamp, 28)
+        // The second tick reads the lamp as clipped under the first pull --
+        // which it is -- and settles; every tick after that is the same.
+        guard = ExposureStrategy.nextGuard(lamp, 28, guard)
+        val settled = guard.pullStops
+        repeat(20) { guard = ExposureStrategy.nextGuard(lamp, 28, guard) }
+        assertThat(guard.pullStops).isWithin(1e-5f).of(settled)
+        assertThat(-settled).isLessThan(1.5f)
+        assertThat(-settled).isGreaterThan(1f)
+    }
+
+    @Test
+    fun `a clipped frame reads as clipped whatever the pull in force`() {
+        // The bright end cannot be read back above one: a frame clipped
+        // under a two-stop pull is a scene at least four times over, and the
+        // bias stays on however the arithmetic would have it.
+        val deep = ExposureStrategy.Guard(standing = true, riskStops = 1f)
+        val next = ExposureStrategy.nextGuard(scene(1f, clipped = 0.01f), 16, deep)
+        assertThat(next.standing).isTrue()
+        assertThat(next.riskStops).isAtLeast(deep.riskStops)
+    }
+
+    @Test
+    fun `the EV index quantises the pull to the camera's steps`() {
+        assertThat(ExposureStrategy.evIndexFor(-1f, caps)).isEqualTo(-6)
+        assertThat(ExposureStrategy.evIndexFor(-1.6f, caps)).isEqualTo(-9)
+        assertThat(ExposureStrategy.evIndexFor(0f, caps)).isEqualTo(0)
+        val none = caps.copy(evMin = 0, evMax = 0, evStep = 0f)
+        assertThat(ExposureStrategy.evIndexFor(-1f, none)).isEqualTo(0)
+    }
 }

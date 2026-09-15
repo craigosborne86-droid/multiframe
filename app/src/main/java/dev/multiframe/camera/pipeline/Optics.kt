@@ -187,7 +187,27 @@ object Optics {
      * The source is not recycled. It is the caller's, and on the fallback path
      * it is also the buffer the reference reads from.
      */
-    fun apply(bitmap: android.graphics.Bitmap, params: Params): Pair<android.graphics.Bitmap, ChromaticAberration.Scale> {
+    fun apply(bitmap: android.graphics.Bitmap, params: Params): Pair<android.graphics.Bitmap, ChromaticAberration.Scale> =
+        applyCropped(bitmap, params).let { it.bitmap to it.scale }
+
+    /** What [applyCropped] did: the corrected picture, the aberration used, and the border taken off. */
+    class Corrected(
+        val bitmap: android.graphics.Bitmap,
+        val scale: ChromaticAberration.Scale,
+        val inset: LensDistortion.Inset,
+    )
+
+    /**
+     * Corrects a bitmap, returning a new one cropped to the pixels the
+     * correction could read from the source -- see
+     * [LensDistortion.validInset] -- on the native path where it is
+     * available and through [applyReference] where it is not.
+     *
+     * The source is not recycled. It is the caller's, and on the fallback
+     * path it is also the buffer the reference reads from. A bitmap that
+     * needs no correction comes back as itself, uncropped.
+     */
+    fun applyCropped(bitmap: android.graphics.Bitmap, params: Params): Corrected {
         val width = bitmap.width
         val height = bitmap.height
 
@@ -201,23 +221,26 @@ object Optics {
         }
 
         val model = params.distortion?.takeIf { !it.isIdentity }
-        if (model == null && scale.isIdentity) return bitmap to scale
+        if (model == null && scale.isIdentity) return Corrected(bitmap, scale, LensDistortion.Inset.NONE)
 
-        NativeOptics.correct(bitmap, model, scale)?.let { corrected ->
-            logApplied(params, model, width, height)
-            return corrected to scale
+        val inset = LensDistortion.validInset(model, width, height, scale)
+        NativeOptics.correct(bitmap, model, scale, inset)?.let { corrected ->
+            logApplied(params, model, width, height, inset)
+            return Corrected(corrected, scale, inset)
         }
 
         // The Kotlin reference, on a copy.
         val source = IntArray(width * height)
         bitmap.getPixels(source, 0, width, 0, 0, width, height)
-        val out = IntArray(width * height)
-        applyReference(source, out, width, height, model, scale)
+        val outWidth = inset.width(width)
+        val outHeight = inset.height(height)
+        val out = IntArray(outWidth * outHeight)
+        applyReference(source, out, width, height, model, scale, outWidth, outHeight, inset.left, inset.top)
         val corrected = android.graphics.Bitmap.createBitmap(
-            out, width, height, android.graphics.Bitmap.Config.ARGB_8888,
+            out, outWidth, outHeight, android.graphics.Bitmap.Config.ARGB_8888,
         )
-        logApplied(params, model, width, height)
-        return corrected to scale
+        logApplied(params, model, width, height, inset)
+        return Corrected(corrected, scale, inset)
     }
 
     /** The aberration scale for this capture: cached for the lens, or measured now. */
@@ -246,17 +269,21 @@ object Optics {
         model: LensDistortion.Model?,
         width: Int,
         height: Int,
+        inset: LensDistortion.Inset = LensDistortion.Inset.NONE,
     ) {
+        val crop = if (inset.isZero) "" else ", cropped %d/%d/%d/%d to %dx%d".format(
+            inset.left, inset.top, inset.right, inset.bottom, inset.width(width), inset.height(height),
+        )
         if (model != null) {
             Log.i(
                 TAG,
-                "%s: corrected %dx%d, peak %.1fpx".format(
+                "%s: corrected %dx%d, peak %.1fpx%s".format(
                     params.lensLabel, width, height,
-                    LensDistortion.peakDisplacement(model, width, height),
+                    LensDistortion.peakDisplacement(model, width, height), crop,
                 ),
             )
         } else {
-            Log.i(TAG, "${params.lensLabel}: corrected aberration only")
+            Log.i(TAG, "${params.lensLabel}: corrected aberration only$crop")
         }
     }
 
@@ -280,9 +307,17 @@ object Optics {
         height: Int,
         model: LensDistortion.Model?,
         scale: ChromaticAberration.Scale,
+        /** The destination's size and its place in the corrected frame; the whole frame by default. */
+        dstWidth: Int = width,
+        dstHeight: Int = height,
+        offsetX: Int = 0,
+        offsetY: Int = 0,
     ) {
         require(src.size >= width * height) { "source is smaller than $width x $height" }
-        require(dst.size >= width * height) { "destination is smaller than $width x $height" }
+        require(dst.size >= dstWidth * dstHeight) { "destination is smaller than $dstWidth x $dstHeight" }
+        require(offsetX >= 0 && offsetY >= 0 && offsetX + dstWidth <= width && offsetY + dstHeight <= height) {
+            "a $dstWidth x $dstHeight window at $offsetX, $offsetY is not inside $width x $height"
+        }
 
         val maxX = width - 1
         val maxY = height - 1
@@ -292,20 +327,20 @@ object Optics {
         val acx = (width - 1) / 2f
         val acy = (height - 1) / 2f
 
-        Bands.rows(height) { yStart, yEnd ->
+        Bands.rows(dstHeight) { yStart, yEnd ->
             val s = FloatArray(2)
             for (y in yStart until yEnd) {
-                val row = y * width
-                val fy = y.toFloat()
-                for (x in 0 until width) {
+                val row = y * dstWidth
+                val fy = (y + offsetY).toFloat()
+                for (x in 0 until dstWidth) {
                     val sx: Float
                     val sy: Float
                     if (model != null) {
-                        LensDistortion.sourceFor(model, x.toFloat(), fy, s)
+                        LensDistortion.sourceFor(model, (x + offsetX).toFloat(), fy, s)
                         sx = s[0]
                         sy = s[1]
                     } else {
-                        sx = x.toFloat()
+                        sx = (x + offsetX).toFloat()
                         sy = fy
                     }
 

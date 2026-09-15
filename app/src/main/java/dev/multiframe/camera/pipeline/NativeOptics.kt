@@ -28,7 +28,9 @@ internal object NativeOptics {
     }
 
     /**
-     * Corrects [bitmap] into a new bitmap of the same size.
+     * Corrects [bitmap] into a new bitmap: the corrected frame less [inset],
+     * which is the border the correction would have had to invent (see
+     * [LensDistortion.validInset]). No inset is the same size.
      *
      * The source is not modified and not recycled: the caller owns both and
      * decides when the original goes.
@@ -37,19 +39,23 @@ internal object NativeOptics {
         bitmap: Bitmap,
         model: LensDistortion.Model?,
         scale: ChromaticAberration.Scale,
+        inset: LensDistortion.Inset = LensDistortion.Inset.NONE,
     ): Bitmap? {
         if (!NativeMerge.isAvailable()) return null
         @Suppress("DEPRECATION")
         if (bitmap.config != Bitmap.Config.ARGB_8888) return null
+        val outWidth = inset.width(bitmap.width)
+        val outHeight = inset.height(bitmap.height)
+        if (outWidth <= 0 || outHeight <= 0) return null
 
         val out = try {
-            Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+            Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
         } catch (e: OutOfMemoryError) {
             Log.w(TAG, "no room for a corrected bitmap", e)
             return null
         }
 
-        if (!correctInto(bitmap, out, model, scale)) {
+        if (!correctInto(bitmap, out, model, scale, inset.left, inset.top)) {
             out.recycle()
             return null
         }
@@ -57,7 +63,9 @@ internal object NativeOptics {
     }
 
     /**
-     * The pass alone, into a destination the caller already holds.
+     * The pass alone, into a destination the caller already holds: [dst] is
+     * the corrected frame's window from ([offsetX], [offsetY]) of its own
+     * size.
      *
      * Split from [correct] so the encode can be timed without the allocation:
      * a fresh 50 MB bitmap costs tens of milliseconds to obtain and zero, and
@@ -68,10 +76,12 @@ internal object NativeOptics {
         dst: Bitmap,
         model: LensDistortion.Model?,
         scale: ChromaticAberration.Scale,
+        offsetX: Int = 0,
+        offsetY: Int = 0,
     ): Boolean {
         if (!NativeMerge.isAvailable()) return false
         return try {
-            nCorrect(src, dst, pack(model), scale.red, scale.blue)
+            nCorrect(src, dst, pack(model), scale.red, scale.blue, offsetX, offsetY)
         } catch (e: Throwable) {
             Log.w(TAG, "native optics failed", e)
             false
@@ -84,5 +94,7 @@ internal object NativeOptics {
         model: FloatArray?,
         scaleRed: Float,
         scaleBlue: Float,
+        offsetX: Int,
+        offsetY: Int,
     ): Boolean
 }

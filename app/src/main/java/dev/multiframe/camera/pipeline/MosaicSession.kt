@@ -143,16 +143,66 @@ class MosaicSession private constructor(
      * [inliers] is zero for an attitude placement, which is what later
      * registrations read to weigh it.
      */
-    fun place(tile: Bitmap, proxy: Plane, transform: Homography, inliers: Int, inlierRatio: Float): Placement? {
+    fun place(tile: Bitmap, proxy: Plane, transform: Homography, inliers: Int, inlierRatio: Float): Placement? =
+        place(tile, proxy, transform, inliers, inlierRatio, LensDistortion.Inset.NONE)
+
+    /**
+     * The same, for a tile the optics correction cropped by [inset]: the
+     * transform is the whole frame's, which is what registration keeps
+     * working in; the pixels are drawn from where the tile's first pixel was.
+     *
+     * Before either, the tile is refined against the canvas: where it
+     * overlaps tiles already drawn, the pixels measure how far off the
+     * placement is, and the correction is composed onto it -- see
+     * [MosaicCanvas.refine]. The first tile drawn has nothing to refine
+     * against and lands as it came.
+     */
+    fun place(
+        tile: Bitmap,
+        proxy: Plane,
+        transform: Homography,
+        inliers: Int,
+        inlierRatio: Float,
+        inset: LensDistortion.Inset,
+    ): Placement? {
         if (closed) return null
-        val placement = assembler.place(proxy, transform, inliers, inlierRatio)
+        val toPixels = if (inset.isZero) transform
+        else transform.times(Homography.translation(inset.left.toDouble(), inset.top.toDouble()))
+
+        var recorded = transform
+        var drawn = toPixels
+        lastRefinement = null
+        if (assembler.composited.isNotEmpty()) {
+            val corners = listOf(
+                toPixels.apply(0f, 0f), toPixels.apply(tile.width.toFloat(), 0f),
+                toPixels.apply(0f, tile.height.toFloat()), toPixels.apply(tile.width.toFloat(), tile.height.toFloat()),
+            )
+            val correction = MosaicPlacement.correctionFor(canvas.refine(tile, toPixels), corners)
+            if (correction != null) {
+                recorded = correction.transform.times(transform)
+                drawn = correction.transform.times(toPixels)
+                lastRefinement = correction
+                Log.i(
+                    TAG,
+                    "mosaic tile refined against the canvas: moved %.1f px from %d blocks%s".format(
+                        correction.shiftPx, correction.blocks, if (correction.homography) " (homography)" else "",
+                    ),
+                )
+            }
+        }
+
+        val placement = assembler.place(proxy, recorded, inliers, inlierRatio)
         if (placement == null) {
             rejected++
             lastReason = RejectionReason.OUT_OF_BOUNDS
             return null
         }
-        return if (composite(tile, placement)) placement else null
+        return if (composite(tile, placement, drawn)) placement else null
     }
+
+    /** What the last [place] measured against the canvas, or null where it had nothing to measure. */
+    var lastRefinement: MosaicPlacement.Correction? = null
+        private set
 
     /** Coverage as a grid, for drawing the mosaic guide. */
     fun coverageGrid(): Array<BooleanArray> = assembler.coverageGrid()
@@ -198,10 +248,10 @@ class MosaicSession private constructor(
         return result
     }
 
-    /** Draws an accepted tile onto the canvas. */
-    fun composite(tile: Bitmap, placement: Placement): Boolean {
+    /** Draws an accepted tile onto the canvas, through [pixelTransform] where the pixels' frame is not the placement's. */
+    fun composite(tile: Bitmap, placement: Placement, pixelTransform: Homography = placement.transform): Boolean {
         if (closed) return false
-        val touched = canvas.addTile(tile, placement.transform, FEATHERS)
+        val touched = canvas.addTile(tile, pixelTransform, FEATHERS)
         if (touched == 0L) {
             // The assembler thought it landed on the canvas and the canvas
             // disagreed. Reported rather than silently counted as placed, since

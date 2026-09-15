@@ -939,16 +939,21 @@ object MosaicCapture {
 
             // The lens's geometry, before the tile is placed by a homography
             // that assumes a rectilinear image. Distortion left in would make
-            // every seam a mismatch of curves.
+            // every seam a mismatch of curves. The correction crops the
+            // border it could not read (LensDistortion.validInset); the
+            // placement was fitted to the whole frame, so the cropped tile's
+            // origin is moved to where its first pixel was.
+            var inset = LensDistortion.Inset.NONE
             opticsFor(lensProfile, tile)?.let { params ->
-                val (corrected, _) = Optics.apply(tile, params)
-                if (corrected !== tile) {
+                val corrected = Optics.applyCropped(tile, params)
+                if (corrected.bitmap !== tile) {
                     tile.recycle()
-                    tile = corrected
+                    tile = corrected.bitmap
+                    inset = corrected.inset
                 }
             }
 
-            val placed = session.place(tile, small, transform, visual?.inliers ?: 0, visual?.inlierRatio ?: 0f)
+            val placed = session.place(tile, small, transform, visual?.inliers ?: 0, visual?.inlierRatio ?: 0f, inset)
             tile.recycle()
             if (placed == null) PlaceOutcome.Failed("the canvas would not take it") else PlaceOutcome.Placed(byAttitude)
         }

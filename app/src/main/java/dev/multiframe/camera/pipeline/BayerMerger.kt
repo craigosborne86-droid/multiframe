@@ -145,6 +145,18 @@ class BayerAccumulator(
         if (noiseVar == null) noiseVar = estimateNoise(ref, frame, field, invGain)
         val nv = noiseVar!!
 
+        // A frame at another gain is brought to the reference's scale by
+        // dividing its light -- the codes above black -- and not its codes.
+        // The pedestal is the same at every gain; divided along with the
+        // light it would drag the frame under black by black * (1 - 1/g),
+        // and a burst whose gain moved merged below the black the develop
+        // subtracts: shadows crushed, midtones green (red and blue's
+        // shortfall multiplied by their white balance gains). So the
+        // alternate reads as raw / g + black * (1 - 1/g), which is raw
+        // itself when g is one. Per CFA site; the taps keep parity, so the
+        // alternate's site is the reference pixel's.
+        val pedestal = FloatArray(4) { profile.blackLevel.getOrElse(it) { 0 } * (1f - invGain) }
+
         var localContribution = 0.0
 
         for (y in 0 until height) {
@@ -190,7 +202,7 @@ class BayerAccumulator(
 
                         val rawAlt = (frame.data[sy * width + sx].toInt() and 0xFFFF).toFloat()
                         if (invGain < 1f && rawAlt >= profile.whiteLevel.toFloat()) continue
-                        val altV = rawAlt * invGain
+                        val altV = rawAlt * invGain + pedestal[(y and 1) * 2 + (x and 1)]
                         val d = altV - refV
                         val d2 = d * d
                         val w = if (d2 <= n2) 1f else n2 / d2
@@ -306,7 +318,8 @@ class BayerAccumulator(
                     val rawAlt = alt.data[sy * width + sx].toInt() and 0xFFFF
                     if (rawAlt >= profile.whiteLevel) { x += SAMPLE_STRIDE; continue }
                     val refV = (ref.data[y * width + x].toInt() and 0xFFFF).toFloat()
-                    val altV = rawAlt.toFloat() * invGain
+                    val altV = rawAlt.toFloat() * invGain +
+                        profile.blackLevel.getOrElse((y and 1) * 2 + (x and 1)) { 0 } * (1f - invGain)
                     val b = binOf(refV)
                     if (samples[b].size < 3000) samples[b].add(abs(altV - refV))
                 }

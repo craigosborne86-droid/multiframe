@@ -51,10 +51,13 @@ class MergeParityTest {
         return buf
     }
 
+    /** The scene at [gain] times the sensitivity: the light scales, the pedestal stays. */
     private fun scaleFrame(f: BayerFrame, gain: Float): BayerFrame {
         val out = ShortArray(f.data.size)
         for (i in f.data.indices) {
-            val v = ((f.data[i].toInt() and 0xFFFF) * gain).toInt().coerceIn(0, profile.whiteLevel)
+            val black = profile.blackAt(i % f.width, i / f.width)
+            val light = (f.data[i].toInt() and 0xFFFF) - black
+            val v = (black + light * gain).toInt().coerceIn(0, profile.whiteLevel)
             out[i] = v.toShort()
         }
         return BayerFrame(f.width, f.height, out)

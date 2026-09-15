@@ -466,19 +466,31 @@ Merged CFA (uint16, Bayer-patterned)
       `T` is the **filmic shoulder** (`ToneCurve.shoulder`, `Tone.h`
       `shoulderCurveParts`): linear to the knee (0.7 of nominal white), then
       `knee + h · ln(1 + a·u) / ln(1 + a·u_w)` with `u = (m − knee)/h`,
-      `h = 1 − knee`, `u_w = (white − knee)/h`, white = `SHOULDER_WHITE` = 5.0
-      of nominal white, and `a` the root of `a = ln(1 + a·u_w)` so the slope
-      at the knee is one. A logarithm spends the headroom evenly in stops:
-      the stops above the knee land at 0.82, 0.86, 0.90, 0.95, 1.0. The
-      exponential it replaced, `knee + h(1 − e^{−u})`, had given up nine
-      tenths of its headroom one stop over the knee and was white to the
-      last place two stops over — every cloud brighter than that rendered
-      the same, the sixth field test's chalk. Above the white point the
-      curve is 1; the desaturation of stage (b) has already taken such a
-      pixel to neutral. Both native develops tabulate the same curve
-      (`ShoulderLut`, knee to white, interpolated), and `ToneCurveTest`
-      holds the shape: C¹ at the knee, even increments per stop, white at
-      the white point, monotonic throughout.
+      `h = 1 − knee`, `u_w = (white − knee)/h`, and `a` the root of
+      `a = ln(1 + a·u_w)` so the slope at the knee is one. A logarithm
+      spends the headroom evenly in stops. The exponential it replaced,
+      `knee + h(1 − e^{−u})`, had given up nine tenths of its headroom one
+      stop over the knee and was white to the last place two stops over —
+      every cloud brighter than that rendered the same, the sixth field
+      test's chalk.
+      **The white point is where the sensor stops**, not a constant
+      (`DevelopParams.withGain`, `Tone.h` `resolveShoulder`; every develop
+      calls it once its gain is known): `white = gain`, the sensor's clip
+      after the develop's exposure gain, held in [0.5, 4], with the knee
+      kept under 0.8 of it. A clipped pixel is therefore display white and
+      everything under it keeps its tone. For one field test the white was
+      a constant of five times nominal, so a cloud's tones stayed apart out
+      to the clip; it did that, and it rendered the clip itself — a stop or
+      two over nominal after the gain — at 0.86 of white, and everything
+      bright with it: grey skies, dull sunlit walls, the eighth field
+      test's haze. With the standing bias the gain is about two and the
+      stops above the knee land at 0.82, 0.87, 0.92, 1.0 at the clip.
+      Above the white point the curve is 1; the desaturation of stage (b)
+      has already taken such a pixel to neutral. Both native develops
+      tabulate the same curve (`ShoulderLut`, knee to white, interpolated),
+      and `ToneCurveTest` holds the shape: C¹ at the knee, even increments
+      per stop, white at the white point, monotonic throughout;
+      `RawDeveloperTest` holds the white to the gain.
    b. Highlight desaturation, keyed on **luminance**: `Y = 0.2126R + 0.7152G +
       0.0722B`, measured on the scene-linear values before compression; a
       pixel whose Y exceeds `desaturationStart` blends toward neutral by
@@ -555,20 +567,27 @@ undistortion and the lateral aberration rescale -- run as one fused gather
 on the sRGB buffer beside steps 10 and 11 (`Optics.kt`, `Optics.cpp`; the
 compromise of running them there rather than after step 5 is stated on
 `Optics`). A gather that expands the field reads from beyond the frame
-along every edge, and a channel rescaled for aberration reads a few pixels
-further. The border is read as a *mirror*: a position inside the frame
-reads as it is, a position `d` past an edge reads `d` inside it, and past
-the mirror's reach it is clamped (`LensDistortion.reflectIntoFrame`;
-`Optics.cpp` the same, four lanes at a time). It was an edge clamp, and the
-sixth field test's pictures carried a band of vertical ribs along the top:
-the edge row -- which the demosaic interpolates with a 3×3 gather within
-two pixels of the border, and which alternates in colour column by column
--- repeated downward into every row the correction overshot. Repeating any
-row is a rib; a mirror repeats nothing and is continuous with the frame at
-the edge, so an edge row the correction does not move stays itself (which
-an inward margin would not allow -- the identity model has to reproduce
-the image exactly, `LensDistortionTest`). `OpticsParityTest` holds the two
-implementations together at the border as everywhere.
+along part of every edge, and a channel rescaled for aberration reads a
+few pixels further. There is no honest pixel to put there. The sixth field
+test's answer was to repeat the edge row, which made a band of ribs; the
+seventh's was to mirror the frame about its edge, which made a reflection
+-- a strip of the eighth field test's flower, reversed, along its top. The
+answer is the picture without that strip: the output is **cropped** to
+the pixels the correction could read from the source
+(`LensDistortion.validInset`: each side's inset grows by the worst
+overshoot its edge's samples show until none falls outside, plus the
+aberration's reach at the corner and one pixel for the bilinear neighbour;
+capped at a tenth of the frame), and `Optics.applyCropped` writes that
+window -- `Optics.cpp` takes the window's offset, and the reference the
+same. The 24mm main lens loses about sixty pixels a side of 4080; the
+JPEG is a little smaller than the raw, as most cameras' are. The mirror
+read remains for the bilinear neighbour at the very edge and for callers
+that correct in place (`LensDistortion.reflectIntoFrame`). A mosaic tile
+is cropped the same way and its placement moved by the inset, so
+registration keeps working in whole-frame coordinates (§3.4.4).
+`LensDistortionTest` holds the inset minimal and the window's pixels
+identical to the whole frame's; `OpticsParityTest` holds the two
+implementations together.
 
 **Future insertions (marked by phase):**
 
@@ -582,15 +601,22 @@ implementations together at the border as everywhere.
 
 ### 3.2 Merge Accumulation Mathematics
 
-For a burst of N frames, one is designated the reference (lowest ISO). For each
-pixel position (x, y):
+For a burst of N frames, one is designated the reference: the newest --
+the frame nearest the shutter, the exposure the photographer saw -- or,
+under dual conversion gain, the lowest-ISO frame, which keeps the
+highlights the high frame clipped. (It was the lowest-ISO frame always,
+on the reasoning that with one ISO they were all the same. They are not
+when the meter moves inside the burst: the lowest was then the darkest
+frame of a re-settling meter, and the whole shot, the DNG in particular,
+came out at that frame's brightness.) For each pixel position (x, y):
 
 ```
 reference value:  r = frame_ref[x, y]
 
 For each alt frame i (i = 1..N-1):
   aligned value:  a_i = frame_i[x + dx_i, y + dy_i]    (from alignment field)
-  normalized:     n_i = a_i / gainScale_i               (gain normalization)
+  gainScale_i   = (ISO_i · t_i) / (ISO_ref · t_ref)     (the light gathered)
+  normalized:     n_i = black + (a_i - black) / gainScale_i
   difference:     d_i = |n_i - r|
   noise estimate: sigma (from MAD of local neighborhood)
   weight:         w_i = exp(-(d_i / sigma)^2)           (robustness weighting)
@@ -607,7 +633,19 @@ Mean contribution: sum(w_i) / (N - 1)
 **Invariants:**
 
 - When `gainScale = 1.0` for all frames, the merge is identical to the
-  pre-DCG merge. The A/A null test is the proof.
+  pre-DCG merge. The A/A null test is the proof. (The pedestal term is
+  then exactly zero and the multiply-add is a multiply by one.)
+- **The gain scales the light, not the pedestal.** The black level is the
+  same code at every ISO. Dividing the raw code by the gain divides the
+  pedestal too and drags the frame under black by `black · (1 − 1/g)`;
+  over a burst whose gain moved, that put the merge below the black the
+  develop subtracts -- shadows crushed to nothing, and the midtones green,
+  since the white balance multiplies red and blue's shortfall by their
+  gains. The eighth field test's green pictures were this, on bursts
+  whose meter was swinging (§3.7). `BayerMergerTest`, "a burst whose gain
+  moved merges to the reference's black, not under it"; `MergeParityTest`
+  holds native to Kotlin at gains of one, four and mixed, on frames
+  scaled the way a sensor scales them.
 - The reference frame always contributes with weight 1.0. Even if every other
   frame is rejected (all `w_i = 0`), the output is the reference frame. A
   single-frame "merge" is never worse than not merging.
@@ -1033,9 +1071,39 @@ second; the hand is still). Placement has two tiers:
    fit it exactly (the centre and edge midpoints are added for conditioning);
    at 13.6° off axis the tile is a keystone 6% wider than at the centre,
    which `ImuGuidanceTest` holds to 1%. An attitude placement is a few
-   percent of a tile from exact -- inside the thirty percent overlap and
-   under the blend -- and is recorded with zero inliers so later
+   percent of a tile from exact and is recorded with zero inliers so later
    registrations weigh it accordingly.
+
+**Then the canvas decides.** Either tier can be a hundred pixels or more out
+on a 4080-pixel tile: the registration is fitted on a 320-pixel proxy, so a
+proxy pixel of fit error is thirteen on the canvas, and the attitude drifts
+and is read a frame from the exposure. The eighth field test's tower stood
+three times in one sky, two of them translucent: two tiles placed a few
+hundred pixels apart, the coarse bands averaging both. No blend hides a
+misplacement of that size; what fixes it is the measurement the canvas
+itself offers. Before a tile is drawn it is **refined against the canvas**
+(`MosaicCanvas::RefineTile`, `MosaicSession.place`,
+`MosaicPlacement.correctionFor`): where it overlaps tiles already drawn,
+a luma grid of the overlap at 32 canvas pixels a cell -- both grids box
+means over the same samples, so they carry the same frequencies -- is
+searched for the tile's translation out to a quarter of a tile by
+zero-mean normalised cross-correlation, each offset's correlation scored
+against its own chance level (`2/√cells`) so a corner on a corner cannot
+win with a handful of cells; then the overlap is cut into a 4×4 of blocks
+at 4 pixels a cell, each searched ±8 cells around that answer, refined to
+a fraction of a cell by parabola, and kept only where its peak stands
+above the correlation two cells either side on both axes (a block on a
+plain edge correlates anywhere along it). Each kept block is one
+correspondence -- where the placement put its centre, where the canvas
+found it -- and the correction is a translation (the blocks' weighted
+median offset, outliers past 24 px dropped) or, from eight or more blocks
+that it explains 20% better and without changing the tile's scale by more
+than 3%, a homography. The correction is composed onto the placement, for
+the pixels and for the record later registrations chain from; a tile that
+overlaps nothing drawn, or nothing the two agree on (sky), lands as it
+came. About 40 ms a tile. `MosaicRefineDeviceTest` places a tile a
+hundred pixels off and a quarter of a tile off and has it back to within
+two pixels; a tile placed right is left alone.
 
 Only a tile that cannot be *made* -- the ring empty, the develop failed, the
 canvas refusing it -- is rejected and its node put back to pending
@@ -1483,7 +1551,24 @@ Both bounds are checked twice: on the prediction, which is the reason not to
 run; and on the measurement, which is the confirmation, since a sample the
 robustness weight rejects contributes less than the geometry promised. A
 canvas that fails either is closed and the ordinary merge -- which ran anyway,
-see §3.6.5 -- is what the user gets, with the reason in the readout.
+see §3.6.5 -- is what the user gets, with the reason in the readout, and
+the status line says "saved at 1x" and why.
+
+**A tile with no texture borrows its fraction.** The sub-pixel fit
+(§3.3.1) declines a tile whose cost curve is flat -- sky, a wall -- and
+that reads as a fraction of exactly zero: "this frame landed on the
+reference's own sites". It did not; the hand moved the whole frame, and
+the flat tile moved with the textured ones beside it. Left at zero, a sky
+scene predicted a third of a tripod's holes and the canvas declined the
+picture, or ran and left the sky's cells between the reference's sites
+unfed; the eighth field test's 1-SHOT saved at 1x on every scene with a
+sky in it and at 2x on the dog on the carpet. Before the prediction and
+the accumulation (`ZslCapture.develop`, the 2x path only -- the ordinary
+merge reads integer offsets and is unchanged), every tile without a fit
+takes the median fraction of the fitted tiles among its eight neighbours,
+or of the whole field where none of those fitted
+(`AlignmentField.withFlatTilesBorrowed`). A field with no fitted tile at
+all is a tripod and is left as it is, and declines as before.
 
 #### 3.6.4 Memory
 
@@ -1662,6 +1747,17 @@ camera's and the self-timer's. The haptic fires after the lock, so the
 frames it could blur are already in the ring's hand. `captureAndMerge` is
 the two in one call, for a caller that wants to wait (the device tests).
 
+**The ring is finite, and the shutter says so.** A press whose frames the
+ring cannot hold (`ZslRawStream.lockedFrames() + frames > ringCapacity`)
+is refused with the reject haptic and a status line, and a press that
+finds fewer ready frames than it wants -- the last press took them a
+moment ago -- waits for the camera to expose them, up to the frames' own
+time plus 150 ms, rather than taking a short burst: the eighth field test
+spammed the shutter into ten-frame shots that held twenty slots between
+them and then two-frame and one-frame shots from what was left. Under
+`MIN_BURST_FRAMES` = 4 after the wait the press is refused; the haptic
+fires only once the frames are locked. One press waits at a time.
+
 **The ring under a develop.** Eight of twelve slots locked for the half
 second a merge takes would leave the next press two frames. So the merge
 gives each frame's slot back the moment it has read it
@@ -1721,25 +1817,74 @@ Held:  each frame exposed at the held values (within 6%; after eight that
          loss. (The same decision as the mosaic's `sweepExposure`.)
 ```
 
-**The highlight bias.** The guard (`ExposureStrategy.recommendedPullStops`)
-now carries a standing pull of `HIGHLIGHT_BIAS_STOPS` = 1.0 on every scene
-whose bright end is above `BIAS_FLOOR_LEVEL` (a tenth of white), before any
-clipping is seen, and pulls further -- up to what the burst affords,
-`0.5 · log2(N)` stops -- where the histogram shows clipping: −1.0 EV on an
-ordinary scene at eight frames, −1.5 on a blown sky, −2.0 on a blown sky at
-sixteen. The guard used to act only once the histogram showed clipping,
-which is to say once the sky was already gone in the frames the shutter
-would take. The raw's clip point moves a stop above the scene's bright end;
-the develop's own auto-exposure (92nd percentile to 0.62) puts the midtones
-back; the filmic shoulder of §3.1 step 7 spends the stop on the highlights'
-tones; the merge takes the shadows' stop of noise back. NIGHT, and AUTO on a
-dark scene, run without the guard and without the bias. The guard speaks to
-the meter through exposure compensation, which a held exposure does not
-hear; while the cap holds, a change in the guard's pull moves the target by
-the same stops instead (`ShutterCap.retarget`). A manual exposure is the photographer's and the
-cap does nothing; a mosaic's lock takes the exposure first and the cap
-follows afresh on unlock. `ShutterCapTest` walks the engage, the hold, the
-release with hysteresis, the dark end and the guard.
+**The frame and its result are paired exactly.** The follower measures a
+frame's level on the reader thread, where the slot is certainly that
+frame's, and runs only once the result with the same sensor timestamp is
+in hand -- at the push if the result came first, from the capture
+callback if the image did (`ZslRawStream.onFramePushed`,
+`onResultForFollower`). It used to take the newest result within a frame
+of the image, and around a change of gain that was the last frame's
+settings against this frame's pixels: the hold doubled the ISO, the next
+image read a stop short against a result already at the new gain, the
+hold doubled again, and a still desk went from ISO 750 to the sensor's
+ceiling in three frames.
+
+**The highlight bias, and the guard's memory.** The guard carries a
+standing pull of `HIGHLIGHT_BIAS_STOPS` = 1.0 on every scene whose bright
+end is above `BIAS_FLOOR_LEVEL` (a tenth of white), before any clipping is
+seen, and pulls further -- up to what the burst affords, `0.5 · log2(N)`
+stops -- where the histogram shows clipping: −1.0 EV on an ordinary scene
+at eight frames, −1.5 on a blown sky, −2.0 on a blown sky at sixteen. The
+raw's clip point moves a stop above the scene's bright end; the develop's
+own auto-exposure (92nd percentile to 0.62) puts the midtones back; the
+filmic shoulder of §3.1 step 7 spends the stop on the highlights' tones;
+the merge takes the shadows' stop of noise back. NIGHT, and AUTO on a dark
+scene, run without the guard and without the bias.
+
+The decision is stateful (`ExposureStrategy.Guard`, `nextGuard`; the
+stream keeps the last one). The first guard decided from each frame's
+histogram alone, and the frame it looked at was the one its own last
+decision had darkened: a dim room with a window sat at a bright end of
+0.15, the bias went on, the frame read 0.075, the bias came off, with a
+period of two decisions for as long as the camera pointed there -- and a
+burst taken across the swing held frames at different gains, which is
+what the merge turned into the eighth field test's green pictures (§3.2).
+So the scene's bright end is read back up by the pull in force before it
+is judged against the floor (a clipped frame stays clipped: nothing reads
+above one); the bias has hysteresis (off again only under
+`BIAS_RELEASE_FRACTION` = 0.7 of the floor); the risk pull beyond the bias
+is *raised to* what the frame implies while clipping or a bright end over
+the safety line is seen, never accumulated tick on tick (a lamp clips
+whatever the pull, and a guard that added to the pull for every clipped
+pixel it saw walked a lamp-lit room to the burst's whole allowance), and
+relaxes by `RISK_RELAX_STEP` = 0.5 only once the bright end has half a stop
+of headroom (`RISK_RELAX_BELOW` = 0.7 of the safety line). From rest on a
+still scene it reaches what `recommendedPullStops` says; it differs in
+never reversing itself on the strength of a frame it darkened
+(`ExposureStrategyTest`, "a dim room with a window does not switch the
+bias on and off", "a lamp in the frame does not walk the guard").
+
+The guard speaks to the meter through exposure compensation, which a held
+exposure does not hear; while the cap holds, a change in the guard's pull
+moves the target by the same stops instead (`ShutterCap.retarget`, told
+how many stops *darker*: the stream once passed the change in its pull,
+which is negative stops, and every stop the guard took off the hold put
+back twice over). A manual exposure is the photographer's and the cap does
+nothing; a mosaic's lock takes the exposure first and the cap follows
+afresh on unlock. `ShutterCapTest` walks the engage, the hold, the release
+with hysteresis, the dark end and the guard.
+
+**The DNG carries the pull undone.** The JPEG shows the scene as metered;
+the DNG is the merged raw as exposed, a stop or more under, and a viewer
+renders it at the exposure its metadata describes -- which read as "the
+RAW files have regressed". DNG has the word for this: `BaselineExposure`
+(tag 50730), in stops, which a converter adds to the as-shot exposure
+before its own tone curve. `DngCreator` writes it as zero and gives no way
+to set it, so `RawBurstCapture.writeDng` writes the value after the fact
+into the eight bytes it left (`DngMetadata.baselineExposureOffset`,
+positioned read and write on the descriptor), with the shot's pull
+(`ZslCapture.Shot.pullStops`, read at the press) negated. The pixels are
+untouched; only the rendering intent is corrected.
 
 ## Appendix: File Inventory by Subsystem
 
@@ -1751,11 +1896,11 @@ release with hysteresis, the dark end and the guard.
 | **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt` |
 | **2x canvas** | `SubPixelAccumulator.kt` (reference), `NativeSubPixel.kt` (strips, and the develop entry points), `SubPixelCoverage.kt` (the prediction and its bounds), `LinearDeveloper.kt` (the linear develop, reference), `SuperResCapture.kt` (the outputs) |
 | **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `BilateralGrid.kt` (local tone, reference), `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
-| **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` |
+| **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` (reads a DNG's colour tags; places the `BaselineExposure` the guard's pull is written into, §3.7) |
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt`, `ShutterCap.kt` (shutter priority under the meter, §3.7) |
 | **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `LensProfile.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |
 | **DCG calibration** | `DcgCalibration.kt`, `DcgProfiler.kt`, `DcgCalibrationStore.kt` |
-| **Super Res (mosaic)** | `SuperResMachine.kt` (the mode's lifecycle), `MosaicSession.kt`, `MosaicCapture.kt` (the guided runner), `ImuGuidance.kt` (the dots, from the attitude), `MotionSensor.kt` (gyroscope and rotation vector), `StabilityGate.kt` (the ceiling, the shutter floor), `MosaicGuide.kt` (the lock rule, the magnet), `MosaicPlanner.kt` (presets, regions, nodes), `MosaicAssembler.kt` (anchor, locate, place), `MosaicCanvas.kt`, `MosaicRefiner.kt` |
+| **Super Res (mosaic)** | `SuperResMachine.kt` (the mode's lifecycle), `MosaicSession.kt`, `MosaicCapture.kt` (the guided runner), `ImuGuidance.kt` (the dots, from the attitude), `MotionSensor.kt` (gyroscope and rotation vector), `StabilityGate.kt` (the ceiling, the shutter floor), `MosaicGuide.kt` (the lock rule, the magnet), `MosaicPlanner.kt` (presets, regions, nodes), `MosaicAssembler.kt` (anchor, locate, place), `MosaicCanvas.kt`, `MosaicPlacement.kt` (the correction fitted from the canvas's block matches, §3.4.4), `MosaicRefiner.kt` |
 | **Memory** | `MemoryBudget.kt`, `MemoryPressure.kt` |
 | **Settings** | `AppSettings.kt`, `CaptureReadout.kt`, `RecentCapture.kt`, `CaptureLog.kt` |
 | **GPU** | `GpuCrossing.kt` (benchmark only) |
@@ -1772,7 +1917,7 @@ release with hysteresis, the dark end and the guard.
 | `LinearDevelop.cpp` / `.h` | The develop for the 2x canvas: black, shading, white balance, matrix and tone from `Tone.h`, sharpen on band-local luma, into three-byte RGB with the canvas released strip by strip, then the strip encoder (§3.6.5). Held to `LinearDeveloper.kt`. |
 | `Align.cpp` | Native 4-level pyramid tile alignment with equiangular sub-pixel refinement at the finest level (§3.3.1). Held to `Aligner.kt` at zero differing tiles. |
 | `RingBuffer.cpp` / `.h` | mmap-backed raw frame ring: push, per-slot lock and release, fresh-frame counts by timestamp, in-place histograms (§3.7) |
-| `Mosaic.cpp` / `.h` | Native mosaic canvas: running-mean compositing in three frequency bands (§3.4.3), the noise floor on the detail band in shadowed overlaps (§3.4.4), flattening and compression from its own pages |
+| `Mosaic.cpp` / `.h` | Native mosaic canvas: running-mean compositing in three frequency bands with the detail band cut by seam (§3.4.3), the refinement of a tile's placement against the canvas (`RefineTile`, §3.4.4), flattening and compression from its own pages |
 | `Rotate.cpp` | NEON-accelerated image rotation |
 | `Jpeg.cpp` / `.h` | libjpeg-turbo strip encoder, parallel; the header exposes it to the linear develop for RGB from native memory |
 | `GpuCrossing.cpp` | Vulkan crossing cost benchmark (not production) |
@@ -1789,7 +1934,7 @@ release with hysteresis, the dark end and the guard.
 | `ControlsPanel.kt` | `ManualPanel` -- exposure, focus, WB, in the PRO drawer over the bottom bar; `SetOncePanel` -- GUARD, LOCAL TONE, HEIF, reset, the capability summary, on the settings screen |
 | `BackNavigation.kt` | What the system back gesture does, given what is open: a pure stack, tested |
 | `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation; its own back handler |
-| `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), `MosaicGuidance` -- the outline, the reticle and the dots -- and `MosaicPresetPill` (`2×2 · 33 MP | 3×3 · 75 MP`) |
+| `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), `MosaicGuidance` -- the outline, the reticle and the dots -- and `MosaicPresetPill` (`1-SHOT · 50 MP | 2×2 · 33 MP | 3×3 · 75 MP`) |
 | `AboutSheet.kt` | About/info bottom sheet |
 
 ### Build Configuration

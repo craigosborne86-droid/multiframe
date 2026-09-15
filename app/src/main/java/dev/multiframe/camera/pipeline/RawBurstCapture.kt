@@ -245,6 +245,8 @@ object RawBurstCapture {
         develop: DevelopParams = DevelopParams(),
         /** Whether the merged raw is written as a DNG beside the JPEG. A setting; on by default. */
         writeDng: Boolean = true,
+        /** Stops the DNG tells a converter to add back: the guard's pull, undone. */
+        baselineExposureStops: Float = 0f,
     ): RawBurstResult {
         val stamp = stamp()
 
@@ -277,6 +279,7 @@ object RawBurstCapture {
                 dngUri = writeDng(
                     context, mergedBuffer.duplicate(), width, height,
                     characteristics, captureResult, dngName,
+                    baselineExposureStops = baselineExposureStops,
                 )
                 dngMillis = System.currentTimeMillis() - started
             }.apply { name = "dng-write"; start() }
@@ -476,6 +479,43 @@ object RawBurstCapture {
      * Writes the merged CFA straight from the native buffer. DngCreator takes a
      * ByteBuffer, so the raw payload never needs a Java-side copy.
      */
+    /**
+     * Writes [stops] into the DNG's BaselineExposure tag in place. The tag
+     * is found from the file's first pages; the file is otherwise untouched.
+     * A DNG without the tag is left as it is, and says so in the log.
+     */
+    private fun setBaselineExposure(resolver: android.content.ContentResolver, uri: android.net.Uri, stops: Float) {
+        try {
+            resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                // Positioned reads and writes on the descriptor itself: a
+                // stream wrapped round it would close it a second time.
+                val fd = pfd.fileDescriptor
+                val header = java.nio.ByteBuffer.allocate(DNG_HEADER_BYTES)
+                var position = 0L
+                while (header.hasRemaining()) {
+                    val n = android.system.Os.pread(fd, header, position)
+                    if (n <= 0) break
+                    position += n
+                }
+                val bytes = header.array().copyOf(header.position())
+                val at = DngMetadata.baselineExposureOffset(bytes) ?: run {
+                    Log.w(TAG, "DNG has no BaselineExposure tag to carry the guard's %.2f stops".format(stops))
+                    return
+                }
+                val value = java.nio.ByteBuffer.wrap(DngMetadata.encodeBaselineExposure(bytes, stops))
+                var written = at
+                while (value.hasRemaining()) {
+                    written += android.system.Os.pwrite(fd, value, written)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "BaselineExposure not written", e)
+        }
+    }
+
+    /** More than any `DngCreator` IFD0 and its values occupy: the raw data starts well past this. */
+    private const val DNG_HEADER_BYTES = 64 * 1024
+
     internal fun writeDng(
         context: Context,
         merged: java.nio.ByteBuffer,
@@ -484,6 +524,12 @@ object RawBurstCapture {
         characteristics: CameraCharacteristics,
         result: TotalCaptureResult,
         displayName: String,
+        /**
+         * Stops a converter should add to the as-shot exposure: the highlight
+         * guard's pull, undone. Zero leaves the DNG as `DngCreator` wrote it.
+         * See [DngMetadata.baselineExposureOffset].
+         */
+        baselineExposureStops: Float = 0f,
     ): android.net.Uri? = try {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
@@ -503,6 +549,9 @@ object RawBurstCapture {
             resolver.openOutputStream(uri)?.use { out ->
                 dng.writeByteBuffer(out, Size(width, height), merged, 0)
             } ?: error("openOutputStream returned null")
+        }
+        if (kotlin.math.abs(baselineExposureStops) >= 0.005f) {
+            setBaselineExposure(resolver, uri, baselineExposureStops)
         }
 
         values.clear()

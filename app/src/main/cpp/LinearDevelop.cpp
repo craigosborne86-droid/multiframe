@@ -341,6 +341,7 @@ bool developToRgb8(uint16_t* rgb16, int width, int height, const Params& params,
     if (p.tone.exposureGain <= 0.0f) {
         p.tone.exposureGain = autoExposure(rgb16, width, height, p);
     }
+    resolveShoulder(p.tone);
     const int64_t tDevelop = nowMicros();
 
     const float lo = std::min(p.black[0], std::min(p.black[1], p.black[2]));

@@ -24,9 +24,12 @@ data class DevelopParams(
     val shoulderKnee: Float = 0.70f,
     /**
      * Scene-linear level rendered as display white: the top of the filmic
-     * shoulder, [SHOULDER_WHITE] by default. See [ToneCurve.shoulder].
+     * shoulder. [SHOULDER_WHITE_AUTO], the default, places it where the
+     * sensor's own clip lands after the exposure gain -- see [withGain] --
+     * so a clipped pixel is white and everything under it has its tone. An
+     * explicit value is honoured as given. See [ToneCurve.shoulder].
      */
-    val shoulderWhite: Float = SHOULDER_WHITE,
+    val shoulderWhite: Float = SHOULDER_WHITE_AUTO,
     /** Linear level the bright end of the scene is mapped to. */
     val highlightTarget: Float = 0.62f,
     /** Percentile treated as the bright end, ignoring speculars. */
@@ -93,6 +96,21 @@ data class DevelopParams(
      * since the speckle it removes is larger. Below [LOW_ISO] nothing
      * changes, so a daylight frame renders exactly as before.
      */
+    /**
+     * These parameters with the exposure resolved to [gain], and the
+     * shoulder placed for it: an automatic white becomes the sensor's clip
+     * at that gain, and the knee is kept under it. Every develop path goes
+     * through this once its gain is known.
+     */
+    fun withGain(gain: Float): DevelopParams {
+        val white = if (shoulderWhite > 0f) shoulderWhite else shoulderWhiteFor(gain)
+        return copy(
+            exposureGain = gain,
+            shoulderWhite = white,
+            shoulderKnee = minOf(shoulderKnee, white * KNEE_SHARE_OF_WHITE),
+        )
+    }
+
     fun adaptedTo(iso: Int?): DevelopParams {
         if (iso == null || iso <= LOW_ISO) return this
         val t = ((iso - LOW_ISO).toFloat() / (HIGH_ISO - LOW_ISO)).coerceIn(0f, 1f)
@@ -106,15 +124,33 @@ data class DevelopParams(
         const val AUTO_EXPOSURE = -1f
 
         /**
-         * Where the shoulder reaches white: five times nominal white, some
-         * two and a half stops over it and three over the knee. The sixth
-         * field test's skies were chalk because the exponential shoulder it
-         * replaced was white two stops over the knee; five leaves a cloud's
-         * tones apart out to the sensor's own clip, which the highlight
-         * bias (`ExposureStrategy.HIGHLIGHT_BIAS_STOPS`) has moved a stop
-         * further up.
+         * A shoulder white of zero: resolve it from the gain. See [withGain].
+         *
+         * The shoulder's white was a constant of five times nominal white
+         * for one field test, so that a cloud's tones stayed apart out to
+         * the sensor's clip. It did that; it also rendered the sensor's
+         * clip -- a stop or two over nominal after the develop's gain -- at
+         * 0.86 of display white, and everything bright with it. Skies came
+         * out grey, sunlit walls dull, the whole picture under a haze. The
+         * white point is not a constant: it is wherever the sensor stops,
+         * which after the develop's gain is the gain itself.
          */
-        const val SHOULDER_WHITE = 5.0f
+        const val SHOULDER_WHITE_AUTO = 0f
+
+        /** The resolved white is held inside these: under half of nominal is not a photograph, past four is never reached. */
+        const val SHOULDER_WHITE_MIN = 0.5f
+        const val SHOULDER_WHITE_MAX = 4.0f
+
+        /** The knee stays at most this share of the white, so there is always a shoulder to roll off on. */
+        const val KNEE_SHARE_OF_WHITE = 0.8f
+
+        /**
+         * Where the shoulder's white lands for an exposure [gain]: the
+         * sensor's clip, which is nominal white times the gain. The one
+         * rule the three develops share -- `Tone.h` states it for the
+         * native ones.
+         */
+        fun shoulderWhiteFor(gain: Float): Float = gain.coerceIn(SHOULDER_WHITE_MIN, SHOULDER_WHITE_MAX)
 
         /** The strength the LOCAL TONE control turns on. */
         const val LOCAL_TONE_ON = 0.5f
@@ -231,7 +267,7 @@ object RawDeveloper {
         )
         correctDefects(frame, sensor, params)
         val gain = resolveGain(frame, sensor, color, params)
-        val resolved = params.copy(exposureGain = gain)
+        val resolved = params.withGain(gain)
         val grid = if (resolved.localTone > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
         val band = IntArray(w * bandRows)
         var y = 0
@@ -297,7 +333,7 @@ object RawDeveloper {
         val h = frame.height
         val out = IntArray(w * h)
         correctDefects(frame, sensor, params)
-        val resolved = params.copy(exposureGain = resolveGain(frame, sensor, color, params))
+        val resolved = params.withGain(resolveGain(frame, sensor, color, params))
         val grid = if (resolved.localTone > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
         parallelRows(h) { yStart, yEnd ->
             renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading, grid)
@@ -392,7 +428,7 @@ object RawDeveloper {
     }
 
     /** Retained for callers that want the roll-off alone. */
-    fun shoulder(x: Float, knee: Float, white: Float = DevelopParams.SHOULDER_WHITE): Float =
+    fun shoulder(x: Float, knee: Float, white: Float = DevelopParams.SHOULDER_WHITE_MAX): Float =
         ToneCurve.shoulder(x, knee, white)
 
     /**

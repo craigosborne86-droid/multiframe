@@ -184,6 +184,8 @@ static void estimateNoise(Accumulator* acc, const uint8_t* base, int rowStride,
                           float invGain = 1.0f) {
     std::vector<std::vector<float>> samples(kNoiseBins);
     const int w = acc->width, h = acc->height;
+    // The gain scales the light, not the pedestal: see the note in nAddFrame.
+    const float pedestal = 1.0f - invGain;
     const int tileW = std::max(1, (w / 2) / tilesX);
     const int tileH = std::max(1, (h / 2) / tilesY);
 
@@ -201,7 +203,8 @@ static void estimateNoise(Accumulator* acc, const uint8_t* base, int rowStride,
             uint16_t rawAlt = sampleAt(base, rowStride, sx, sy);
             if (rawAlt >= static_cast<uint16_t>(acc->white)) continue;
             float refV = static_cast<float>(acc->reference[static_cast<size_t>(y) * w + x]);
-            float altV = static_cast<float>(rawAlt) * invGain;
+            float altV = static_cast<float>(rawAlt) * invGain +
+                         static_cast<float>(acc->blackAt(x, y)) * pedestal;
             int b = binOf(refV, acc->white);
             if (samples[b].size() < 3000) samples[b].push_back(std::fabs(altV - refV));
         }
@@ -247,6 +250,27 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
     if (!acc->noiseReady) estimateNoise(acc, base, rowStride, dx.data(), dy.data(), tilesX, tilesY, invGain);
 
     const int w = acc->width, h = acc->height;
+
+    // A frame at another gain is brought to the reference's scale by dividing
+    // its *light* -- the codes above the black level -- and not its codes:
+    // the pedestal is the same at every gain, and dividing it along with the
+    // light drags the frame under black by black * (1 - 1/g). Over a burst
+    // whose gain moved (the meter or the shutter cap re-settling) that put
+    // the merge below the black the develop subtracts: shadows crushed to
+    // nothing, and the midtones green, since the white balance multiplies
+    // red and blue's shortfall by their gains. So the alternate reads as
+    // raw / g + black * (1 - 1/g), which is exactly raw when g is one --
+    // the offset is then zero and the multiply-add is a multiply by one --
+    // and the parity with the Kotlin reference is pixel for pixel either
+    // way. Per CFA site, tabulated per column for the vector loop, since
+    // the taps keep parity and the alternate's site is the reference's.
+    std::vector<float> pedestal(static_cast<size_t>(2) * w);
+    for (int parity = 0; parity < 2; ++parity) {
+        for (int x = 0; x < w; ++x) {
+            pedestal[static_cast<size_t>(parity) * w + x] =
+                static_cast<float>(acc->black[parity * 2 + (x & 1)]) * (1.0f - invGain);
+        }
+    }
 
     // The tile grid the *search* used: `Aligner.align` divides the proxy by the
     // tile count with a truncating integer division and matches tile tx over
@@ -374,6 +398,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
             const uint16_t* refRow = refPlane + rowBase;
             float* sumRow = sumPlane + rowBase;
             float* weightRow = weightPlane + rowBase;
+            const float* pedestalRow = pedestal.data() + static_cast<size_t>(y & 1) * w;
 
             for (const Run& run : runs) {
                 // Built in the reference implementation's order -- (tyA, txA),
@@ -433,7 +458,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                             const uint8_t* p = taps[t].row + static_cast<size_t>(sx) * 2;
                             const uint16_t rawAlt = static_cast<uint16_t>(p[0] | (p[1] << 8));
                             if (invGain < 1.0f && rawAlt >= static_cast<uint16_t>(white)) continue;
-                            const float altV = static_cast<float>(rawAlt) * invGain;
+                            const float altV = static_cast<float>(rawAlt) * invGain + pedestalRow[x];
                             const float d = altV - refV;
                             const float d2 = d * d;
                             const float wgt = (d2 <= n2) ? 1.0f : n2 / d2;
@@ -505,6 +530,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
 
                         const float32x4_t far = vld1q_f32(farXTable + x);
                         const float32x4_t near = vsubq_f32(one, far);
+                        const float32x4_t pedestalV = vld1q_f32(pedestalRow + x);
 
                         float32x4_t acc = vdupq_n_f32(0.0f);
                         float32x4_t accW = vdupq_n_f32(0.0f);
@@ -514,8 +540,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                                 static_cast<size_t>(x + taps[t].shiftX) * 2);
                             const uint16x4_t rawVec = vld1_u16(src);
                             const uint32x4_t rawU32 = vmovl_u16(rawVec);
+                            // The same multiply-add as the scalar loop's,
+                            // written as one, so the contraction is the same.
                             const float32x4_t altV =
-                                vmulq_f32(vcvtq_f32_u32(rawU32), vInvGain);
+                                vmlaq_f32(pedestalV, vcvtq_f32_u32(rawU32), vInvGain);
                             const float32x4_t d = vsubq_f32(altV, refV);
                             const float32x4_t d2 = vmulq_f32(d, d);
                             const float32x4_t wgt = vbslq_f32(
@@ -1721,6 +1749,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     tone.exposureGain = exposureGain;
     tone.knee = knee;
     tone.white = shoulderWhite;
+    resolveShoulder(tone);
     tone.contrast = contrast;
     tone.desatStrength = desatStrength;
     tone.desatStart = desatStart;
@@ -2114,6 +2143,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nToneBench(
     tone.exposureGain = exposureGain;
     tone.knee = knee;
     tone.white = shoulderWhite;
+    resolveShoulder(tone);
     tone.contrast = contrast;
     tone.desatStrength = desatStrength;
     tone.desatStart = desatStart;

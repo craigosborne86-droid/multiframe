@@ -74,4 +74,53 @@ class AlignerTest {
         assertThat(pyramid[2].width).isEqualTo(64)
         assertThat(pyramid[3].width).isEqualTo(32)
     }
+
+    // --- Tiles the fit declined borrow their neighbours' fraction ---
+
+    @Test
+    fun `a tile with no sub-pixel fit takes the median of the fitted tiles around it`() {
+        // Three by three; the centre and a corner have no fit.
+        val n = 9
+        val fx = floatArrayOf(0.2f, 0.25f, 0.3f, 0.2f, 0f, 0.3f, 0.2f, 0.25f, 0f)
+        val fy = floatArrayOf(-0.1f, -0.1f, -0.1f, -0.15f, 0f, -0.15f, -0.2f, -0.2f, 0f)
+        val field = AlignmentField(3, 3, IntArray(n), IntArray(n), fx, fy)
+        val filled = field.withFlatTilesBorrowed()
+        // The centre: median of its eight fitted neighbours (the corner at 8
+        // is not fitted, so seven of them).
+        assertThat(filled.fracDx[4]).isWithin(1e-6f).of(0.25f)
+        assertThat(filled.fracDy[4]).isWithin(1e-6f).of(-0.15f)
+        // The corner: its three neighbours, of which the centre is not fitted.
+        assertThat(filled.fracDx[8]).isWithin(1e-6f).of(0.275f)
+        assertThat(filled.fracDy[8]).isWithin(1e-6f).of(-0.175f)
+        // Fitted tiles are untouched, and the integer offsets are the same arrays.
+        for (i in listOf(0, 1, 2, 3, 5, 6, 7)) {
+            assertThat(filled.fracDx[i]).isEqualTo(fx[i])
+            assertThat(filled.fracDy[i]).isEqualTo(fy[i])
+        }
+        assertThat(filled.dx).isSameInstanceAs(field.dx)
+    }
+
+    @Test
+    fun `a tripod burst, with no fit anywhere, is left as it is`() {
+        val n = 4
+        val field = AlignmentField(2, 2, IntArray(n), IntArray(n))
+        assertThat(field.withFlatTilesBorrowed()).isSameInstanceAs(field)
+        val all = AlignmentField(2, 2, IntArray(n), IntArray(n), FloatArray(n) { 0.1f }, FloatArray(n) { 0.2f })
+        assertThat(all.withFlatTilesBorrowed()).isSameInstanceAs(all)
+    }
+
+    @Test
+    fun `a tile with no fitted neighbour takes the field's median`() {
+        // One row of five: only the two ends fitted.
+        val fx = floatArrayOf(0.4f, 0f, 0f, 0f, 0.1f)
+        val fy = floatArrayOf(0.1f, 0f, 0f, 0f, 0.3f)
+        val filled = AlignmentField(5, 1, IntArray(5), IntArray(5), fx, fy).withFlatTilesBorrowed()
+        // The middle tile has no fitted neighbour: the field's median, which
+        // for two values is their mean.
+        assertThat(filled.fracDx[2]).isWithin(1e-6f).of(0.25f)
+        assertThat(filled.fracDy[2]).isWithin(1e-6f).of(0.2f)
+        // Its neighbours each have one fitted neighbour: that one.
+        assertThat(filled.fracDx[1]).isEqualTo(0.4f)
+        assertThat(filled.fracDx[3]).isEqualTo(0.1f)
+    }
 }

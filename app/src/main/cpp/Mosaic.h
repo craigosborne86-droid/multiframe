@@ -149,6 +149,28 @@ public:
 
     int bands() const { return bands_; }
 
+    /**
+     * One block of the tile matched against the canvas: where the tile's
+     * placement put the block's centre, where the canvas says it is, and how
+     * well they agreed. Canvas coordinates.
+     */
+    struct RefineMatch {
+        float fromX, fromY;
+        float toX, toY;
+        float ncc;
+    };
+
+    /**
+     * Measures how far a tile placed by [h] is from what the canvas already
+     * holds where the two overlap, block by block, so the placement can be
+     * corrected before the tile is drawn. See the note on refinement in
+     * Mosaic.cpp. Writes up to [maxMatches] into [out] and returns how many;
+     * zero where the tile overlaps nothing the canvas holds, or nothing the
+     * two agree on.
+     */
+    int RefineTile(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
+                   const double* h, RefineMatch* out, int maxMatches) const;
+
     /** Fraction of the canvas that any tile has covered. */
     float Coverage() const;
 

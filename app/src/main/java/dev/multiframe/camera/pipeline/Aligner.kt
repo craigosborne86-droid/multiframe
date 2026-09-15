@@ -36,6 +36,63 @@ class AlignmentField(
     /** Whether any tile carries a refinement. False for a field built the old way. */
     val hasSubPixel: Boolean
         get() = fracDx.any { it != 0f } || fracDy.any { it != 0f }
+
+    /** Whether tile [i]'s sub-pixel fit said anything: a fit the parabola declined reads as exactly zero on both axes. */
+    fun hasSubPixelAt(i: Int): Boolean = fracDx[i] != 0f || fracDy[i] != 0f
+
+    /**
+     * The field with every tile that has no sub-pixel fit of its own given
+     * its neighbours': the median of the fitted tiles among the eight
+     * around it, or of the whole field where none of those fitted.
+     *
+     * A tile with no texture -- sky, a wall -- has a flat cost curve and
+     * the sub-pixel fit declines it, which reads as a fraction of exactly
+     * zero: "this frame landed on the reference's own sites". It did not;
+     * the hand moved the whole frame, and the flat tile moved with the
+     * textured ones beside it. Left at zero, the 2x canvas read a third of
+     * a sky scene as a tripod burst and declined the picture, and where it
+     * ran, the sky's cells between the reference's sites went unfed. The
+     * hand's motion is one motion; a tile that could not measure it
+     * borrows the measurement. A field with no fitted tile at all is a
+     * tripod, and is returned as it is.
+     */
+    fun withFlatTilesBorrowed(): AlignmentField {
+        val count = dx.size
+        val fitted = (0 until count).filter { hasSubPixelAt(it) }
+        if (fitted.isEmpty() || fitted.size == count) return this
+        val outX = fracDx.copyOf()
+        val outY = fracDy.copyOf()
+        val fieldX = median(fitted.map { fracDx[it] })
+        val fieldY = median(fitted.map { fracDy[it] })
+        for (i in 0 until count) {
+            if (hasSubPixelAt(i)) continue
+            val tx = i % tilesX
+            val ty = i / tilesX
+            val near = ArrayList<Int>(8)
+            for (oy in -1..1) for (ox in -1..1) {
+                if (ox == 0 && oy == 0) continue
+                val nx = tx + ox
+                val ny = ty + oy
+                if (nx < 0 || ny < 0 || nx >= tilesX || ny >= tilesY) continue
+                val j = ny * tilesX + nx
+                if (hasSubPixelAt(j)) near.add(j)
+            }
+            if (near.isEmpty()) {
+                outX[i] = fieldX
+                outY[i] = fieldY
+            } else {
+                outX[i] = median(near.map { fracDx[it] })
+                outY[i] = median(near.map { fracDy[it] })
+            }
+        }
+        return AlignmentField(tilesX, tilesY, dx, dy, outX, outY)
+    }
+
+    private fun median(values: List<Float>): Float {
+        val sorted = values.sorted()
+        val n = sorted.size
+        return if (n % 2 == 1) sorted[n / 2] else (sorted[n / 2 - 1] + sorted[n / 2]) / 2f
+    }
 }
 
 /**

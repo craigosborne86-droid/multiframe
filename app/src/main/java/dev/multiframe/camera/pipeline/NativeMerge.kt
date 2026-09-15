@@ -114,10 +114,12 @@ class NativeMerge private constructor(
         val tBitmap = System.currentTimeMillis()
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val tNative = System.currentTimeMillis()
+        // The shoulder placed for the gain: see DevelopParams.withGain.
+        val resolved = params.withGain(gain)
         val ok = nDevelop(
             merged, bitmap, width, height,
             profile.cfaPattern, black, profile.whiteLevel,
-            color.gains, color.matrix, gain, params.shoulderKnee, params.shoulderWhite,
+            color.gains, color.matrix, gain, resolved.shoulderKnee, resolved.shoulderWhite,
             params.contrast, params.highlightDesaturation,
             params.desaturationStart, params.blackPoint,
             shading?.gains, shading?.columns ?: 0, shading?.rows ?: 0,

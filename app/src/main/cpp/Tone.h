@@ -179,8 +179,12 @@ struct Rgb {
 struct ToneParams {
     float exposureGain = 1.0f;
     float knee = 0.70f;
-    /** Scene-linear level rendered as display white: the top of the shoulder. */
-    float white = 5.0f;
+    /**
+     * Scene-linear level rendered as display white: the top of the shoulder.
+     * Zero or under means "the sensor's clip at this gain" -- see
+     * resolveShoulder, which every develop calls once its gain is known.
+     */
+    float white = 0.0f;
     float contrast = 0.30f;
     float desatStrength = 1.0f;
     float desatStart = 1.0f;
@@ -258,6 +262,25 @@ struct ShoulderLut {
         return scale[i] + (scale[i + 1] - scale[i]) * (x - static_cast<float>(i));
     }
 };
+
+/** The resolved white is held inside these; the knee stays under the white. Kotlin: DevelopParams.withGain. */
+constexpr float kShoulderWhiteMin = 0.5f;
+constexpr float kShoulderWhiteMax = 4.0f;
+constexpr float kKneeShareOfWhite = 0.8f;
+
+/**
+ * Places the shoulder for the gain in force: an automatic white becomes the
+ * sensor's clip after the gain -- nominal white times the gain -- so that a
+ * clipped pixel renders white and everything under it keeps its tone; the
+ * knee is kept under the white. The one rule the three develops share, the
+ * Kotlin one included (DevelopParams.withGain).
+ */
+inline void resolveShoulder(ToneParams& t) {
+    if (t.white <= 0.0f) {
+        t.white = std::clamp(t.exposureGain, kShoulderWhiteMin, kShoulderWhiteMax);
+    }
+    t.knee = std::min(t.knee, t.white * kKneeShareOfWhite);
+}
 
 inline void buildShoulderLut(ShoulderLut& lut, const ToneParams& t) {
     // The table spans the knee to the white point, where the logarithm

@@ -167,10 +167,17 @@ class ShutterCap(
     }
 
     /**
-     * The highlight guard changed its pull by [deltaStops] while the cap
-     * held. The guard speaks to the camera's meter through exposure
-     * compensation, which a held exposure does not hear; the target moves
-     * instead, so the frame lands where the guard asked.
+     * The highlight guard changed its pull while the cap held: the frame
+     * should land [deltaStops] stops darker than the target so far (or
+     * brighter, for a negative value). The guard speaks to the camera's
+     * meter through exposure compensation, which a held exposure does not
+     * hear; the target moves instead, so the frame lands where the guard
+     * asked.
+     *
+     * The sign is stated because it was got wrong once: the stream passed
+     * the change in its pull, which is negative stops, and every stop the
+     * guard took off the frame the hold put back on twice over -- a room
+     * with a lamp in it went to the sensor's ceiling in eight ticks.
      */
     fun retarget(deltaStops: Float) {
         val h = held ?: return

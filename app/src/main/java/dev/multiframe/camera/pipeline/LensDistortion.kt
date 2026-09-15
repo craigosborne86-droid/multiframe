@@ -253,6 +253,110 @@ object LensDistortion {
     /** Below this the resample costs more sharpness than the geometry gains. */
     const val NEGLIGIBLE_PX = 0.5f
 
+    /** The border a correction has to take off the picture: pixels, per side. */
+    data class Inset(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+        val isZero: Boolean get() = left == 0 && top == 0 && right == 0 && bottom == 0
+        fun width(fullWidth: Int): Int = fullWidth - left - right
+        fun height(fullHeight: Int): Int = fullHeight - top - bottom
+
+        companion object {
+            val NONE = Inset(0, 0, 0, 0)
+        }
+    }
+
+    /**
+     * How far in from each edge the corrected frame has to be cropped so that
+     * every pixel kept was read from inside the source.
+     *
+     * Undistorting pulls source positions toward or away from the centre by
+     * the model's radial term, so along some part of the frame's border the
+     * output asks for pixels the sensor never had. The first answer was to
+     * repeat the edge row, which made ribs; the second to mirror the frame
+     * about its edge, which made a reflection -- a strip of the picture's own
+     * petals, reversed, along the top of the seventh field test's flower.
+     * There is no honest pixel to put there. The honest picture is the one
+     * without that strip, so it is cropped: the JPEG is a few pixels smaller
+     * than the sensor, as most cameras' are against their raw.
+     *
+     * Probed rather than solved: each side's inset grows by the worst
+     * overshoot the edge's samples show until no sample falls outside, plus
+     * the aberration rescale's own reach at the corner, plus one pixel for
+     * the bilinear neighbour. Monotone for any radial model, so a few passes
+     * settle it; capped so a wild model cannot crop the picture away.
+     */
+    fun validInset(
+        model: Model?,
+        width: Int,
+        height: Int,
+        aberration: ChromaticAberration.Scale = ChromaticAberration.NONE,
+        maxFraction: Float = MAX_INSET_FRACTION,
+    ): Inset {
+        // The aberration's reach: a scale about the centre moves the corner
+        // by half the frame times (scale - 1), inward for a scale under one
+        // (nothing to crop) and outward for one over it.
+        val reach = maxOf(aberration.red, aberration.blue, 1f) - 1f
+        var left = kotlin.math.ceil(reach * (width - 1) / 2f).toInt()
+        var right = left
+        var top = kotlin.math.ceil(reach * (height - 1) / 2f).toInt()
+        var bottom = top
+        if (model != null && !model.isIdentity) {
+            val out = FloatArray(2)
+            val maxX = (width - 1).toFloat()
+            val maxY = (height - 1).toFloat()
+            val capX = (width * maxFraction).toInt()
+            val capY = (height * maxFraction).toInt()
+            repeat(MAX_INSET_PASSES) {
+                val x0 = left.toFloat()
+                val x1 = maxX - right
+                val y0 = top.toFloat()
+                val y1 = maxY - bottom
+                if (x1 <= x0 || y1 <= y0) return@repeat
+                // The four edges of the kept rectangle, sampled along their
+                // length; each side grows by the worst overshoot its samples
+                // showed, once a pass.
+                var overLeft = 0f
+                var overTop = 0f
+                var overRight = 0f
+                var overBottom = 0f
+                for (i in 0..INSET_PROBES) {
+                    val t = i.toFloat() / INSET_PROBES
+                    val px = x0 + (x1 - x0) * t
+                    val py = y0 + (y1 - y0) * t
+                    val probes = arrayOf(
+                        floatArrayOf(px, y0), floatArrayOf(px, y1),
+                        floatArrayOf(x0, py), floatArrayOf(x1, py),
+                    )
+                    for (probe in probes) {
+                        sourceFor(model, probe[0], probe[1], out)
+                        val sx = out[0]
+                        val sy = out[1]
+                        if (sx.isNaN() || sy.isNaN()) continue
+                        overLeft = maxOf(overLeft, -sx)
+                        overTop = maxOf(overTop, -sy)
+                        overRight = maxOf(overRight, sx - maxX)
+                        overBottom = maxOf(overBottom, sy - maxY)
+                    }
+                }
+                if (overLeft <= 0f && overTop <= 0f && overRight <= 0f && overBottom <= 0f) {
+                    return Inset(left + edgePad(left), top + edgePad(top), right + edgePad(right), bottom + edgePad(bottom))
+                }
+                left = minOf(capX, left + kotlin.math.ceil(overLeft).toInt())
+                top = minOf(capY, top + kotlin.math.ceil(overTop).toInt())
+                right = minOf(capX, right + kotlin.math.ceil(overRight).toInt())
+                bottom = minOf(capY, bottom + kotlin.math.ceil(overBottom).toInt())
+            }
+        }
+        return Inset(left + edgePad(left), top + edgePad(top), right + edgePad(right), bottom + edgePad(bottom))
+    }
+
+    /** A side that had to move in gets one pixel more for the bilinear neighbour; a side that did not stays put. */
+    private fun edgePad(inset: Int): Int = if (inset > 0) 1 else 0
+
+    /** No side is cropped by more than this share of the frame, whatever the model says. */
+    const val MAX_INSET_FRACTION = 0.10f
+    private const val MAX_INSET_PASSES = 12
+    private const val INSET_PROBES = 96
+
     /**
      * The most a corner may be magnified by the correction.
      *

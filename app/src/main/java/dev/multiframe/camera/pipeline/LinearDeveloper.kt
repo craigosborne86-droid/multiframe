@@ -123,7 +123,7 @@ object LinearDeveloper {
         require(rgb16.size >= width * height * 3) { "canvas is too small" }
         val gain = if (params.exposureGain > 0f) params.exposureGain
         else autoExposureGain(rgb16, width, height, profile, color, params)
-        val resolved = params.copy(exposureGain = gain)
+        val resolved = params.withGain(gain)
 
         val black = channelBlack(profile)
         val lo = minOf(black[0], black[1], black[2])

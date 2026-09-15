@@ -100,6 +100,29 @@ class RawDeveloperTest {
     }
 
     @Test
+    fun `the shoulder's white is the sensor's clip after the gain`() {
+        // A stop of headroom kept by the guard and put back by the develop:
+        // the raw's clip lands at two, and that is where white is.
+        val two = DevelopParams().withGain(2f)
+        assertThat(two.shoulderWhite).isWithin(1e-6f).of(2f)
+        assertThat(two.shoulderKnee).isWithin(1e-6f).of(0.7f)
+        assertThat(ToneCurve.shoulder(2f, two.shoulderKnee, two.shoulderWhite)).isWithin(1e-6f).of(1f)
+        // No headroom: the clip is nominal white, and nominal white is white.
+        val one = DevelopParams().withGain(1f)
+        assertThat(one.shoulderWhite).isWithin(1e-6f).of(1f)
+        assertThat(ToneCurve.shoulder(1f, one.shoulderKnee, one.shoulderWhite)).isWithin(1e-6f).of(1f)
+        // A frame exposed too bright: the clip lands under the knee, so the
+        // knee comes down to keep a shoulder, and the clip is still white.
+        val bright = DevelopParams().withGain(0.6f)
+        assertThat(bright.shoulderWhite).isWithin(1e-6f).of(0.6f)
+        assertThat(bright.shoulderKnee).isWithin(1e-6f).of(0.6f * DevelopParams.KNEE_SHARE_OF_WHITE)
+        assertThat(ToneCurve.shoulder(0.6f, bright.shoulderKnee, bright.shoulderWhite)).isWithin(1e-6f).of(1f)
+        // Held inside the bounds, and an explicit white is left alone.
+        assertThat(DevelopParams().withGain(40f).shoulderWhite).isEqualTo(DevelopParams.SHOULDER_WHITE_MAX)
+        assertThat(DevelopParams(shoulderWhite = 3f).withGain(2f).shoulderWhite).isEqualTo(3f)
+    }
+
+    @Test
     fun `the tone curve rolls highlights off instead of clipping`() {
         val knee = 0.7f
         // Below the knee the curve is exactly linear.

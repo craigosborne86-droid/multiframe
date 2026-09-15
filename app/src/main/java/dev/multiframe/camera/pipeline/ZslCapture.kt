@@ -41,6 +41,8 @@ object ZslCapture {
         /** Shutter press to frames in hand, in microseconds. */
         val handoverMicros: Long,
         internal val statsBefore: String,
+        /** The highlight guard's pull in force at the press: zero or negative stops. The DNG carries it undone. */
+        val pullStops: Float = 0f,
     ) : AutoCloseable {
         val count: Int get() = burst.count
         override fun close() = burst.close()
@@ -62,7 +64,7 @@ object ZslCapture {
                     "span %.0fms".format(burst.frames.spanNs / 1e6),
             )
         }
-        return Shot(burst, frameCount, handoverMicros, statsBefore)
+        return Shot(burst, frameCount, handoverMicros, statsBefore, stream.pullStops)
     }
 
     suspend fun captureAndMerge(
@@ -147,24 +149,36 @@ object ZslCapture {
             val tilesY = max(1, m.proxyHeight / TILE_TARGET)
             val stride = burst.frames.rowStride
 
-            // Pick the lowest-ISO frame as reference. With DCG the ring
-            // alternates between two sensitivities, and the low-ISO frame
-            // preserves highlights -- exactly the content the robustness
-            // weight would otherwise have to reject from a high-ISO
-            // reference. When all frames share the same ISO (DCG off) the
-            // newest frame wins, which is the one closest to the shutter.
+            // The reference is the newest frame: the one closest to the
+            // shutter, the exposure the photographer saw. Under dual
+            // conversion gain it is the lowest-ISO frame instead -- the ring
+            // alternates between two sensitivities there, and the low frame
+            // keeps the highlights the high one clipped.
+            //
+            // It used to be the lowest-ISO frame always, on the reasoning
+            // that with one ISO they were all the same. They are not when the
+            // meter moves inside the burst: the lowest was then the darkest
+            // frame of a re-settling meter, sometimes stops under the rest,
+            // and the whole shot -- the DNG in particular, which viewers
+            // render at the metadata's exposure -- came out at that frame's
+            // brightness. The other frames are brought to the reference's
+            // scale by their gain ratio either way.
             var refIndex = 0
-            var refIso = Int.MAX_VALUE
-            for (i in 0 until burst.count) {
-                val iso = burst.results[i]
-                    ?.get(CaptureResult.SENSOR_SENSITIVITY) ?: continue
-                if (iso < refIso) {
-                    refIso = iso
-                    refIndex = i
+            if (stream.dcg) {
+                var refIso = Int.MAX_VALUE
+                for (i in 0 until burst.count) {
+                    val iso = burst.results[i]
+                        ?.get(CaptureResult.SENSOR_SENSITIVITY) ?: continue
+                    if (iso < refIso) {
+                        refIso = iso
+                        refIndex = i
+                    }
                 }
             }
-            val referenceIso = burst.results[refIndex]
-                ?.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0
+            // ISO times exposure: the frame's gathered light, which is what a
+            // frame at other settings is brought to the reference's scale by.
+            // The shutter cap can move the exposure as well as the gain.
+            val referenceLight = lightOf(burst.results[refIndex])
 
             val refBuffer = burst.frames.buffer(refIndex)
                 ?: error("reference slot unreadable")
@@ -197,10 +211,9 @@ object ZslCapture {
                 onProgress("merging ${captured + 1}/${burst.count}")
                 val buffer = burst.frames.buffer(i) ?: continue
 
-                val frameIso = burst.results[i]
-                    ?.get(CaptureResult.SENSOR_SENSITIVITY) ?: referenceIso
-                val gainScale = if (referenceIso > 0 && frameIso > 0)
-                    frameIso.toFloat() / referenceIso.toFloat() else 1f
+                val frameLight = lightOf(burst.results[i])
+                val gainScale = if (referenceLight > 0.0 && frameLight > 0.0)
+                    (frameLight / referenceLight).toFloat() else 1f
 
                 var mark = System.nanoTime()
                 val proxy = m.lumaProxy(buffer, stride, gainScale)
@@ -220,7 +233,10 @@ object ZslCapture {
                 m.addFrame(buffer, stride, field, gainScale)
                 accumulateNanos += System.nanoTime() - mark
 
-                aligned.add(AlignedFrame(buffer, field, gainScale))
+                // For the 2x canvas, with the tiles the fit declined given
+                // their neighbours' fractions: the merge above reads the
+                // integer offsets only and is unchanged by this.
+                aligned.add(AlignedFrame(buffer, field.withFlatTilesBorrowed(), gainScale))
                 captured++
                 // Read once, given back at once: the camera refills this
                 // slot while the next frame is merged, and the next shutter
@@ -281,6 +297,7 @@ object ZslCapture {
                         lens = stream.lens,
                         params = develop,
                         writeDng = writeDng,
+                        baselineExposureStops = -shot.pullStops,
                     )
                 } finally {
                     built.close()
@@ -333,6 +350,7 @@ object ZslCapture {
                 streamStats = statsAfter.toString(),
                 dcgActive = stream.dcg,
                 develop = develop,
+                baselineExposureStops = -shot.pullStops,
                 writeDng = writeDng,
             ).copy(superRes = outcome)
         } catch (e: Exception) {
@@ -348,6 +366,14 @@ object ZslCapture {
             canvas?.close()
             merger?.close()
         }
+    }
+
+    /** ISO times exposure time, or zero where the result does not say. */
+    private fun lightOf(result: android.hardware.camera2.TotalCaptureResult?): Double {
+        val iso = result?.get(CaptureResult.SENSOR_SENSITIVITY) ?: return 0.0
+        val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return 0.0
+        if (iso <= 0 || exposure <= 0L) return 0.0
+        return iso.toDouble() * exposure.toDouble()
     }
 
     /** One alternate frame, aligned onto the reference, ready to be placed. */

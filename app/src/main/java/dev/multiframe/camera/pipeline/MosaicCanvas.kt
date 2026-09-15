@@ -59,6 +59,30 @@ class MosaicCanvas private constructor(
         return nAddTile(handle, tile, transform.m, feathers)
     }
 
+    /**
+     * One block of a tile matched against the canvas: where [transform] put
+     * the block's centre and where the canvas found it, canvas coordinates,
+     * with the correlation that found it. See [refine].
+     */
+    data class BlockMatch(val fromX: Float, val fromY: Float, val toX: Float, val toY: Float, val ncc: Float)
+
+    /**
+     * Measures how far a tile placed by [transform] sits from what the
+     * canvas already holds where the two overlap: the canvas's own pixels
+     * as the measurement of where the tile belongs. Empty where the tile
+     * overlaps nothing drawn, or nothing the two agree on. The correction
+     * is fitted by [MosaicPlacement.correctionFor]; see the note on
+     * refinement in Mosaic.cpp.
+     */
+    fun refine(tile: Bitmap, transform: Homography): List<BlockMatch> {
+        if (closed || consumed) return emptyList()
+        val out = FloatArray(MAX_REFINE_BLOCKS * 5)
+        val n = nRefineTile(handle, tile, transform.m, out)
+        return (0 until n).map { i ->
+            BlockMatch(out[i * 5], out[i * 5 + 1], out[i * 5 + 2], out[i * 5 + 3], out[i * 5 + 4])
+        }
+    }
+
     /** Fraction of the canvas any tile has covered, for reporting sweep progress. */
     fun coverage(): Float = if (closed) 0f else nCoverage(handle)
 
@@ -111,6 +135,7 @@ class MosaicCanvas private constructor(
     private external fun nCreate(width: Int, height: Int, bands: Int): Long
     private external fun nDestroy(h: Long)
     private external fun nAddTile(h: Long, tile: Bitmap, transform: DoubleArray, feathers: FloatArray): Long
+    private external fun nRefineTile(h: Long, tile: Bitmap, transform: DoubleArray, out: FloatArray): Int
     private external fun nCoverage(h: Long): Float
     private external fun nRenderInto(h: Long, bitmap: Bitmap): Boolean
     private external fun nCompressTo(h: Long, fd: Int, quality: Int): Long
@@ -126,6 +151,9 @@ class MosaicCanvas private constructor(
 
         /** Frequency bands the blend keeps apart; see Mosaic.cpp. One is the old single feather. */
         const val BANDS = 3
+
+        /** The most blocks a refinement returns: a four-by-four grid over the overlap. */
+        const val MAX_REFINE_BLOCKS = 16
 
         /**
          * The feathers that ship, narrowest first, in tile pixels.

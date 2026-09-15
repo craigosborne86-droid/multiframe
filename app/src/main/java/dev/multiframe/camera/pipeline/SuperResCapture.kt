@@ -58,6 +58,8 @@ object SuperResCapture {
         quality: Int = 95,
         /** Whether the merged raw is written as a DNG beside the 2x JPEG. */
         writeDng: Boolean = true,
+        /** Stops the DNG tells a converter to add back: the guard's pull, undone. */
+        baselineExposureStops: Float = 0f,
     ): Written? {
         val stamp = RawBurstCapture.stamp()
         val baseName = "MF_${stamp}${RecentCapture.SUPER_RES_TAG}${captured}f"
@@ -110,6 +112,7 @@ object SuperResCapture {
             RawBurstCapture.writeDng(
                 context, mergedBuffer.duplicate(), mergedWidth, mergedHeight,
                 characteristics, captureResult, dngName,
+                baselineExposureStops = baselineExposureStops,
             )
         } else {
             null

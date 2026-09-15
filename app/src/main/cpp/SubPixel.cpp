@@ -906,8 +906,8 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     // exposureGain, knee, contrast, desatStrength, desatStart, blackPoint,
     // autoPercentile, autoTarget, localTone, shoulderWhite -- the order
     // NativeSubPixel packs them in. The tenth is read where it is given, so
-    // a nine-float caller renders with the shoulder's default white.
-    float tone[10] = {0, 0.7f, 0.3f, 1.0f, 1.0f, 0.012f, 0.92f, 0.62f, 0.0f, 5.0f};
+    // a nine-float caller renders with the shoulder placed from the gain.
+    float tone[10] = {0, 0.7f, 0.3f, 1.0f, 1.0f, 0.012f, 0.92f, 0.62f, 0.0f, 0.0f};
     const jsize toneCount = env->GetArrayLength(jtone);
     env->GetFloatArrayRegion(jtone, 0, std::min<jsize>(toneCount, 10), tone);
     p.tone.exposureGain = tone[0];

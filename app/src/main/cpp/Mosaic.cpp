@@ -934,6 +934,326 @@ bool MosaicCanvas::Compose(int x, int y, float* rgb) const {
     return true;
 }
 
+namespace {
+
+/**
+ * A luma plane over a rectangle of the canvas at a coarse scale, with a mask
+ * of which cells hold anything: the two things the refinement compares.
+ */
+struct LumaGrid {
+    int cols = 0, rows = 0;
+    std::vector<float> luma;
+    std::vector<uint8_t> valid;
+    float at(int x, int y) const { return luma[static_cast<size_t>(y) * cols + x]; }
+    bool ok(int x, int y) const {
+        return x >= 0 && y >= 0 && x < cols && y < rows && valid[static_cast<size_t>(y) * cols + x];
+    }
+};
+
+/** The tile's luma at a tile position, bilinear; false outside the tile. */
+inline bool tileLumaAt(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
+                       double sx, double sy, float& out) {
+    if (sx < 0.0 || sy < 0.0 || sx > tileWidth - 1.0 || sy > tileHeight - 1.0) return false;
+    const int ix = static_cast<int>(sx);
+    const int iy = static_cast<int>(sy);
+    const float fx = static_cast<float>(sx) - ix;
+    const float fy = static_cast<float>(sy) - iy;
+    const int ix1 = std::min(ix + 1, tileWidth - 1);
+    const int iy1 = std::min(iy + 1, tileHeight - 1);
+    auto lumaOf = [&](int x, int y) {
+        const uint8_t* p = rgba + static_cast<size_t>(y) * tileStride + x * 4;
+        return (p[0] + 2.0f * p[1] + p[2]) * 0.25f;
+    };
+    const float top = lumaOf(ix, iy) * (1.0f - fx) + lumaOf(ix1, iy) * fx;
+    const float bottom = lumaOf(ix, iy1) * (1.0f - fx) + lumaOf(ix1, iy1) * fx;
+    out = top * (1.0f - fy) + bottom * fy;
+    return true;
+}
+
+/**
+ * Zero-mean normalised cross-correlation of the tile grid against the canvas
+ * grid displaced by (dx, dy) cells, over the cells both hold, restricted to
+ * the block [bx0, bx1) x [by0, by1) of the tile grid. Returns -2 where too
+ * few cells overlap to mean anything; the count is written to [cells].
+ */
+float nccAt(const LumaGrid& canvas, const LumaGrid& tile, int dx, int dy,
+            int bx0, int by0, int bx1, int by1, int minCells, int* cells) {
+    double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    int n = 0;
+    for (int y = by0; y < by1; ++y) {
+        for (int x = bx0; x < bx1; ++x) {
+            if (!tile.ok(x, y) || !canvas.ok(x + dx, y + dy)) continue;
+            const double a = tile.at(x, y);
+            const double b = canvas.at(x + dx, y + dy);
+            sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+            ++n;
+        }
+    }
+    if (cells != nullptr) *cells = n;
+    if (n < minCells) return -2.0f;
+    const double va = saa - sa * sa / n;
+    const double vb = sbb - sb * sb / n;
+    if (va <= 1e-6 * n || vb <= 1e-6 * n) return -2.0f;
+    return static_cast<float>((sab - sa * sb / n) / std::sqrt(va * vb));
+}
+
+/** The sub-cell vertex of a parabola through three correlations, clamped to half a cell. */
+inline float parabolaPeak(float before, float at, float after) {
+    const float denom = before - 2.0f * at + after;
+    if (denom >= -1e-9f) return 0.0f;
+    return std::clamp((before - after) / (2.0f * denom), -0.5f, 0.5f);
+}
+
+/**
+ * Builds the two grids over the canvas rectangle [x0, y0] .. [x1, y1] at
+ * [scale] canvas pixels a cell: the canvas's own luma where it holds
+ * anything, and the tile's luma read through [inverse] at each cell centre.
+ * A canvas cell is valid where at least half its samples are covered; the
+ * canvas is sampled at a stride inside the cell, since a cell of thirty-two
+ * pixels does not need all thousand of them to know its mean.
+ */
+void buildGrids(const uint16_t* data, int canvasWidth, int canvasHeight, int channels,
+                int x0, int y0, int x1, int y1, int scale,
+                const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
+                const double* inverse, LumaGrid& canvasGrid, LumaGrid& tileGrid) {
+    const int cols = (x1 - x0) / scale;
+    const int rows = (y1 - y0) / scale;
+    canvasGrid.cols = tileGrid.cols = cols;
+    canvasGrid.rows = tileGrid.rows = rows;
+    canvasGrid.luma.assign(static_cast<size_t>(cols) * rows, 0.0f);
+    canvasGrid.valid.assign(static_cast<size_t>(cols) * rows, 0);
+    tileGrid.luma.assign(static_cast<size_t>(cols) * rows, 0.0f);
+    tileGrid.valid.assign(static_cast<size_t>(cols) * rows, 0);
+    const int stride = std::max(1, scale / 4);
+    for (int gy = 0; gy < rows; ++gy) {
+        for (int gx = 0; gx < cols; ++gx) {
+            const int cx0 = x0 + gx * scale;
+            const int cy0 = y0 + gy * scale;
+            double sum = 0.0;
+            int covered = 0, samples = 0;
+            for (int y = cy0; y < cy0 + scale; y += stride) {
+                for (int x = cx0; x < cx0 + scale; x += stride) {
+                    ++samples;
+                    const uint16_t* px = data + (static_cast<size_t>(y) * canvasWidth + x) * channels;
+                    if (px[3] == 0) continue;
+                    sum += (px[0] + 2.0 * px[1] + px[2]) * (0.25 / 257.0);
+                    ++covered;
+                }
+            }
+            const size_t i = static_cast<size_t>(gy) * cols + gx;
+            if (covered * 2 >= samples && covered > 0) {
+                canvasGrid.luma[i] = static_cast<float>(sum / covered);
+                canvasGrid.valid[i] = 1;
+            }
+            // The tile over the same cell, through the inverse placement,
+            // at the same sample points: a box mean like the canvas's, so
+            // the two grids carry the same frequencies. Read at the cell's
+            // centre alone, the tile's fine texture aliased into the grid
+            // and correlated with anything.
+            double tileSum = 0.0;
+            int tileHits = 0;
+            for (int y = cy0; y < cy0 + scale; y += stride) {
+                for (int x = cx0; x < cx0 + scale; x += stride) {
+                    double sx, sy;
+                    if (!project(inverse, x + 0.5, y + 0.5, sx, sy)) continue;
+                    float l;
+                    if (!tileLumaAt(rgba, tileWidth, tileHeight, tileStride, sx - 0.5, sy - 0.5, l)) continue;
+                    tileSum += l;
+                    ++tileHits;
+                }
+            }
+            if (tileHits * 2 >= samples && tileHits > 0) {
+                tileGrid.luma[i] = static_cast<float>(tileSum / tileHits);
+                tileGrid.valid[i] = 1;
+            }
+        }
+    }
+}
+
+/** The refinement's scales and reach. See the note on refinement below. */
+constexpr int kRefineCoarseScale = 32;
+constexpr int kRefineFineScale = 4;
+/** In coarse cells: a quarter of a 4080-wide tile, the most the attitude has ever been out by. */
+constexpr int kRefineCoarseReach = 32;
+/** In fine cells, around the coarse answer: two coarse cells' worth of slack. */
+constexpr int kRefineFineReach = 8;
+constexpr int kRefineBlocks = 4;
+constexpr int kRefineMinCells = 64;
+constexpr float kRefineMinNcc = 0.45f;
+/** A block's peak has to stand this far above the correlation two cells either side of it. */
+constexpr float kRefinePeakDrop = 0.01f;
+/** Chance-level correlations taken off an offset's score, in units of 1/sqrt(cells). */
+constexpr float kRefineChanceLevels = 2.0f;
+
+}  // namespace
+
+/**
+ * ### Refinement: the tile is placed where the canvas says it is
+ *
+ * A tile arrives with a placement from one of two tiers -- a homography
+ * fitted to corners on a 320-pixel proxy, or the attitude's rotation --
+ * and either can be a hundred pixels out on a 4080-pixel tile: the proxy is
+ * a thirteenth of the scale, so one proxy pixel of fit error is thirteen on
+ * the canvas, and the attitude drifts and is read a frame from the exposure.
+ * The eighth field test's tower stood three times in one sky, two of them
+ * translucent: two tiles placed a few hundred pixels apart, the coarse bands
+ * averaging both. No blend hides a misplacement of that size. What fixes it
+ * is the measurement the canvas itself offers: where the new tile overlaps
+ * tiles already drawn, the pixels say exactly how far off the placement is.
+ *
+ * So before a tile is drawn it is matched against the canvas in the overlap,
+ * coarse to fine. A luma grid of the overlap at thirty-two canvas pixels a
+ * cell is searched for the whole-tile translation out to a quarter of a tile
+ * by normalised cross-correlation -- exposure and shading differences between
+ * tiles cancel in it. Then the overlap is cut into blocks at four pixels a
+ * cell, each searched around that answer for its own offset and refined to a
+ * fraction of a cell, and each block that matched with a clear peak is
+ * returned as one correspondence: where the placement put its centre, where
+ * the canvas found it. The caller fits the correction -- a translation from
+ * one block, a homography from many -- and composes it onto the placement.
+ * Sky returns no blocks (no texture, no correlation), a tower returns its
+ * blocks, and a tile that overlaps nothing returns none and is placed as it
+ * came.
+ */
+int MosaicCanvas::RefineTile(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
+                             const double* h, RefineMatch* out, int maxMatches) const {
+    if (data_ == nullptr || flattened_ || rgba == nullptr || out == nullptr || maxMatches <= 0) return 0;
+    if (tileWidth <= 0 || tileHeight <= 0) return 0;
+    double inverse[9];
+    if (!invert3x3(h, inverse)) return 0;
+
+    // The tile's footprint on the canvas, widened by the coarse reach so the
+    // search can look past it, clamped to the canvas.
+    double minX = 1e18, minY = 1e18, maxX = -1e18, maxY = -1e18;
+    const double cornersX[4] = {0.0, static_cast<double>(tileWidth), 0.0, static_cast<double>(tileWidth)};
+    const double cornersY[4] = {0.0, 0.0, static_cast<double>(tileHeight), static_cast<double>(tileHeight)};
+    for (int i = 0; i < 4; ++i) {
+        double px, py;
+        if (!project(h, cornersX[i], cornersY[i], px, py)) return 0;
+        minX = std::min(minX, px); maxX = std::max(maxX, px);
+        minY = std::min(minY, py); maxY = std::max(maxY, py);
+    }
+    const int reachPx = kRefineCoarseReach * kRefineCoarseScale;
+    const int x0 = std::max(0, static_cast<int>(std::floor(minX)) - reachPx);
+    const int y0 = std::max(0, static_cast<int>(std::floor(minY)) - reachPx);
+    const int x1 = std::min(width_, static_cast<int>(std::ceil(maxX)) + reachPx);
+    const int y1 = std::min(height_, static_cast<int>(std::ceil(maxY)) + reachPx);
+    if (x1 - x0 < kRefineCoarseScale * 4 || y1 - y0 < kRefineCoarseScale * 4) return 0;
+
+    // Coarse: the whole tile's translation.
+    LumaGrid canvasCoarse, tileCoarse;
+    buildGrids(data_, width_, height_, kChannels, x0, y0, x1, y1, kRefineCoarseScale,
+               rgba, tileWidth, tileHeight, tileStride, inverse, canvasCoarse, tileCoarse);
+    int overlap = 0;
+    nccAt(canvasCoarse, tileCoarse, 0, 0, 0, 0, tileCoarse.cols, tileCoarse.rows, 1, &overlap);
+    if (overlap < kRefineMinCells / 4) return 0;
+
+    // The coarse search. A displacement that leaves a corner of the tile
+    // on a corner of the canvas correlates a handful of cells with anything
+    // -- the first version put a tile a quarter of a tile off at the edge
+    // of its search that way -- so each offset's correlation is judged
+    // against its own chance level: the correlation of n unrelated cells
+    // is about 1/sqrt(n) either way, and twice that is taken off. An
+    // offset sharing few cells has to be very right to win; the true one,
+    // sharing hundreds, loses a tenth.
+    float bestNcc = -2.0f;
+    float bestScore = -2.0f;
+    int bestDx = 0, bestDy = 0;
+    int mostCells = 0;
+    for (int dy = -kRefineCoarseReach; dy <= kRefineCoarseReach; ++dy) {
+        for (int dx = -kRefineCoarseReach; dx <= kRefineCoarseReach; ++dx) {
+            int n = 0;
+            const float ncc = nccAt(canvasCoarse, tileCoarse, dx, dy, 0, 0,
+                                    tileCoarse.cols, tileCoarse.rows, kRefineMinCells / 2, &n);
+            mostCells = std::max(mostCells, n);
+            if (ncc < -1.0f) continue;
+            const float score = ncc - kRefineChanceLevels / std::sqrt(static_cast<float>(n));
+            if (score > bestScore) { bestScore = score; bestNcc = ncc; bestDx = dx; bestDy = dy; }
+        }
+    }
+    LOGI("refine: coarse grid %dx%d, overlap %d cells at rest, most %d, best ncc %.3f at (%d, %d) cells",
+         tileCoarse.cols, tileCoarse.rows, overlap, mostCells, bestNcc, bestDx, bestDy);
+    if (bestNcc < kRefineMinNcc) return 0;
+    const int coarseDx = bestDx * kRefineCoarseScale;
+    const int coarseDy = bestDy * kRefineCoarseScale;
+
+    // Fine: blocks of the overlap, each around the coarse answer.
+    LumaGrid canvasFine, tileFine;
+    buildGrids(data_, width_, height_, kChannels, x0, y0, x1, y1, kRefineFineScale,
+               rgba, tileWidth, tileHeight, tileStride, inverse, canvasFine, tileFine);
+    const int fdx = coarseDx / kRefineFineScale;
+    const int fdy = coarseDy / kRefineFineScale;
+
+    // The overlap's bounds in fine cells: tile cells whose displaced canvas cell holds something.
+    int ox0 = tileFine.cols, oy0 = tileFine.rows, ox1 = -1, oy1 = -1;
+    for (int y = 0; y < tileFine.rows; ++y) {
+        for (int x = 0; x < tileFine.cols; ++x) {
+            if (!tileFine.ok(x, y) || !canvasFine.ok(x + fdx, y + fdy)) continue;
+            ox0 = std::min(ox0, x); ox1 = std::max(ox1, x);
+            oy0 = std::min(oy0, y); oy1 = std::max(oy1, y);
+        }
+    }
+    if (ox1 < ox0 || oy1 < oy0) return 0;
+
+    int written = 0;
+    const int blockW = std::max(1, (ox1 - ox0 + 1) / kRefineBlocks);
+    const int blockH = std::max(1, (oy1 - oy0 + 1) / kRefineBlocks);
+    for (int by = 0; by < kRefineBlocks && written < maxMatches; ++by) {
+        for (int bx = 0; bx < kRefineBlocks && written < maxMatches; ++bx) {
+            const int bx0 = ox0 + bx * blockW;
+            const int by0 = oy0 + by * blockH;
+            const int bx1 = (bx == kRefineBlocks - 1) ? ox1 + 1 : bx0 + blockW;
+            const int by1 = (by == kRefineBlocks - 1) ? oy1 + 1 : by0 + blockH;
+
+            float best = -2.0f;
+            int bdx = fdx, bdy = fdy;
+            for (int dy = fdy - kRefineFineReach; dy <= fdy + kRefineFineReach; ++dy) {
+                for (int dx = fdx - kRefineFineReach; dx <= fdx + kRefineFineReach; ++dx) {
+                    const float ncc = nccAt(canvasFine, tileFine, dx, dy, bx0, by0, bx1, by1,
+                                            kRefineMinCells, nullptr);
+                    if (ncc > best) { best = ncc; bdx = dx; bdy = dy; }
+                }
+            }
+            if (best < kRefineMinNcc) continue;
+            // A peak at the edge of the search is not a peak.
+            if (std::abs(bdx - fdx) >= kRefineFineReach || std::abs(bdy - fdy) >= kRefineFineReach) continue;
+
+            // The peak has to be a peak in both axes: a block on a plain
+            // edge correlates equally well anywhere along it, and its
+            // offset along the edge means nothing. Judged two cells out,
+            // because a true offset halfway between two cells correlates
+            // equally at both of them, and that tie is the answer, not a
+            // ridge.
+            const float left = nccAt(canvasFine, tileFine, bdx - 1, bdy, bx0, by0, bx1, by1, kRefineMinCells, nullptr);
+            const float right = nccAt(canvasFine, tileFine, bdx + 1, bdy, bx0, by0, bx1, by1, kRefineMinCells, nullptr);
+            const float up = nccAt(canvasFine, tileFine, bdx, bdy - 1, bx0, by0, bx1, by1, kRefineMinCells, nullptr);
+            const float down = nccAt(canvasFine, tileFine, bdx, bdy + 1, bx0, by0, bx1, by1, kRefineMinCells, nullptr);
+            const float left2 = nccAt(canvasFine, tileFine, bdx - 2, bdy, bx0, by0, bx1, by1, kRefineMinCells, nullptr);
+            const float right2 = nccAt(canvasFine, tileFine, bdx + 2, bdy, bx0, by0, bx1, by1, kRefineMinCells, nullptr);
+            const float up2 = nccAt(canvasFine, tileFine, bdx, bdy - 2, bx0, by0, bx1, by1, kRefineMinCells, nullptr);
+            const float down2 = nccAt(canvasFine, tileFine, bdx, bdy + 2, bx0, by0, bx1, by1, kRefineMinCells, nullptr);
+            const float dropX = best - std::max(left2, right2);
+            const float dropY = best - std::max(up2, down2);
+            if (dropX < kRefinePeakDrop || dropY < kRefinePeakDrop) continue;
+            const float subX = parabolaPeak(left, best, right);
+            const float subY = parabolaPeak(up, best, down);
+
+            // The block's centre on the canvas as placed, and as found: the
+            // canvas cell (x + dx, y + dy) holds what the tile's cell (x, y)
+            // shows, so the tile is really dx cells further along.
+            const float fromX = x0 + (bx0 + bx1) * 0.5f * kRefineFineScale;
+            const float fromY = y0 + (by0 + by1) * 0.5f * kRefineFineScale;
+            RefineMatch& m = out[written++];
+            m.fromX = fromX;
+            m.fromY = fromY;
+            m.toX = fromX + (bdx + subX) * kRefineFineScale;
+            m.toY = fromY + (bdy + subY) * kRefineFineScale;
+            m.ncc = best;
+        }
+    }
+    return written;
+}
+
 float MosaicCanvas::Coverage() const {
     if (data_ == nullptr || flattened_) return 0.0f;
     const size_t pixels = static_cast<size_t>(width_) * height_;
@@ -1171,6 +1491,45 @@ Java_dev_multiframe_camera_pipeline_MosaicCanvas_nAddTile(
         static_cast<int>(info.stride), h, feathers);
     AndroidBitmap_unlockPixels(env, tile);
     return touched;
+}
+
+/**
+ * The refinement, over a bitmap: writes up to `out.length / 5` matches as
+ * (fromX, fromY, toX, toY, ncc) runs into [out] and returns how many.
+ */
+JNIEXPORT jint JNICALL
+Java_dev_multiframe_camera_pipeline_MosaicCanvas_nRefineTile(
+        JNIEnv* env, jobject, jlong handle, jobject bitmap, jdoubleArray transform, jfloatArray out) {
+    auto* canvas = reinterpret_cast<multiframe::MosaicCanvas*>(handle);
+    if (canvas == nullptr || bitmap == nullptr || transform == nullptr || out == nullptr) return 0;
+    if (env->GetArrayLength(transform) < 9) return 0;
+    const jsize capacity = env->GetArrayLength(out) / 5;
+    if (capacity <= 0) return 0;
+
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) return 0;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return 0;
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS) return 0;
+
+    double h[9];
+    env->GetDoubleArrayRegion(transform, 0, 9, h);
+    std::vector<multiframe::MosaicCanvas::RefineMatch> matches(static_cast<size_t>(capacity));
+    const int n = canvas->RefineTile(static_cast<const uint8_t*>(pixels),
+                                     static_cast<int>(info.width), static_cast<int>(info.height),
+                                     static_cast<int>(info.stride), h, matches.data(), capacity);
+    AndroidBitmap_unlockPixels(env, bitmap);
+
+    std::vector<float> packed(static_cast<size_t>(n) * 5);
+    for (int i = 0; i < n; ++i) {
+        packed[i * 5 + 0] = matches[i].fromX;
+        packed[i * 5 + 1] = matches[i].fromY;
+        packed[i * 5 + 2] = matches[i].toX;
+        packed[i * 5 + 3] = matches[i].toY;
+        packed[i * 5 + 4] = matches[i].ncc;
+    }
+    if (n > 0) env->SetFloatArrayRegion(out, 0, n * 5, packed.data());
+    return n;
 }
 
 JNIEXPORT jfloat JNICALL

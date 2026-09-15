@@ -172,6 +172,10 @@ class ZslRawStream private constructor(
     @Volatile
     private var evOverride: Int? = null
 
+    /** The guard's last decision, which the next one is made from. See [ExposureStrategy.Guard]. */
+    @Volatile
+    private var guard: ExposureStrategy.Guard = ExposureStrategy.Guard.REST
+
     /** Stops of exposure currently being given up to protect highlights. */
     @Volatile
     var pullStops: Float = 0f
@@ -243,8 +247,18 @@ class ZslRawStream private constructor(
      */
     @Volatile
     private var shutterCap: ShutterCap? = null
+    /** The reader thread's histogram scratch; only [onFramePushed] writes it. */
     private val capBins = IntArray(64)
     private var lastCapLog = 0L
+
+    /**
+     * A frame the follower has measured whose result has not arrived: its
+     * sensor timestamp and mean level. The follower runs when the pair is
+     * complete, whichever half lands second -- see [onFramePushed].
+     */
+    private val followLock = Any()
+    private var pendingFollowStamp = 0L
+    private var pendingFollowLevel = 0f
 
     /** The exposure the cap is holding, or null while the camera's meter has it or there is no cap. */
     val heldExposureOrNull: ShutterCap.Held? get() = if (locked) null else shutterCap?.held
@@ -280,34 +294,76 @@ class ZslRawStream private constructor(
      * the cap; while the cap holds, the frame's level corrects the gain.
      * Nothing here while a mosaic has the exposure locked or the
      * photographer has set it by hand, and nothing on a stream without a cap.
+     *
+     * ### The frame and its result are paired exactly
+     *
+     * The first follower took the frame's level and the newest result within
+     * a frame of it. A result can land before its image or after it, and
+     * around a change of gain that is the difference between the frame's own
+     * settings and the last frame's: the hold doubled the ISO, the next
+     * image was paired with a result already at the new gain while its
+     * pixels were exposed at the old one, the level read a stop short of the
+     * target, and the hold doubled the gain again. Three frames took a
+     * still desk from ISO 750 to the sensor's ceiling. So the level is
+     * measured here, where the slot is certainly this frame's, and the
+     * follower runs only once the result with the same sensor timestamp is
+     * in hand -- now, if it arrived first, or from [captureCallback] when it
+     * arrives.
      */
     internal fun onFramePushed(slot: Int, timestampNs: Long) {
+        if (!followerActive()) return
+        if (!ring.histogramSlot(slot, capBins, sensorProfile)) return
+        val level = ShutterCap.meanLevel(capBins)
+        val result = exactResult(timestampNs)
+        if (result != null) {
+            follow(result, level)
+            return
+        }
+        synchronized(followLock) {
+            pendingFollowStamp = timestampNs
+            pendingFollowLevel = level
+        }
+    }
+
+    /** The result half of the pair, from the capture callback. */
+    private fun onResultForFollower(result: TotalCaptureResult, timestampNs: Long) {
+        if (!followerActive()) return
+        val level = synchronized(followLock) {
+            if (pendingFollowStamp != timestampNs) return
+            pendingFollowStamp = 0L
+            pendingFollowLevel
+        }
+        follow(result, level)
+    }
+
+    private fun followerActive(): Boolean {
+        if (shutterCap == null || closed || locked) return false
+        val s = lastSettings ?: return false
+        val c = lastCaps ?: return false
+        return !s.manualExposureActive(c)
+    }
+
+    /** One frame's settings and level, to the cap. Serialised: the two halves arrive on two threads. */
+    private fun follow(result: TotalCaptureResult, level: Float): Unit = synchronized(followLock) {
         val cap = shutterCap ?: return
         if (closed || locked) return
         val s = lastSettings ?: return
         val c = lastCaps ?: return
-        if (s.manualExposureActive(c)) return
-        // The frame's own result, or the newest within a frame of it: the
-        // level and the settings have to describe the same exposure, or
-        // the correction is about the wrong frame.
-        val result = resultNear(timestampNs) ?: return
         // Under dual conversion gain only the low frames meter.
         if (dcg && result.request.tag == TAG_HIGH) return
         val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return
         val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return
 
         if (!cap.isHeld) {
-            // Cheap first: only a frame past the cap costs a histogram.
             if (exposure <= (cap.effectiveCapNs * ShutterCap.ENGAGE_MARGIN).toLong()) return
-            // And only a frame the meter has settled on: taken mid-search,
-            // the level the hold would keep is the level of a frame the
-            // meter itself was about to correct.
+            // Only a frame the meter has settled on: taken mid-search, the
+            // level the hold would keep is the level of a frame the meter
+            // itself was about to correct.
             val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
             if (aeState != null && aeState != CameraMetadata.CONTROL_AE_STATE_CONVERGED &&
                 aeState != CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
             ) return
-            if (!ring.histogramSlot(slot, capBins, sensorProfile)) return
-            val held = cap.onAutoResult(iso, exposure, ShutterCap.meanLevel(capBins)) ?: return
+            val held = cap.onAutoResult(iso, exposure, level) ?: return
             Log.i(
                 TAG,
                 "shutter cap: meter at 1/%d s ISO %d; holding 1/%d s at ISO %d, level %.3f".format(
@@ -318,8 +374,7 @@ class ZslRawStream private constructor(
             return
         }
 
-        if (!ring.histogramSlot(slot, capBins, sensorProfile)) return
-        when (val step = cap.onHeldFrame(iso, exposure, ShutterCap.meanLevel(capBins))) {
+        when (val step = cap.onHeldFrame(iso, exposure, level)) {
             ShutterCap.Step.Keep -> Unit
             is ShutterCap.Step.Adjust -> {
                 val now = System.currentTimeMillis()
@@ -342,14 +397,12 @@ class ZslRawStream private constructor(
         }
     }
 
-    /** The result for [timestampNs] exactly, else the newest within a frame and a half of it, else null. */
-    private fun resultNear(timestampNs: Long): TotalCaptureResult? = synchronized(resultLock) {
+    /** The result for [timestampNs] exactly, else null. */
+    private fun exactResult(timestampNs: Long): TotalCaptureResult? = synchronized(resultLock) {
         for (i in resultSlots.indices) {
             if (resultStamps[i] == timestampNs) return resultSlots[i]
         }
-        val newest = newestLocked() ?: return null
-        val stamp = newest.get(CaptureResult.SENSOR_TIMESTAMP) ?: return null
-        return if (kotlin.math.abs(stamp - timestampNs) <= config.minFrameDurationNs * 3 / 2) newest else null
+        return null
     }
 
     val ringCapacity: Int get() = ring.capacity
@@ -357,6 +410,9 @@ class ZslRawStream private constructor(
 
     /** Frames a shutter press could take right now. */
     fun readyFrames(): Int = if (closed) 0 else ring.readyCount()
+
+    /** Frames a shot holds in the ring right now, which the camera cannot write into. */
+    fun lockedFrames(): Int = if (closed) 0 else ring.lockedCount()
 
     /** Frames a snapshot could take that were exposed at or after [sinceNs] on the sensor's clock. */
     fun readyFramesSince(sinceNs: Long): Int = if (closed) 0 else ring.readyCountSince(sinceNs)
@@ -421,21 +477,27 @@ class ZslRawStream private constructor(
         if (!ring.histogramNewest(histogramBins, sensorProfile)) return null
 
         val analysis = ExposureStrategy.analyse(histogramBins)
-        val index = ExposureStrategy.recommendedEvIndex(
-            analysis, frameCount, caps,
+        // Judged from the decision in force when this frame was exposed, so
+        // the guard reads the scene and not its own last verdict.
+        val next = ExposureStrategy.nextGuard(
+            analysis, frameCount, guard,
             dcgRatio = if (dcg) DCG_RATIO else 1,
         )
+        guard = next
+        val index = ExposureStrategy.evIndexFor(next.pullStops, caps)
         if (index != evOverride) {
             val before = pullStops
             evOverride = index
             pullStops = index * caps.evStep
             // A held exposure does not hear exposure compensation; its
-            // target moves by the same stops instead.
-            shutterCap?.retarget(pullStops - before)
+            // target moves by the same stops instead. The pull is negative
+            // stops; the cap is told how many stops darker to go.
+            shutterCap?.retarget(before - pullStops)
             Log.i(
                 TAG,
-                "highlight guard: clipped %.3f, pulling %.2f stops (EV index %d)".format(
-                    analysis.clippedFraction, pullStops, index,
+                "highlight guard: clipped %.3f, bright end %.2f, pulling %.2f stops (EV index %d; bias %s, risk %.2f)".format(
+                    analysis.clippedFraction, analysis.highlightLevel, pullStops, index,
+                    if (next.standing) "on" else "off", next.riskStops,
                 ),
             )
             applySettings(settings, caps)
@@ -671,11 +733,13 @@ class ZslRawStream private constructor(
 
     /** Releases the guard's hold on exposure, back to what the user asked for. */
     fun clearHighlightProtection(caps: CameraCapabilities, settings: ManualSettings) {
+        guard = ExposureStrategy.Guard.REST
         if (closed || evOverride == null) return
         val before = pullStops
         evOverride = null
         pullStops = 0f
-        shutterCap?.retarget(-before)
+        // The pull comes off: as many stops brighter as it was darker.
+        shutterCap?.retarget(before)
         applySettings(settings, caps)
     }
 
@@ -804,6 +868,7 @@ class ZslRawStream private constructor(
             }
 
             if (dcg && request.tag == TAG_LOW) trackConvergence(result)
+            onResultForFollower(result, stamp)
         }
 
         override fun onCaptureBufferLost(

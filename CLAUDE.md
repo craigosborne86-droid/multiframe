@@ -26,10 +26,37 @@ picture, the sensor saw it in the scene."
   the frame interval; that is no cap at all. The highlight guard carries a
   standing bias of a stop (`HIGHLIGHT_BIAS_STOPS`) that the develop's
   auto-exposure and the filmic shoulder spend on the highlights; do not
-  remove it to "fix" a dark preview.
+  remove it to "fix" a dark preview. **The guard judges the scene, not the
+  frame it darkened** (`ExposureStrategy.Guard`/`nextGuard`, stateful, the
+  bright end read back up by the pull in force, with hysteresis): a guard
+  that decides from each frame alone oscillates with a period of two
+  decisions and the merge turns the swing into green pictures. The cap's
+  follower pairs a frame with the result of the same sensor timestamp,
+  never a neighbour's. `ShutterCap.retarget` is told stops *darker*.
+- **The merge scales light, not the pedestal.** A frame at another gain is
+  normalised as `black + (raw − black) / g` (`bayer_merge.cpp`,
+  `BayerMerger.kt`); dividing the raw code drags the merge under black and
+  the white balance turns that green. The reference frame is the newest
+  (lowest-ISO only under DCG). The DNG carries the guard's pull undone in
+  `BaselineExposure`; do not brighten the raw pixels instead.
+- **The shoulder's white is where the sensor stops**: `white = gain`
+  (`DevelopParams.withGain`, `Tone.h resolveShoulder`), so a clipped pixel
+  is display white. A constant white point over nominal renders the clip
+  grey and the whole picture hazy; do not put one back.
+- **The optics correction crops what it cannot read** (`LensDistortion.
+  validInset`, `Optics.applyCropped`). Do not invent border pixels --
+  repeating the edge made ribs, mirroring made reflections.
 - **The mosaic's detail band is blended by seam, not by weight.** Every
   detail-band pixel comes from one tile (`MosaicCanvas::cutSeam`); the
   coarse bands feather. Do not reintroduce averaging in the detail band.
+  **Every tile is refined against the canvas before it is drawn**
+  (`MosaicCanvas::RefineTile`, `MosaicPlacement`): registration on a
+  320-pixel proxy and the attitude are both a hundred pixels out on a
+  4080-pixel tile, and no blend hides that. Do not draw a tile at its
+  first placement.
+- **The shutter refuses what the ring cannot hold** (`lockedFrames() +
+  frames > ringCapacity` → reject haptic) and waits for the ring to refill
+  rather than take a short burst. Do not let a press take one frame.
 - **Native:** NEON-vectorized merge, alignment, shading, rotation, JPEG encode
   (vendored libjpeg-turbo). All native code is in `app/src/main/cpp/`.
 - **No external image libraries.** No OpenCV, no RenderScript, no third-party

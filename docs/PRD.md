@@ -227,12 +227,22 @@ normal preview startup, using the existing ZSL ring. The user never sees them.
   −2.0 at sixteen frames (`ExposureStrategy.HIGHLIGHT_BIAS_STOPS`). The
   develop's own auto-exposure puts the midtones back, the filmic shoulder
   spends the stop on the highlights' tones, and the merge takes back the
-  shadows' noise. NIGHT, and AUTO on a dark scene, are not biased.
+  shadows' noise. NIGHT, and AUTO on a dark scene, are not biased. The guard
+  decides from the scene, not from the frame its last decision darkened
+  (eighth field test): the bright end is read back up by the pull in force
+  and the bias has hysteresis, so a room at the floor does not switch it on
+  and off; the pull for clipping is raised to what a frame implies and
+  never accumulated, so a lamp in the frame does not walk the guard to the
+  burst's whole allowance (`ExposureStrategy.Guard`). The DNG carries the
+  pull undone in `BaselineExposure`.
 - **The filmic shoulder.** The tone curve's roll-off is a logarithm from the
-  knee (0.7) to a white point at five times nominal white, spending its
-  headroom evenly in stops, in place of an exponential that was white two
-  stops over the knee (`REFERENCE.md` §3.1 step 7). Highlights roll off
-  toward white; they do not clip into it.
+  knee (0.7) to a white point, spending its headroom evenly in stops, in
+  place of an exponential that was white two stops over the knee
+  (`REFERENCE.md` §3.1 step 7). The white point is the sensor's clip after
+  the develop's gain -- about twice nominal under the standing bias -- so
+  a clipped pixel is display white and everything under it keeps its tone;
+  a constant white point over nominal rendered the clip grey and the
+  picture hazy (eighth field test).
 - **Local tone on by default.** The bilateral-grid operator (§3.5) runs in
   every develop at its standing strength; the `LOCAL TONE` control turns it
   off.
@@ -1110,8 +1120,9 @@ Two things about the pictures and one about the mode.
    white in the JPEG. Three causes, three fixes (§2.2.5): the guard acted
    only on clipping it could already see, and now carries a standing stop
    of highlight bias; the tone curve's shoulder was an exponential white two
-   stops over the knee, and is a logarithm to a white point five times
-   nominal; the bilateral-grid local tone operator was a setting nobody
+   stops over the knee, and is a logarithm (to a white point of five times
+   nominal here, which the eighth field test moved to the sensor's clip,
+   §5.11); the bilateral-grid local tone operator was a setting nobody
    turned on, and is on by default.
 
 2. **The seams.** The detail band's soft hand-off still averaged the two
@@ -1130,6 +1141,49 @@ Two things about the pictures and one about the mode.
    sixteen-frame burst on any lens for any distance, beside the telephoto
    grids that want a scene beyond a few metres -- and the HUD says which is
    for what (§2.3.2).
+
+### 5.11 What the eighth field test found
+
+Six photographs, one chain of cause.
+
+1. **The green pictures.** A dim room with a window: the highlight guard
+   read the frame it had itself darkened, switched its stop of bias off and
+   on every 700 ms, and the meter swung a stop with it; under the shutter
+   cap the guard's pull was applied with the wrong sign and the hold ran a
+   still desk to the sensor's ceiling; a burst taken across either swing
+   held frames at different gains, and the merge divided the pedestal along
+   with the light, dragging the shot under black -- black shadows, and
+   midtones green where the white balance multiplied red and blue's
+   shortfall. Fixed at every link: the guard decides from the scene with a
+   memory and hysteresis and never adds to its pull for a lamp; the cap's
+   follower pairs each frame with its own result and is told stops darker;
+   the merge normalises light and not codes (`REFERENCE.md` §3.2, §3.7).
+2. **The black DNGs.** The reference frame was the lowest-ISO frame of the
+   burst -- the darkest of a swinging meter -- and the DNG was written at
+   its exposure with no `BaselineExposure`. The reference is the newest
+   frame; the DNG carries the guard's pull undone in `BaselineExposure`, so
+   a converter opens it at the brightness the photographer saw with the
+   highlights the stop kept.
+3. **The shutter spam.** Presses that outran the merge took what the ring
+   had left: two frames, then one. A press the ring cannot fit is refused
+   with the reject haptic; a press short of frames waits for the camera to
+   expose them and refuses under four.
+4. **The ghosted mosaics.** Two tiles of the tower placed a few hundred
+   pixels apart by a proxy-scale registration and a drifting attitude, the
+   coarse bands averaging both. Every tile is now refined against the
+   canvas before it is drawn (§2.3.3, `REFERENCE.md` §3.4.4).
+5. **The mirrored border.** The mirror of §5.9 reflected a strip of the
+   flower along the top. The correction now crops what it could not read;
+   the JPEG is some sixty pixels a side smaller than the raw on the main
+   lens.
+6. **The haze.** The shoulder's white point of five times nominal rendered
+   the sensor's own clip at 0.86 of white and every bright thing under a
+   veil. The white point is the clip after the develop's gain, so clipped
+   is white and everything under it has its tone (§2.2.5).
+7. **1-SHOT saving at 1x.** Sky scenes read as tripod bursts because the
+   sub-pixel fit declines a textureless tile as "zero"; such tiles borrow
+   their neighbours' fraction, and a shot the canvas does decline says so
+   in the status line: "saved at 1x", and why.
 
 **Still open from Phase 3.** The chroma channels of an eight-frame handheld burst leave
 about a fifth of their cells to the fill; a longer burst closes them and the

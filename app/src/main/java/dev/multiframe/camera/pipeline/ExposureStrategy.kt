@@ -85,6 +85,138 @@ object ExposureStrategy {
     const val BIAS_FLOOR_LEVEL = 0.10f
 
     /**
+     * The bias, once on, stays on until the scene's bright end falls to this
+     * share of [BIAS_FLOOR_LEVEL]: half a stop of hysteresis, so a scene
+     * sitting at the floor does not switch the bias on and off.
+     */
+    const val BIAS_RELEASE_FRACTION = 0.7f
+
+    /**
+     * The risk pull -- what the guard adds beyond the bias for clipping it
+     * has seen -- relaxes only once the frame's bright end sits this far
+     * under [HIGHLIGHT_SAFETY]: half a stop of headroom, so a highlight at
+     * the safety line is left where it is rather than chased up and down.
+     */
+    const val RISK_RELAX_BELOW = 0.70f
+
+    /** How much of the risk pull is given back per decision once the headroom is there. */
+    const val RISK_RELAX_STEP = 0.5f
+
+    /**
+     * What the highlight guard has decided, carried from one decision to the
+     * next.
+     *
+     * ### Why the guard has to remember
+     *
+     * The first guard decided from each frame's histogram alone, and the
+     * frame it looked at was the one its own last decision had darkened.
+     * A dim room with a window sat at a bright end of 0.15: over the floor,
+     * so the bias went on; the meter took the stop off, the bright end read
+     * 0.075, under the floor, so the bias came off; and the meter put the
+     * stop back. A period of two decisions, for as long as the camera was
+     * pointed there, with the ISO swinging a stop each way -- and a burst
+     * taken across the swing held frames at different gains, which is what
+     * the merge turned into a green picture ([BayerMerger]'s note on the
+     * pedestal). The judge was reading its own verdict.
+     *
+     * So the decision is made on the scene, not on the frame: the bright end
+     * is read back up by the pull in force before it is judged against the
+     * floor, and the bias has hysteresis. The risk pull -- for clipping the
+     * bias did not cover -- grows while clipping is still seen and relaxes
+     * only once the frame has half a stop of headroom, a step at a time.
+     * From rest on a still scene this reaches what [recommendedPullStops]
+     * would have said; it differs in never reversing itself on the strength
+     * of a frame it darkened.
+     */
+    data class Guard(
+        /** Whether the standing bias is in force. */
+        val standing: Boolean = false,
+        /** Stops pulled beyond the bias for clipping the guard has seen. Never negative. */
+        val riskStops: Float = 0f,
+        /** The bias in force when [standing]; the constructor's default is the shipped one. */
+        val bias: Float = HIGHLIGHT_BIAS_STOPS,
+    ) {
+        /** Stops of pull this guard asks for: zero or negative. */
+        val pullStops: Float
+            get() {
+                val total = (if (standing) bias else 0f) + riskStops
+                // Zero rather than negated zero, which compares unequal to it.
+                return if (total <= 0f) 0f else -total
+            }
+
+        companion object {
+            val REST = Guard()
+        }
+    }
+
+    /**
+     * The guard's next decision, from the frame it is looking at and the
+     * decision in force when that frame was exposed. See [Guard].
+     */
+    fun nextGuard(
+        analysis: SceneAnalysis,
+        frameCount: Int,
+        current: Guard = Guard.REST,
+        maxPull: Float = MAX_UNDEREXPOSURE_STOPS,
+        dcgRatio: Int = 1,
+        bias: Float = HIGHLIGHT_BIAS_STOPS,
+    ): Guard {
+        val affordable = min(shadowRecoveryStopsDcg(frameCount, dcgRatio), maxPull)
+        if (affordable <= 0f) return Guard(false, 0f, bias)
+
+        // The scene's bright end: the frame's, read back up by the pull that
+        // darkened it. Clipped stays clipped -- nothing reads above one.
+        val unpulledHighlight = min(1f, analysis.highlightLevel * 2f.pow(-current.pullStops))
+        val standing = bias > 0f && bias <= affordable &&
+            if (current.standing) unpulledHighlight > BIAS_FLOOR_LEVEL * BIAS_RELEASE_FRACTION
+            else unpulledHighlight > BIAS_FLOOR_LEVEL
+
+        // The risk. While the frame still clips, or its bright end is over
+        // the safety line, the risk is raised to what this frame implies --
+        // the stops the scene's bright end is over the line, plus the
+        // allowance for clipping the percentile does not see -- and never
+        // lowered by it: a frame that shows less clipping than the last
+        // because the pull is working is not a reason to undo the pull.
+        // Nor does the risk accumulate tick on tick: a lamp in the frame
+        // clips whatever the pull, and a guard that added to the pull for
+        // as long as it saw a clipped pixel walked every lamp-lit room to
+        // the burst's whole allowance. It relaxes only once the frame's
+        // bright end has half a stop of headroom, a step at a time.
+        val atRisk = analysis.clippedFraction > ALLOWED_CLIPPING ||
+            analysis.highlightLevel > HIGHLIGHT_SAFETY
+        var risk = current.riskStops.coerceAtLeast(0f)
+        if (atRisk) {
+            val needed = if (unpulledHighlight <= 1e-4f) 0f
+            else max(0f, (ln((unpulledHighlight / HIGHLIGHT_SAFETY).toDouble()) / ln(2.0)).toFloat())
+            risk = max(risk, needed + extraForClipping(analysis.clippedFraction))
+        } else if (analysis.highlightLevel < HIGHLIGHT_SAFETY * RISK_RELAX_BELOW) {
+            risk = max(0f, risk - RISK_RELAX_STEP)
+        }
+
+        // Only what the burst can pay back, the bias first.
+        val standingStops = if (standing) bias else 0f
+        risk = min(risk, max(0f, affordable - standingStops))
+        return Guard(standing, risk, bias)
+    }
+
+    /**
+     * Clipping the percentile has not caught: heavily blown scenes pin the
+     * top percentile at 1.0 and understate how far down to pull.
+     */
+    private fun extraForClipping(clippedFraction: Float): Float = when {
+        clippedFraction > 0.10f -> 1.5f
+        clippedFraction > 0.03f -> 0.8f
+        clippedFraction > ALLOWED_CLIPPING -> 0.3f
+        else -> 0f
+    }
+
+    /** The exposure compensation index for a pull, in the camera's steps and range. */
+    fun evIndexFor(pullStops: Float, caps: CameraCapabilities): Int {
+        if (!caps.supportsExposureCompensation || caps.evStep <= 0f) return 0
+        return (pullStops / caps.evStep).toInt().coerceIn(caps.evMin, caps.evMax)
+    }
+
+    /**
      * Stops of exposure a burst of [frameCount] can give up while ending at the
      * same shadow noise as a single frame.
      *
@@ -178,13 +310,7 @@ object ExposureStrategy {
 
         // Clipping that the percentile has not caught: heavily blown scenes
         // pin the top percentile at 1.0 and understate how far down to pull.
-        val extraForClipping = when {
-            !atRisk -> 0f
-            analysis.clippedFraction > 0.10f -> 1.5f
-            analysis.clippedFraction > 0.03f -> 0.8f
-            analysis.clippedFraction > ALLOWED_CLIPPING -> 0.3f
-            else -> 0f
-        }
+        val extraForClipping = if (atRisk) extraForClipping(analysis.clippedFraction) else 0f
 
         val wanted = standing + max(needed, 0f) + extraForClipping
         // Only spend what the burst can pay back. Pulling further than the
@@ -210,9 +336,7 @@ object ExposureStrategy {
         dcgRatio: Int = 1,
     ): Int {
         if (!caps.supportsExposureCompensation || caps.evStep <= 0f) return 0
-        val stops = recommendedPullStops(analysis, frameCount, dcgRatio = dcgRatio)
-        val index = (stops / caps.evStep).toInt()
-        return index.coerceIn(caps.evMin, caps.evMax)
+        return evIndexFor(recommendedPullStops(analysis, frameCount, dcgRatio = dcgRatio), caps)
     }
 
     /**

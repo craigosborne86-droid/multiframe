@@ -104,6 +104,7 @@ to tell the user this in the interface rather than let them discover it.
 | Reticle and dot guidance, from the attitude, with a stability gate; the burst exposed after the lock | Done, revised after five field tests | 18 unit tests on the lock rule against scripted pans, including a hand still settling and a gyroscope veto; 8 on the attitude geometry, turning the phone by known angles and reading the dots -- `f · tan` to a twentieth of a pixel, and a node that stays where the world put it; the overlay draws the canvas outline and each node where the attitude puts it, and nothing moves a dot |
 | Angular grid at thirty percent overlap, hole-free write | Done | The planner's `gridGeometry`: 4 unit tests on the step, the canvas reach and the seventy-degree limit; the canvas writes the largest fully covered rectangle, read back with no black pixel (`MosaicCanvasTest`) |
 | Two-tier placement: registration, then the attitude | Done, after the fourth field test | A node is done when its burst is in hand; the tile is placed by its pixels where they fit believably (ten inliers, within a quarter of a tile of the attitude, a tile's size) and by the attitude's transform onto the canvas plane otherwise. The live device test requires a dark run to complete by the attitude |
+| Refinement against the canvas before a tile is drawn | Done, after the eighth field test's ghosted tower | Either tier can be a hundred pixels out; where the tile overlaps tiles already drawn, block-matched normalised cross-correlation coarse to fine measures by how much, and the correction -- a translation, or a homography from eight agreeing blocks -- is composed onto the placement. `MosaicRefineDeviceTest`: a tile a hundred pixels off and a quarter of a tile off comes back to within two; a tile placed right is left alone; 40 ms a tile |
 | Low-light shutter stretch | Done | Where the floor would need more than ISO 3200, a still hand (< 4°/s) gets the floor stretched toward 1/60 s and the gate tightened to match; 1 unit test walks the evening case |
 | The mode's lifecycle and the back gesture | Done, after the second field test's deadlock | `SuperResMachine` walked stop → re-arm → run by 7 unit tests; `BackNavigation` as a rule (6) and as plumbing on the device (2) |
 | The shutter floor | Done | 1/250 s at 105mm, scaled by focal length, ISO raised to keep the light; 3 unit tests |
@@ -175,8 +176,14 @@ right way to test the algorithm.
    of a tile of where the attitude says the phone pointed, a tile's size),
    and otherwise where the attitude puts it: the tile's rectangle of
    directions met with the canvas plane. A dark frame, a blank wall, a patch
-   of sky all place by the attitude, a few percent of a tile from exact and
-   inside the overlap. Nothing a registration says can refuse a node.
+   of sky all place by the attitude. Nothing a registration says can refuse
+   a node. Then, before the tile is drawn, the canvas itself measures the
+   placement: where the tile overlaps tiles already there, its pixels are
+   matched against theirs block by block, and the placement is corrected by
+   what they say -- a hundred pixels, a quarter of a tile, whatever either
+   tier was out by (REFERENCE §3.4.4). The eighth field test's tower stood
+   three times in its sky before this; no blend hides a misplacement of
+   that size, and none has to.
 5. Compositing is in three frequency bands: the fine detail comes from one
    tile at every pixel, the boundary between tiles a *seam* cut where the
    two disagree least -- along a sky, a shadow, an edge that registered,

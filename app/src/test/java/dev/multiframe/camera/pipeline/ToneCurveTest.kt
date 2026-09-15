@@ -14,7 +14,10 @@ import kotlin.math.abs
  */
 class ToneCurveTest {
 
-    private val params = DevelopParams(exposureGain = 1f)
+    // An explicit white well over nominal: these tests are about the shape of
+    // the roll-off, not about where a develop places its white point (that
+    // is DevelopParams.withGain's, tested in RawDeveloperTest).
+    private val params = DevelopParams(exposureGain = 1f, shoulderWhite = DevelopParams.SHOULDER_WHITE_MAX)
 
     // ------------------------------------------------------------------
     // Monotonicity: the property that cannot be allowed to break.
@@ -246,7 +249,7 @@ class ToneCurveTest {
     @Test
     fun `the shoulder is linear to the knee, continuous in slope there, and white at the white point`() {
         val knee = 0.7f
-        val white = DevelopParams.SHOULDER_WHITE
+        val white = DevelopParams.SHOULDER_WHITE_MAX
         for (x in listOf(0.1f, 0.4f, 0.69f, knee)) {
             assertThat(ToneCurve.shoulder(x, knee, white)).isWithin(1e-6f).of(x)
         }
@@ -276,20 +279,26 @@ class ToneCurveTest {
         // doubling above the knee earns about the same increment, out to
         // the white point.
         val knee = 0.7f
-        val white = DevelopParams.SHOULDER_WHITE
         val headroom = 1f - knee
-        val stops = (0..4).map { ToneCurve.shoulder(knee + headroom * (1 shl it), knee, white) }
-        val increments = stops.zipWithNext { a, b -> b - a }
-        println("shoulder per stop above the knee: ${stops.joinToString { "%.3f".format(it) }}")
-        for (d in increments) {
-            assertThat(d).isGreaterThan(0.03f)
-            assertThat(d).isLessThan(0.06f)
+        // At the widest white the develop places, and at the one the
+        // standing bias usually gives it: a stop of headroom, white at two.
+        for (white in listOf(DevelopParams.SHOULDER_WHITE_MAX, 2.0f)) {
+            // The doublings above the knee that stay inside the white.
+            val xs = generateSequence(1) { it * 2 }.map { knee + headroom * it }.takeWhile { it <= white }.toList()
+            val stops = xs.map { ToneCurve.shoulder(it, knee, white) }
+            val increments = stops.zipWithNext { a, b -> b - a }
+            println("white $white, shoulder per stop above the knee: ${stops.joinToString { "%.3f".format(it) }}")
+            assertThat(increments.size).isAtLeast(1)
+            for (d in increments) {
+                assertThat(d).isGreaterThan(0.03f)
+                assertThat(d).isLessThan(0.08f)
+            }
+            // Nothing inside the white is white; the white itself is.
+            for (y in stops) assertThat(y).isLessThan(1f)
+            assertThat(ToneCurve.shoulder(white, knee, white)).isWithin(1e-6f).of(1f)
         }
-        // A stop over the knee is not yet near white; two stops over is not white.
-        assertThat(stops[1]).isLessThan(0.87f)
-        assertThat(stops[2]).isLessThan(0.93f)
         // And the old curve's failure, stated: two stops over the knee it was
-        // white to within a hundredth.
+        // white to within a hundredth, whatever the sensor still had above.
         val old = knee + headroom * (1f - kotlin.math.exp(-4f))
         assertThat(old).isGreaterThan(0.99f)
     }

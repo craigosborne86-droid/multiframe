@@ -266,14 +266,47 @@ class BayerMergerTest {
         }
     }
 
+    /**
+     * The same scene at [gain] times the sensitivity: the light scales, the
+     * pedestal does not. A real sensor's black level is the same code at
+     * every ISO, which is what the merge's normalisation has to honour.
+     */
     private fun scaleFrame(f: BayerFrame, gain: Float): BayerFrame {
         val out = ShortArray(f.data.size)
         val white = TestBayer.PROFILE.whiteLevel
         for (i in f.data.indices) {
-            val v = ((f.data[i].toInt() and 0xFFFF) * gain).toInt().coerceIn(0, white)
+            val x = i % f.width
+            val y = i / f.width
+            val black = TestBayer.PROFILE.blackAt(x, y)
+            val light = (f.data[i].toInt() and 0xFFFF) - black
+            val v = (black + light * gain).toInt().coerceIn(0, white)
             out[i] = v.toShort()
         }
         return BayerFrame(f.width, f.height, out)
+    }
+
+    @Test
+    fun `a burst whose gain moved merges to the reference's black, not under it`() {
+        // A flat, dim scene: forty codes of light on a pedestal of sixty-four.
+        val level = TestBayer.PROFILE.blackLevel[0] + 40
+        val flat = BayerFrame(w, h, ShortArray(w * h) { level.toShort() })
+        val ref = TestBayer.addNoise(flat, 2f, seed = 400)
+        // Three frames at three times the gain: the same light, the same pedestal.
+        val brighter = (0 until 3).map { scaleFrame(TestBayer.addNoise(flat, 2f, seed = 410 + it), 3f) }
+
+        val acc = BayerAccumulator(w, h, TestBayer.PROFILE)
+        acc.setReference(ref)
+        brighter.forEach { acc.add(it, gainScale = 3f) }
+        val (merged, stats) = acc.finish()
+        assertThat(stats.framesMerged).isEqualTo(4)
+
+        var sum = 0.0; var n = 0
+        for (y in 8 until h - 8) for (x in 8 until w - 8) { sum += merged.at(x, y); n++ }
+        val mean = sum / n
+        // Dividing the pedestal along with the light would have put this at
+        // 64 + 40 * (1/4 + 3/4 / 3) - ... well under the scene; the merge has
+        // to land on the scene's own level.
+        assertThat(abs(mean - level)).isLessThan(1.5)
     }
 
     @Test

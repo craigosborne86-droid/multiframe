@@ -42,6 +42,7 @@ object DngMetadata {
     private const val TAG_CAMERA_CALIBRATION_2 = 0xC624
     private const val TAG_FORWARD_MATRIX_1 = 0xC714
     private const val TAG_FORWARD_MATRIX_2 = 0xC715
+    private const val TAG_BASELINE_EXPOSURE = 0xC62A
 
     private const val TYPE_SHORT = 3
     private const val TYPE_LONG = 4
@@ -147,6 +148,41 @@ object DngMetadata {
         }
         return out
     }
+
+    /**
+     * Where a DNG's BaselineExposure value lives, or null where the file has
+     * no such tag or it is not a single signed rational.
+     *
+     * ### Why the DNG carries the guard's pull
+     *
+     * The highlight guard exposes the burst a stop or more under the meter
+     * and the develop's own exposure puts the midtones back; the JPEG shows
+     * the scene as metered with the highlights the stop kept. The DNG is the
+     * merged raw as exposed, and a viewer renders it at the exposure its
+     * metadata describes -- a stop dark, which read as "the RAW files have
+     * regressed". DNG has the word for this: BaselineExposure, in stops, is
+     * what a converter adds to the as-shot exposure before its own tone
+     * curve. `DngCreator` writes the tag as zero and gives no way to set it,
+     * so the value is written after the fact, into the eight bytes it left.
+     * The pixels are untouched; only the rendering intent is corrected.
+     */
+    fun baselineExposureOffset(header: ByteArray): Long? {
+        val entry = readIfd0(header)?.get(TAG_BASELINE_EXPOSURE) ?: return null
+        if (entry.type != TYPE_SRATIONAL || entry.count != 1) return null
+        if (entry.valueOffset <= 0L) return null
+        return entry.valueOffset
+    }
+
+    /** The eight bytes of a signed rational for [stops], in the file's byte order. */
+    fun encodeBaselineExposure(header: ByteArray, stops: Float): ByteArray {
+        val order = if (header.size >= 2 && header[0] == 'M'.code.toByte()) ByteOrder.BIG_ENDIAN
+        else ByteOrder.LITTLE_ENDIAN
+        val numerator = Math.round(stops * BASELINE_DENOMINATOR)
+        return ByteBuffer.allocate(8).order(order).putInt(numerator).putInt(BASELINE_DENOMINATOR).array()
+    }
+
+    /** Hundredths of a stop, which is finer than any converter shows. */
+    const val BASELINE_DENOMINATOR = 100
 
     /** Exposed so a test can build a TIFF without a camera. */
     internal fun tagFor(name: String): Int = when (name) {

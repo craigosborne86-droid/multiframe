@@ -235,6 +235,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var busy by remember { mutableStateOf(false) }
     // Shots taken and not yet written: the number the develop queue holds.
     var developing by remember { mutableIntStateOf(0) }
+    /** A press waiting for the ring to refill before it locks its frames. One at a time. */
+    var lockPending by remember { mutableStateOf(false) }
     // Bumped as each shot is written, for the thumbnail to reload on.
     var shotsWritten by remember { mutableIntStateOf(0) }
 
@@ -490,7 +492,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         superRes = r.superRes,
                     )
                 } ?: r.message
-                status = if (developing > 0) "$readout · $developing developing" else readout
+                // A 2x that declined says why, in the words the develop
+                // used: the photograph was saved at the sensor's size, and
+                // the photographer should not have to guess which.
+                val decline = CaptureReadout.superResDecline(r.superRes)
+                    ?.let { " · saved at 1x: $it" } ?: ""
+                status = (if (developing > 0) "$readout · $developing developing" else readout) + decline
                 shotsWritten++
             }
         }
@@ -1814,8 +1821,53 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         )
                     }
 
+                    // The ring is finite and a shot in the queue holds its
+                    // frames until the merge has read them. Presses that
+                    // outran the merge used to take whatever was left --
+                    // two frames, then one -- and a single-frame photograph
+                    // is not what the shutter promises. A press the ring
+                    // cannot fit is refused, plainly, and the ring says so.
+                    if (lockPending || stream.lockedFrames() + frames > stream.ringCapacity) {
+                        Haptics.reject(view)
+                        status = "ring full: $developing developing — a moment"
+                        return
+                    }
+
                     if (timerSeconds <= 0) {
-                        lockAndQueue()
+                        // The frames the press wants are in the ring already
+                        // -- that is what zero shutter lag means -- unless the
+                        // last press took them a moment ago and the camera is
+                        // still refilling. Then the press waits for its
+                        // frames, up to the time they take to expose, rather
+                        // than taking a short burst: the haptic comes when
+                        // they are locked, never before.
+                        if (stream.readyFrames() >= frames) {
+                            lockAndQueue()
+                            return
+                        }
+                        lockPending = true
+                        scope.launch {
+                            try {
+                                val intervalMs = (stream.config.minFrameDurationNs / 1_000_000L).coerceAtLeast(16L)
+                                val deadline = System.currentTimeMillis() + frames * intervalMs + REFILL_GRACE_MILLIS
+                                while (stream.readyFrames() < frames && System.currentTimeMillis() < deadline) {
+                                    status = "ring refilling %d/%d".format(stream.readyFrames(), frames)
+                                    kotlinx.coroutines.delay(intervalMs)
+                                }
+                            } finally {
+                                lockPending = false
+                            }
+                            if (zslStream !== stream) return@launch
+                            if (stream.readyFrames() < MIN_BURST_FRAMES.coerceAtMost(frames)) {
+                                // The camera did not refill in the time the
+                                // frames take: the ring is dropping. Not a
+                                // photograph; say so.
+                                Haptics.reject(view)
+                                status = "ring did not refill: %d of %d frames".format(stream.readyFrames(), frames)
+                                return@launch
+                            }
+                            lockAndQueue()
+                        }
                         return
                     }
                     busy = true
@@ -2355,6 +2407,12 @@ private fun LensChip(
  * read at the press, so a chip changed while the shot develops changes the
  * next one and not this.
  */
+/** Over the frames' own exposure time, how long a press waits for the ring to refill. */
+private const val REFILL_GRACE_MILLIS = 150L
+
+/** The fewest frames a press takes after waiting for the ring; under this it refuses instead. */
+private const val MIN_BURST_FRAMES = 4
+
 private class PendingShot(
     val shot: ZslCapture.Shot,
     val stream: ZslRawStream,

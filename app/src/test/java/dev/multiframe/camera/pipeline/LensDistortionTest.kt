@@ -504,4 +504,100 @@ class LensDistortionTest {
         // And from the fourth row down, only the picture.
         for (y in 5 until 8) assertThat(spread(y)).isLessThan(8)
     }
+
+    // --- The crop ---
+
+    @Test
+    fun `the inset takes exactly the border the correction would have had to invent`() {
+        val w = 64
+        val h = 48
+        // Pincushion: the top and bottom rows read from above and below the
+        // frame, the left and right columns from beyond its sides.
+        val model = LensDistortion.Model(
+            fx = 40f, fy = 40f, cx = (w - 1) / 2f, cy = (h - 1) / 2f, skew = 0f,
+            k1 = 0.25f, k2 = 0f, k3 = 0f, p1 = 0f, p2 = 0f,
+        )
+        val inset = LensDistortion.validInset(model, w, h)
+        assertThat(inset.isZero).isFalse()
+        // Every pixel kept reads from inside the frame ...
+        val out = FloatArray(2)
+        for (y in inset.top until h - inset.bottom) {
+            for (x in inset.left until w - inset.right) {
+                LensDistortion.sourceFor(model, x.toFloat(), y.toFloat(), out)
+                assertThat(out[0]).isAtLeast(0f)
+                assertThat(out[1]).isAtLeast(0f)
+                assertThat(out[0]).isAtMost((w - 1).toFloat())
+                assertThat(out[1]).isAtMost((h - 1).toFloat())
+            }
+        }
+        // ... and the row just outside the crop did not, somewhere along
+        // its kept length -- under pincushion at the corners, where the
+        // radius is largest: the crop is as small as it can be, to the
+        // bilinear neighbour it keeps.
+        val outsideAbove = (inset.left until w - inset.right).any { x ->
+            LensDistortion.sourceFor(model, x.toFloat(), (inset.top - 2).toFloat(), out)
+            out[1] < 0f
+        }
+        assertThat(outsideAbove).isTrue()
+        // Symmetric for a centred radial model.
+        assertThat(inset.left).isEqualTo(inset.right)
+        assertThat(inset.top).isEqualTo(inset.bottom)
+        assertThat(inset.width(w)).isEqualTo(w - inset.left - inset.right)
+    }
+
+    @Test
+    fun `barrel correction reads inward along the edges and needs no crop there`() {
+        // The source of an edge-midpoint pixel lies inside the frame under
+        // barrel; only the aberration's reach, if any, would crop.
+        val model = barrel(-0.05f)
+        val inset = LensDistortion.validInset(model, width, height)
+        val out = FloatArray(2)
+        LensDistortion.sourceFor(model, width / 2f, 0f, out)
+        if (out[1] >= 0f) assertThat(inset.top).isEqualTo(0)
+        // A wild model cannot crop the picture away.
+        val wild = LensDistortion.Model(
+            fx = 10f, fy = 10f, cx = width / 2f, cy = height / 2f, skew = 0f,
+            k1 = 5f, k2 = 0f, k3 = 0f, p1 = 0f, p2 = 0f,
+        )
+        val capped = LensDistortion.validInset(wild, width, height)
+        assertThat(capped.left).isAtMost((width * LensDistortion.MAX_INSET_FRACTION).toInt() + 1)
+        assertThat(capped.top).isAtMost((height * LensDistortion.MAX_INSET_FRACTION).toInt() + 1)
+    }
+
+    @Test
+    fun `the aberration rescale adds its own reach to the crop`() {
+        val none = LensDistortion.validInset(null, width, height)
+        assertThat(none.isZero).isTrue()
+        // Red a tenth of a percent larger: the corner's red is read from a
+        // tenth of a percent further out than the frame has.
+        val red = LensDistortion.validInset(null, width, height, ChromaticAberration.Scale(1.001f, 1f))
+        assertThat(red.left).isAtLeast(1)
+        assertThat(red.left).isAtMost(kotlin.math.ceil(0.001f * width / 2f).toInt() + 1)
+        // Smaller than the frame reads inward: nothing to crop.
+        assertThat(LensDistortion.validInset(null, width, height, ChromaticAberration.Scale(0.999f, 0.999f)).isZero).isTrue()
+    }
+
+    @Test
+    fun `the reference writes a window of the corrected frame that matches the whole frame's pixels`() {
+        val w = 48
+        val h = 36
+        val src = IntArray(w * h) { i ->
+            val v = (i * 37) and 0xFF
+            (0xFF shl 24) or (v shl 16) or (((i * 11) and 0xFF) shl 8) or ((i * 5) and 0xFF)
+        }
+        val model = LensDistortion.Model(
+            fx = 30f, fy = 30f, cx = (w - 1) / 2f, cy = (h - 1) / 2f, skew = 0f,
+            k1 = 0.2f, k2 = 0f, k3 = 0f, p1 = 0f, p2 = 0f,
+        )
+        val whole = IntArray(w * h)
+        Optics.applyReference(src, whole, w, h, model, ChromaticAberration.NONE)
+        val inset = LensDistortion.validInset(model, w, h)
+        val cw = inset.width(w)
+        val ch = inset.height(h)
+        val window = IntArray(cw * ch)
+        Optics.applyReference(src, window, w, h, model, ChromaticAberration.NONE, cw, ch, inset.left, inset.top)
+        for (y in 0 until ch) for (x in 0 until cw) {
+            assertThat(window[y * cw + x]).isEqualTo(whole[(y + inset.top) * w + (x + inset.left)])
+        }
+    }
 }

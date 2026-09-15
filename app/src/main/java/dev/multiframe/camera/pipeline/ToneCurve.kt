@@ -91,7 +91,7 @@ object ToneCurve {
      * desaturation has already taken such a pixel to neutral. Both native
      * develops tabulate this same curve (`Tone.h`, `shoulderCurveParts`).
      */
-    fun shoulder(x: Float, knee: Float, white: Float = DevelopParams.SHOULDER_WHITE): Float {
+    fun shoulder(x: Float, knee: Float, white: Float = DevelopParams.SHOULDER_WHITE_MAX): Float {
         if (x <= 0f) return 0f
         if (x <= knee) return x
         val headroom = 1f - knee
@@ -162,7 +162,11 @@ object ToneCurve {
         // Stage 1: compress on the brightest channel and scale all three, so
         // the roll-off changes level without touching hue.
         if (scenePeak > params.shoulderKnee) {
-            val scale = shoulder(scenePeak, params.shoulderKnee, params.shoulderWhite) / scenePeak
+            // Resolved params carry their white; unresolved ones (a caller
+            // that skipped DevelopParams.withGain) get the rule applied here.
+            val white = if (params.shoulderWhite > 0f) params.shoulderWhite
+            else DevelopParams.shoulderWhiteFor(params.exposureGain)
+            val scale = shoulder(scenePeak, params.shoulderKnee, white) / scenePeak
             r *= scale
             g *= scale
             b *= scale

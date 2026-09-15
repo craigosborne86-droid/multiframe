@@ -324,7 +324,7 @@ constexpr uint32_t kAlpha = 0xFF000000u;
  */
 void correctBand(const uint32_t* src, uint32_t* dst, int width, int srcStride,
                  int dstStride, int maxX, int maxY, const Distortion& d,
-                 const Aberration& a, int yStart, int yEnd) {
+                 const Aberration& a, int offsetX, int offsetY, int yStart, int yEnd) {
     // Pre-built lane offsets 0..3, added to a broadcast x.
     const float32x4_t lane = {0.0f, 1.0f, 2.0f, 3.0f};
 
@@ -333,20 +333,24 @@ void correctBand(const uint32_t* src, uint32_t* dst, int width, int srcStride,
     const float32x4_t acy = vdupq_n_f32(a.cy);
     const uint32x4_t alpha = vdupq_n_u32(kAlpha);
 
+    // The destination is a window on the corrected frame: its pixel (x, y)
+    // is the corrected frame's (x + offsetX, y + offsetY). The offsets are
+    // the crop's insets, which take the border the correction has to read
+    // from beyond the source off the picture (LensDistortion.validInset).
     for (int y = yStart; y < yEnd; ++y) {
         uint32_t* out = dst + static_cast<size_t>(y) * dstStride;
-        const float fy = static_cast<float>(y);
+        const float fy = static_cast<float>(y + offsetY);
         const float32x4_t fyv = vdupq_n_f32(fy);
 
         int x = 0;
         for (; x + 4 <= width; x += 4) {
             // Where these four output pixels came from.
             float32x4_t sx, sy;
+            const float32x4_t xs = vaddq_f32(vdupq_n_f32(static_cast<float>(x + offsetX)), lane);
             if (d.present) {
-                const float32x4_t xs = vaddq_f32(vdupq_n_f32(static_cast<float>(x)), lane);
                 sourceFor4(d, xs, fy, sx, sy);
             } else {
-                sx = vaddq_f32(vdupq_n_f32(static_cast<float>(x)), lane);
+                sx = xs;
                 sy = fyv;
             }
 
@@ -376,9 +380,9 @@ void correctBand(const uint32_t* src, uint32_t* dst, int width, int srcStride,
         for (; x < width; ++x) {
             float sx, sy;
             if (d.present) {
-                sourceFor(d, static_cast<float>(x), fy, sx, sy);
+                sourceFor(d, static_cast<float>(x + offsetX), fy, sx, sy);
             } else {
-                sx = static_cast<float>(x);
+                sx = static_cast<float>(x + offsetX);
                 sy = fy;
             }
             const int g = sampleChannel(src, srcStride, maxX, maxY, sx, sy, kShiftG);
@@ -400,7 +404,10 @@ void correctBand(const uint32_t* src, uint32_t* dst, int width, int srcStride,
 extern "C" {
 
 /**
- * Corrects [srcBitmap] into [dstBitmap], both RGBA_8888 and the same size.
+ * Corrects [srcBitmap] into [dstBitmap], both RGBA_8888. The destination is
+ * the corrected frame's window from ([offsetX], [offsetY]) of its own size,
+ * which must lie inside the source's: the same size and zero offsets is the
+ * whole frame.
  *
  * [model] is ten floats -- fx, fy, cx, cy, skew, k1, k2, k3, p1, p2 -- or null
  * for no geometric correction. [scaleRed] and [scaleBlue] are the aberration
@@ -410,7 +417,7 @@ extern "C" {
 JNIEXPORT jboolean JNICALL
 Java_dev_multiframe_camera_pipeline_NativeOptics_nCorrect(
         JNIEnv* env, jobject, jobject srcBitmap, jobject dstBitmap,
-        jfloatArray model, jfloat scaleRed, jfloat scaleBlue) {
+        jfloatArray model, jfloat scaleRed, jfloat scaleBlue, jint offsetX, jint offsetY) {
     AndroidBitmapInfo srcInfo;
     AndroidBitmapInfo dstInfo;
     if (AndroidBitmap_getInfo(env, srcBitmap, &srcInfo) != ANDROID_BITMAP_RESULT_SUCCESS) {
@@ -421,13 +428,19 @@ Java_dev_multiframe_camera_pipeline_NativeOptics_nCorrect(
     }
     if (srcInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
     if (dstInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
-    if (srcInfo.width != dstInfo.width || srcInfo.height != dstInfo.height) {
+    if (offsetX < 0 || offsetY < 0) return JNI_FALSE;
+    if (dstInfo.width + static_cast<uint32_t>(offsetX) > srcInfo.width ||
+        dstInfo.height + static_cast<uint32_t>(offsetY) > srcInfo.height) {
         return JNI_FALSE;
     }
 
+    // The source frame's size is what the model and the aberration centre
+    // are stated against; the destination's is how much of it is written.
     const int width = static_cast<int>(srcInfo.width);
     const int height = static_cast<int>(srcInfo.height);
-    if (width <= 0 || height <= 0) return JNI_FALSE;
+    const int outWidth = static_cast<int>(dstInfo.width);
+    const int outHeight = static_cast<int>(dstInfo.height);
+    if (width <= 0 || height <= 0 || outWidth <= 0 || outHeight <= 0) return JNI_FALSE;
 
     Distortion d{};
     d.present = false;
@@ -465,8 +478,9 @@ Java_dev_multiframe_camera_pipeline_NativeOptics_nCorrect(
     const int maxX = width - 1;
     const int maxY = height - 1;
 
-    parallelBands(height, [&](int yStart, int yEnd) {
-        correctBand(in, out, width, srcStride, dstStride, maxX, maxY, d, a, yStart, yEnd);
+    parallelBands(outHeight, [&](int yStart, int yEnd) {
+        correctBand(in, out, outWidth, srcStride, dstStride, maxX, maxY, d, a,
+                    offsetX, offsetY, yStart, yEnd);
     });
 
     AndroidBitmap_unlockPixels(env, dstBitmap);
