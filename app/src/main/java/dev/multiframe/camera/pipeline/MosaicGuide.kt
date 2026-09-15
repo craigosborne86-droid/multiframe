@@ -28,7 +28,13 @@ import kotlin.math.sqrt
  * ### The lock rule, and the stability gate
  *
  * A node locks when the reticle has been within the lock radius of it, *and
- * still*, for [settleMillis]. Still is measured two ways on every poll and
+ * still*, for [settleMillis]. The lock is the runner's cue to *begin* the
+ * burst, not to take one: the frames the ring holds at that moment were
+ * exposed while the hand was arriving, and the fifth field test's tiles
+ * were smeared by exactly those. The runner discards them and collects
+ * frames exposed after the lock, still under the gate (`MosaicCapture`);
+ * [captured] is called when that burst is in hand, and [release] if the
+ * hand moved before it was. Still is measured two ways on every poll and
  * both have to pass: the frame's centre moved less than [stillDistance] on
  * the canvas since the last poll -- the registration's own reading of
  * motion -- and the gyroscope's peak angular speed since the last poll was
@@ -330,6 +336,17 @@ class MosaicGuide(
         if (capturing == node.index) capturing = -1
     }
 
+    /**
+     * The burst at [node] was begun and not taken -- the reticle left the
+     * node before its fresh frames were in hand. Not a failure to read as
+     * one: the node is simply pending again, to be held on again.
+     */
+    fun release(node: MosaicNode) {
+        if (states[node.index] == NodeState.CAPTURING) states[node.index] = NodeState.PENDING
+        if (capturing == node.index) capturing = -1
+        clearLocking()
+    }
+
     private fun clearLocking() {
         lockingNode = -1
         lockingSince = 0L
@@ -344,11 +361,11 @@ class MosaicGuide(
         const val NEAR_MULTIPLE = 3f
 
         /**
-         * Hold this long, still, inside the radius before the burst fires.
+         * Hold this long, still, inside the radius before the burst begins.
          * Was 250 ms, then 170; 150 is the fill the hand reads as deliberate
-         * without seeming to stall, and the settle time still stretches to
-         * cover the burst (`settleFor`), which on a five-frame burst is what
-         * actually sets it.
+         * without seeming to stall. It no longer stretches to cover the
+         * burst: the burst is exposed *after* the hold, from fresh frames,
+         * and the hand is held through it by the runner's own gate.
          */
         const val DEFAULT_SETTLE_MILLIS = 150L
 
@@ -372,17 +389,6 @@ class MosaicGuide(
 
         /** The poll interval the still distance is stated at. */
         const val NOMINAL_POLL_MILLIS = 100L
-
-        /**
-         * The settle time for a burst of [frames] at [frameIntervalNs]: long
-         * enough that every frame the ring hands over was taken during the
-         * hold, plus a margin, and never under the default. A burst is the
-         * newest frames, so the hold *is* the burst's exposure window.
-         */
-        fun settleFor(frames: Int, frameIntervalNs: Long): Long {
-            val span = (frames.coerceAtLeast(1) * frameIntervalNs) / 1_000_000L
-            return maxOf(DEFAULT_SETTLE_MILLIS, span + 33L)
-        }
 
         /** How long a failed node reads as failed before it is asked for again. */
         const val REJECTED_MILLIS = 600L

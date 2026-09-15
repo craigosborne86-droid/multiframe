@@ -167,6 +167,46 @@ class CaptureModeTest {
     }
 
     @Test
+    fun `auto takes at most ten frames however deep the ring`() {
+        // Signal-to-noise grows as the root of the count: twenty frames over
+        // ten is half a stop for a burst window twice as long. Night, on a
+        // scene that is still, takes what the ring has.
+        val deep = CaptureModes.plan(CaptureMode.AUTO, bright, availableFrames = 28, requestedFrames = 28)
+        assertThat(deep.frames).isEqualTo(CaptureModes.AUTO_MAX_FRAMES)
+        assertThat(CaptureModes.AUTO_MAX_FRAMES).isEqualTo(10)
+        val eight = CaptureModes.plan(CaptureMode.AUTO, bright, 28, 8)
+        assertThat(eight.frames).isEqualTo(8)
+        val shallow = CaptureModes.plan(CaptureMode.AUTO, bright, availableFrames = 6, requestedFrames = 28)
+        assertThat(shallow.frames).isEqualTo(6)
+        val night = CaptureModes.plan(CaptureMode.NIGHT, dark, 28, 28)
+        assertThat(night.frames).isEqualTo(28)
+    }
+
+    @Test
+    fun `auto caps the frame at a sixtieth, inside the stream's own frame`() {
+        // A cap at or past the frame interval is no cap: 1/30 s was the old
+        // value and it never bound anything. A sixtieth binds, and the gain
+        // and the merge make up the stop; see ShutterCap.
+        val auto = CaptureModes.plan(CaptureMode.AUTO, bright, 28, 8)
+        assertThat(auto.maxExposureNs).isEqualTo(CaptureModes.AUTO_EXPOSURE_NS)
+        assertThat(auto.maxExposureNs).isLessThan(33_333_333L)
+        assertThat(auto.maxExposureNs).isEqualTo(16_666_667L)
+        // Night's is longer than the frame -- the stream sets no cap for it.
+        val night = CaptureModes.plan(CaptureMode.NIGHT, dark, 28, 8)
+        assertThat(night.maxExposureNs).isGreaterThan(33_333_333L)
+        // AUTO on a dark scene resolves to night's frames and night's guard
+        // and keeps AUTO's cap: it is the hand that chose the mode.
+        val autoDark = CaptureModes.plan(CaptureMode.AUTO, dark, 28, 8)
+        assertThat(autoDark.resolved).isEqualTo(CaptureMode.NIGHT)
+        assertThat(autoDark.frames).isEqualTo(CaptureModes.AUTO_MAX_FRAMES)
+        assertThat(autoDark.protectHighlights).isFalse()
+        assertThat(autoDark.maxExposureNs).isEqualTo(CaptureModes.AUTO_EXPOSURE_NS)
+        // Action's is shorter still.
+        val action = CaptureModes.plan(CaptureMode.ACTION, bright, 28, 8)
+        assertThat(action.maxExposureNs).isLessThan(auto.maxExposureNs)
+    }
+
+    @Test
     fun `modes cycle back to the start`() {
         var mode = CaptureMode.AUTO
         repeat(CaptureMode.entries.size) { mode = mode.next() }

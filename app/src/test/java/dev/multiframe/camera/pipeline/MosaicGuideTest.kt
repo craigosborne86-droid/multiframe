@@ -218,16 +218,45 @@ class MosaicGuideTest {
     }
 
     @Test
-    fun `the settle time covers the burst`() {
-        // Eight frames at 33 ms is 267 ms; the hold has to be longer than the
-        // burst it will hand over, so that every frame was taken during it.
-        // Three frames is 100 ms, under the 170 ms floor.
-        assertThat(MosaicGuide.settleFor(8, 33_333_333L)).isEqualTo(299L)
-        // Five frames -- a Super Res tile -- is 167 ms plus a poll: 199.
-        assertThat(MosaicGuide.settleFor(5, 33_333_333L)).isEqualTo(199L)
-        assertThat(MosaicGuide.settleFor(3, 33_333_333L)).isEqualTo(MosaicGuide.DEFAULT_SETTLE_MILLIS)
-        assertThat(MosaicGuide.settleFor(0, 33_333_333L)).isEqualTo(MosaicGuide.DEFAULT_SETTLE_MILLIS)
+    fun `the hold is the confirmation of the hand, not the burst's window`() {
+        // The burst is exposed after the lock, from fresh frames the runner
+        // waits for; the hold only has to say the hand is still. A hundred
+        // and fifty milliseconds, and no stretch for the burst length.
         assertThat(MosaicGuide.DEFAULT_SETTLE_MILLIS).isEqualTo(150L)
+        val s = MosaicGuide(plan)
+        assertThat(s.settleMillis).isEqualTo(150L)
+        s.configureGate(maxAngularSpeed = 0.1f, settleMillis = MosaicGuide.DEFAULT_SETTLE_MILLIS)
+        assertThat(s.settleMillis).isEqualTo(150L)
+    }
+
+    @Test
+    fun `a burst begun and not taken gives the node back, and it locks again`() {
+        val s = sweep()
+        val node = plan.nodes[0]
+        s.at(node, dx = 10f, t = 0)
+        s.at(node, dx = 12f, t = 100)
+        s.at(node, dx = 8f, t = 200)
+        assertThat(s.at(node, dx = 9f, t = 360)).isEqualTo(MosaicGuide.Decision.Capture(node))
+        assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.CAPTURING)
+
+        // The reticle left before the fresh frames came: not a rejection --
+        // no red, no beat -- the node is simply pending, and active again.
+        s.release(node)
+        assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.PENDING)
+        assertThat(s.activeNode).isEqualTo(node)
+        assertThat(s.captured).isEqualTo(0)
+
+        // Back on it, and the hold starts over from nothing.
+        s.at(node, dx = 10f, t = 700)
+        assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.LOCKING)
+        assertThat(s.holdProgress(700)).isEqualTo(0f)
+        s.at(node, dx = 12f, t = 800)
+        s.at(node, dx = 8f, t = 900)
+        assertThat(s.at(node, dx = 9f, t = 1060)).isEqualTo(MosaicGuide.Decision.Capture(node))
+        // Releasing a node that is not capturing changes nothing.
+        s.captured(node, 1100)
+        s.release(node)
+        assertThat(s.stateOf(node)).isEqualTo(MosaicGuide.NodeState.DONE)
     }
 
     @Test

@@ -197,4 +197,109 @@ class MosaicBlendDeviceTest {
 
         oneNarrow.recycle(); oneWide.recycle(); three.recycle(); alone.recycle()
     }
+
+    // --- the noise floor ---------------------------------------------------
+
+    /** A dark, grainy tile: a flat shadow with Gaussian noise of [sigma] codes, seeded so two calls agree. */
+    private fun grainyTile(level: Int, sigma: Float, seed: Long, rotate: Double = 0.0): Bitmap {
+        val bmp = Bitmap.createBitmap(tileW, tileH, Bitmap.Config.ARGB_8888)
+        val px = IntArray(tileW * tileH)
+        val rnd = java.util.Random(seed)
+        for (i in px.indices) {
+            val v = (level + rnd.nextGaussian() * sigma).toInt().coerceIn(0, 255)
+            px[i] = Color.rgb(v, v, v)
+        }
+        bmp.setPixels(px, 0, tileW, 0, 0, tileW, tileH)
+        return bmp
+    }
+
+    /** Standard deviation of the luminance over a rectangle. */
+    private fun grain(bmp: Bitmap, x0: Int, x1: Int, y0: Int, y1: Int): Float {
+        var sum = 0.0; var sq = 0.0; var n = 0
+        for (y in y0 until y1) for (x in x0 until x1) {
+            val v = Color.red(bmp.getPixel(x, y)).toDouble()
+            sum += v; sq += v * v; n++
+        }
+        val mean = sum / n
+        return sqrt(sq / n - mean * mean).toFloat()
+    }
+
+    private fun grainyComposite(noiseFloor: Float, tiles: Int): Bitmap {
+        val c = MosaicCanvas.create(canvasW, canvasH, 3)!!
+        return c.use {
+            it.setNoiseFloor(noiseFloor)
+            val feathers = floatArrayOf(12f, 60f, 160f)
+            val left = grainyTile(level = 30, sigma = 12f, seed = 1L)
+            assertThat(it.addTile(left, Homography.translation(0.0, 0.0), feathers)).isGreaterThan(0L)
+            left.recycle()
+            if (tiles > 1) {
+                // The second tile a little turned against the first, as a
+                // hand's is: two grids, two beats.
+                val right = grainyTile(level = 30, sigma = 12f, seed = 2L)
+                val a = 0.6 * Math.PI / 180.0
+                val cx = tileW / 2.0
+                val cy = tileH / 2.0
+                val rotation = Homography(doubleArrayOf(
+                    Math.cos(a), -Math.sin(a), cx - cx * Math.cos(a) + cy * Math.sin(a),
+                    Math.sin(a), Math.cos(a), cy - cx * Math.sin(a) - cy * Math.cos(a),
+                    0.0, 0.0, 1.0,
+                ))
+                val turned = Homography.translation(overlapStart.toDouble(), 0.0).times(rotation)
+                assertThat(it.addTile(right, turned, feathers)).isGreaterThan(0L)
+                right.recycle()
+            }
+            render(it)
+        }
+    }
+
+    /**
+     * The floor's null: with one tile there is no overlap, so a floor of a
+     * half composes exactly what a floor of nothing does, to the byte.
+     */
+    @Test
+    fun theNoiseFloorChangesNothingWhereTilesDoNotOverlap() {
+        val without = grainyComposite(0f, tiles = 1)
+        val with = grainyComposite(MosaicCanvas.MAX_DETAIL_ATTENUATION, tiles = 1)
+        var differing = 0
+        for (y in 0 until canvasH) for (x in 0 until canvasW) {
+            if (without.getPixel(x, y) != with.getPixel(x, y)) differing++
+        }
+        Log.i(TAG, "noise floor null: $differing of ${canvasW * canvasH} pixels differ with one tile")
+        assertThat(differing).isEqualTo(0)
+        without.recycle(); with.recycle()
+    }
+
+    /**
+     * Where two grainy shadows overlap, the floor takes grain out; away
+     * from the overlap, in either tile's own ground, it takes nothing.
+     */
+    @Test
+    fun theNoiseFloorQuietensTheShadowedOverlapAndOnlyThat() {
+        val without = grainyComposite(0f, tiles = 2)
+        val with = grainyComposite(MosaicCanvas.MAX_DETAIL_ATTENUATION, tiles = 2)
+
+        // Deep inside the overlap, clear of every feather.
+        val ox0 = overlapStart + 70
+        val ox1 = tileW - 70
+        val overlapWithout = grain(without, ox0, ox1, 60, canvasH - 60)
+        val overlapWith = grain(with, ox0, ox1, 60, canvasH - 60)
+        // The left tile's own ground, well clear of the second tile's reach.
+        val aloneWithout = grain(without, 20, 120, 60, canvasH - 60)
+        val aloneWith = grain(with, 20, 120, 60, canvasH - 60)
+        Log.i(TAG, "noise floor: overlap grain %.2f -> %.2f codes, one tile's own ground %.2f -> %.2f".format(
+            overlapWithout, overlapWith, aloneWithout, aloneWith))
+        DeviceKind.warnIfNotAPhone(TAG)
+
+        // Half the finest band in the overlap's shadow is a good part of the
+        // grain: at least a fifth of it gone.
+        assertThat(overlapWith).isLessThan(overlapWithout * 0.8f)
+        // And the ground each tile has to itself is untouched -- the
+        // overlap factor there is zero, and the subtraction is of zero.
+        var differing = 0
+        for (y in 0 until canvasH) for (x in 0 until 100) {
+            if (without.getPixel(x, y) != with.getPixel(x, y)) differing++
+        }
+        assertThat(differing).isEqualTo(0)
+        without.recycle(); with.recycle()
+    }
 }

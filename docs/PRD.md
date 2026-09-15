@@ -338,12 +338,19 @@ removes noise; nothing removes blur -- and where even the sensor's top ISO
 would not keep the light at the floor, the floor gives way for a still hand:
 stretched from 1/250 s toward 1/60 s until the ISO is back at 3200, with the
 gate tightened to 4°/s to pay for it. A poll that fails either measure resets
-the hold, and the hold needs three steady polls and **170 ms** (from 250),
-stretched to cover the burst so every frame the ring hands over was taken
-during the verified hold -- the burst *is* the hold; the ring fills and the
-burst fires itself. The lock radius is five percent of a tile, in and out,
-with no hysteresis and no snap. The HUD says HOLD STILL or HOLD STEADY ON
-THE DOT while it waits. `REFERENCE.md` §3.4.4.
+the hold, and the hold needs three steady polls and **150 ms** (from 250,
+then 170). The hold confirms the hand; it does not supply the frames. **The
+burst is exposed after the lock**: the frames the ring holds at the lock
+were exposed while the hand was arriving, and four field tests' tiles
+carried that blur, so not one of them is used -- the mode waits for 4–6
+frames exposed *after* the lock, on the sensor's own clock, with the gate
+held through the wait (a turn past the ceiling discards the frames exposed
+during it and starts again; the reticle leaving the radius gives the node
+back), and the haptic fires after the last of them. About 250 ms the hand
+holds for on purpose, drawn as the ring filling a second time in the
+confirm ink with the hint EXPOSING · HOLD. The lock radius is five percent
+of a tile, in and out, with no hysteresis and no snap. The HUD says HOLD
+STILL or HOLD STEADY ON THE DOT while it waits. `REFERENCE.md` §3.4.4.
 
 **This replaces the free-roam panning arrow concept.**
 
@@ -572,7 +579,8 @@ A dedicated screen accessible from the last-shot thumbnail in the viewfinder.
 
 | Operation | Budget | Method |
 |---|---|---|
-| Shutter press to capture start | < 5ms | ZSL: burst is already in the ring |
+| Shutter press to frames locked | < 5ms | ZSL: burst is already in the ring; `ZslCapture.take` on the press, measured per shot (`handoverMicros`) |
+| Shutter press to shutter free again | < 5ms | The develop runs behind the viewfinder; the next press is taken whenever it comes (`REFERENCE.md` §3.7) |
 | Burst capture (8 frames at 30fps) | ~267ms | Sensor-limited |
 | Merge (8 frames, 12 MP, native) | < 150ms | NEON-vectorized, measured by `MergeSpeedDeviceTest` |
 | Develop (12 MP, CPU) | < 300ms | Thread-pooled, measured by profiling |
@@ -591,6 +599,10 @@ A dedicated screen accessible from the last-shot thumbnail in the viewfinder.
   second or two a tile is merged, developed and composited across every core.
 - UI thread: no operation > 16ms on the main thread. All pipeline work is
   dispatched to `Dispatchers.Default`.
+- During a develop: the viewfinder runs on -- the preview is its own output
+  -- and the shutter stays live. The ring gives each frame's slot back as
+  the merge reads it, so a second press half a second after the first finds
+  a full burst and a press a tenth of a second after finds four or five.
 
 ### 3.4 Device Compatibility
 
@@ -998,6 +1010,56 @@ buckets.
    CFA phase was audited and is correct: the pattern Camera2 reports is the
    raw buffer's own origin, and the colours in every field capture confirm
    it.
+
+### 5.9 What the sixth field test found
+
+The camera was slow to take one photograph, the mosaic's tiles were blurred
+by frames exposed before the lock, and two artefacts had names. Four
+buckets, and a fifth confirmed.
+
+1. **The shutter.** A press locked the frames and then the screen was busy
+   for the second and a half the merge, the render and the write took;
+   nothing about the ring required that. The press now locks the frames on
+   its own thread in microseconds, fires the haptic, and returns; the
+   develop runs behind the viewfinder in a queue, one shot at a time in the
+   order taken, and the next press is taken whenever it comes
+   (`REFERENCE.md` §3.7). For that to be a burst and not two frames the ring
+   gives each frame's slot back the moment the merge has read it, and the
+   mapping outlives a stream closed under a developing shot. AUTO takes at
+   most ten frames however deep the ring (√N: twenty over ten is half a stop
+   for twice the window). And AUTO's frames are exposed no longer than
+   **1/60 s** where the sensor's gain can make up the light: the meter
+   lengthens the shutter before the gain, a hand does not hold 1/30 s at
+   24mm, and the merge takes the noise out of fast frames but not the blur
+   out of slow ones. Camera2 offers no such bound, so it is a follower
+   (`ShutterCap`): the meter has the exposure until it asks for more than
+   the cap, the cap holds the shutter and corrects the gain from each
+   frame's own level, hands the exposure back when the scene is bright
+   enough for the meter to keep the cap by itself, and gives way toward the
+   frame when the gain runs out.
+
+2. **The fresh burst.** §2.3.3: the lock begins the burst rather than taking
+   it. The `MosaicGuide` hold is 150 ms flat again; `MosaicCapture` waits
+   for the tile's frames to be exposed after the lock under the gate, and
+   the guidance draws the exposure.
+
+3. **The ribs.** A band of vertical ribs along the top of the frame was the
+   optics gather's edge clamp repeating the demosaic's edge row into every
+   row a correction (or the aberration rescale of a channel) overshot. The
+   border is now read as a mirror -- nothing repeated, continuous with the
+   frame -- in both the reference and the native gather (`REFERENCE.md`
+   §3.1, "The optics, and the border"; `LensDistortionTest`,
+   `OpticsParityTest`).
+
+4. **The cross-hatch.** The weave over shadowed overlaps at ISO 3200 was two
+   tiles' residual resampling meshes at two orientations, in the detail
+   band alone. The blend has a noise floor keyed on the ISO the lock
+   pinned, the overlap, and the shadow: at most half the finest band in a
+   shadowed overlap, nothing anywhere else, the one-tile null held to the
+   byte (`REFERENCE.md` §3.4.4; `MosaicBlendDeviceTest`).
+
+5. **Colour, confirmed.** The luminance-keyed desaturation of §5.8 renders
+   saturated reds, pinks and yellows as themselves in the field. Kept.
 
 **Still open from Phase 3.** The chroma channels of an eight-frame handheld burst leave
 about a fifth of their cells to the fill; a longer burst closes them and the

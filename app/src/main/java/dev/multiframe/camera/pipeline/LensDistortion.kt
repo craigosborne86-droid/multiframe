@@ -331,10 +331,11 @@ object LensDistortion {
     /**
      * Resamples [src] into [dst], both packed ARGB at [width] x [height].
      *
-     * Bilinear. Edge pixels that map outside the source are clamped to the
-     * border rather than left black: a correction that expands the field pulls
-     * from beyond the frame at the edges, and a black rim is more obviously
-     * wrong than a stretched one.
+     * Bilinear. Edge pixels that map outside the source read the border as
+     * a mirror rather than as black or as the edge pixel repeated: a
+     * correction that expands the field pulls from beyond the frame at the
+     * edges, a black rim is more obviously wrong than a mirrored strip, and
+     * a repeated edge row is a band of ribs -- see [reflectIntoFrame].
      *
      * [dst] must not alias [src].
      */
@@ -369,7 +370,41 @@ object LensDistortion {
         }
     }
 
-    /** Bilinear sample of a packed ARGB image, clamped at the border. */
+    /**
+     * How the border is read.
+     *
+     * A source position past the frame -- a correction that expands the
+     * field pulls from beyond it along every edge, and a channel rescaled
+     * for aberration pulls a few pixels further -- has to read *something*.
+     * The first version clamped it to the edge pixel, and the field test's
+     * pictures carried a band of vertical ribs along the top: the edge row,
+     * which the demosaic interpolates from a 3x3 gather within two pixels of
+     * the border and which alternates in colour column by column, repeated
+     * downward into every row the overshoot reached. Repeating any row is a
+     * rib. So the border is read as a mirror: a position `d` past the edge
+     * reads `d` inside it. Nothing is repeated -- the strip is the frame's
+     * own texture, reversed, which is as good a guess at what lay beyond
+     * the frame as a photograph has -- and it is continuous with the frame
+     * at the edge, so a position inside the frame reads exactly what it
+     * always did: an edge row the correction does not move stays itself,
+     * which an inward margin would not allow. Past the mirror's reach the
+     * position is clamped. Optics.cpp reads the border the same way, and
+     * the parity test holds it there.
+     */
+    fun reflectIntoFrame(v: Float, max: Int): Float {
+        val m = max.toFloat()
+        if (v >= 0f && v <= m) return v
+        if (v < 0f) {
+            val r = -v
+            // Past the mirror's reach -- further out than the frame is wide
+            // -- is the edge that was overshot, not a second bounce.
+            return if (r > m) 0f else r
+        }
+        val r = 2f * m - v
+        return if (r < 0f) m else r
+    }
+
+    /** Bilinear sample of a packed ARGB image, the border mirrored; see [reflectIntoFrame]. */
     private fun sampleBilinear(
         src: IntArray,
         width: Int,
@@ -378,8 +413,8 @@ object LensDistortion {
         fx: Float,
         fy: Float,
     ): Int {
-        val cx = fx.coerceIn(0f, maxX.toFloat())
-        val cy = fy.coerceIn(0f, maxY.toFloat())
+        val cx = reflectIntoFrame(fx, maxX)
+        val cy = reflectIntoFrame(fy, maxY)
 
         val x0 = cx.toInt()
         val y0 = cy.toInt()

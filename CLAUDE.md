@@ -13,6 +13,17 @@ picture, the sensor saw it in the scene."
 - **UI:** 100% Jetpack Compose, dark-only, single-activity.
 - **Camera:** Camera2 API via CameraX interop. Direct `CameraCaptureSession`
   control for ZSL and DCG burst modes.
+- **The shutter:** a ZSL press locks the frames and returns in microseconds
+  (`ZslCapture.take`); the merge, render and write run behind the viewfinder
+  in the screen's develop queue (`ZslCapture.develop`), one shot at a time,
+  and the shutter is never busy for it. The ring gives each frame's slot
+  back as the merge reads it, and its mapping outlives a close while a shot
+  holds slots. Do not put the develop back on the shutter's path. See
+  `docs/REFERENCE.md` §3.7.
+- **Exposure in AUTO:** the meter is bounded by a shutter cap (1/60 s,
+  `ShutterCap`) that takes the exposure by hand only when the meter overruns
+  it and hands it back when it can. Do not lengthen `AUTO_EXPOSURE_NS` past
+  the frame interval; that is no cap at all.
 - **Native:** NEON-vectorized merge, alignment, shading, rotation, JPEG encode
   (vendored libjpeg-turbo). All native code is in `app/src/main/cpp/`.
 - **No external image libraries.** No OpenCV, no RenderScript, no third-party

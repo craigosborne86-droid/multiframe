@@ -129,7 +129,44 @@ inline void sourceFor4(const Distortion& d, float32x4_t x, float y,
 }
 
 /**
- * Bilinear sample of one channel at four positions, clamped at the border.
+ * The border, read as a mirror.
+ *
+ * The same rule as LensDistortion.reflectIntoFrame: a position inside the
+ * frame reads as it is; a position `d` past an edge reads `d` inside it;
+ * past the mirror's reach is clamped. An edge clamp repeated the frame's
+ * edge row -- the demosaic's 3x3 border gather, alternating in colour
+ * column by column -- into every row a correction overshot, which the
+ * field test saw as a band of vertical ribs along the top of the frame.
+ */
+inline float32x4_t reflectIntoFrame4(float32x4_t v, int max) {
+    const float32x4_t zero = vdupq_n_f32(0.0f);
+    const float32x4_t m = vdupq_n_f32(static_cast<float>(max));
+    const uint32x4_t below = vcltq_f32(v, zero);
+    const uint32x4_t above = vcgtq_f32(v, m);
+    // Below: |v|, or the near edge past the mirror's reach.
+    const float32x4_t mirroredBelow = vnegq_f32(v);
+    const float32x4_t fromBelow = vbslq_f32(vcgtq_f32(mirroredBelow, m), zero, mirroredBelow);
+    // Above: 2*max - v, or the near edge past the reach.
+    const float32x4_t mirroredAbove = vsubq_f32(vaddq_f32(m, m), v);
+    const float32x4_t fromAbove = vbslq_f32(vcltq_f32(mirroredAbove, zero), m, mirroredAbove);
+    float32x4_t r = vbslq_f32(below, fromBelow, v);
+    r = vbslq_f32(above, fromAbove, r);
+    return r;
+}
+
+inline float reflectIntoFrame(float v, int max) {
+    const float m = static_cast<float>(max);
+    if (v >= 0.0f && v <= m) return v;
+    if (v < 0.0f) {
+        const float r = -v;
+        return r > m ? 0.0f : r;
+    }
+    const float r = 2.0f * m - v;
+    return r < 0.0f ? m : r;
+}
+
+/**
+ * Bilinear sample of one channel at four positions, the border mirrored.
  *
  * The four positions arrive as vectors and the result leaves as one. Between
  * them the only scalar work is the sixteen texel fetches, which have no vector
@@ -149,9 +186,8 @@ inline void sourceFor4(const Distortion& d, float32x4_t x, float y,
  */
 inline int32x4_t sample4(const uint32_t* src, int stride, int maxX, int maxY,
                          float32x4_t fx, float32x4_t fy, int shift) {
-    const float32x4_t zero = vdupq_n_f32(0.0f);
-    const float32x4_t cx = vminq_f32(vmaxq_f32(fx, zero), vdupq_n_f32(static_cast<float>(maxX)));
-    const float32x4_t cy = vminq_f32(vmaxq_f32(fy, zero), vdupq_n_f32(static_cast<float>(maxY)));
+    const float32x4_t cx = reflectIntoFrame4(fx, maxX);
+    const float32x4_t cy = reflectIntoFrame4(fy, maxY);
 
     // Truncation is floor here, since the clamp made every lane non-negative.
     const int32x4_t x0 = vcvtq_s32_f32(cx);
@@ -203,8 +239,8 @@ inline int32x4_t sample4(const uint32_t* src, int stride, int maxX, int maxY,
 /** The scalar form, for the row tail the vector loop does not cover. */
 inline int sampleChannel(const uint32_t* src, int stride, int maxX, int maxY,
                          float fx, float fy, int shift) {
-    const float cx = std::min(std::max(fx, 0.0f), static_cast<float>(maxX));
-    const float cy = std::min(std::max(fy, 0.0f), static_cast<float>(maxY));
+    const float cx = reflectIntoFrame(fx, maxX);
+    const float cy = reflectIntoFrame(fy, maxY);
 
     const int x0 = static_cast<int>(cx);
     const int y0 = static_cast<int>(cy);

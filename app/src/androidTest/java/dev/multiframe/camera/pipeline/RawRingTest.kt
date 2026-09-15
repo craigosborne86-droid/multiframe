@@ -417,6 +417,168 @@ class RawRingTest {
         }
     }
 
+    // --- per-slot release, and two snapshots at once ------------------------
+
+    /**
+     * A merge reads each frame once and gives its slot back at once, so the
+     * camera refills under the merge. Releasing one slot frees that slot and
+     * no other, and the freed slot is the first the camera refills.
+     */
+    @Test
+    fun releasingOneSlotFreesThatSlotAlone() {
+        val pool = RawRing.create(smallWidth, smallHeight, 8, frameIntervalNs)!!
+        ring = pool
+        for (i in 1..8) {
+            pool.push(sourceFrame(smallWidth, smallHeight, i), smallWidth * 2,
+                1_000_000_000L + i * frameIntervalNs, i.toLong())
+        }
+        val snapshot = pool.lockNewest(4)
+        assertThat(snapshot.count).isEqualTo(4)
+        assertThat(pool.lockedCount()).isEqualTo(4)
+        assertThat(snapshot.heldCount).isEqualTo(4)
+
+        val freed = snapshot.slots[1]
+        snapshot.release(1)
+        assertThat(pool.lockedCount()).isEqualTo(3)
+        assertThat(snapshot.heldCount).isEqualTo(3)
+        assertThat(snapshot.buffer(1)).isNull()
+        // The others are still readable, and still theirs.
+        assertThat(snapshot.buffer(0)).isNotNull()
+        assertThat(snapshot.buffer(0)!!.getShort(0).toInt() and 0xFFFF).isEqualTo(8 and 0x3FF)
+        // Ready frames are the four never locked: a freed slot is free, not ready.
+        assertThat(pool.readyCount()).isEqualTo(4)
+        // The camera's next frame lands in the freed slot before any ready one is recycled.
+        val landed = pool.push(sourceFrame(smallWidth, smallHeight, 9), smallWidth * 2,
+            1_000_000_000L + 9 * frameIntervalNs, 9L)
+        assertThat(landed).isEqualTo(freed)
+        assertThat(pool.readyCount()).isEqualTo(5)
+        // Releasing twice is nothing; closing releases the rest.
+        snapshot.release(1)
+        snapshot.close()
+        assertThat(pool.lockedCount()).isEqualTo(0)
+        assertThat(snapshot.heldCount).isEqualTo(0)
+        snapshot.close()
+        assertThat(pool.lockedCount()).isEqualTo(0)
+    }
+
+    /**
+     * Two shots in hand at once: one developing while the next is taken.
+     * Closing the first gives back its slots and none of the second's.
+     */
+    @Test
+    fun twoSnapshotsHoldTheirOwnSlots() {
+        val pool = RawRing.create(smallWidth, smallHeight, 8, frameIntervalNs)!!
+        ring = pool
+        for (i in 1..8) {
+            pool.push(sourceFrame(smallWidth, smallHeight, i), smallWidth * 2,
+                1_000_000_000L + i * frameIntervalNs, i.toLong())
+        }
+        val first = pool.lockNewest(3)
+        val second = pool.lockNewest(3)
+        assertThat(first.frameNumbers.toList()).containsExactly(8L, 7L, 6L).inOrder()
+        assertThat(second.frameNumbers.toList()).containsExactly(5L, 4L, 3L).inOrder()
+        assertThat(pool.lockedCount()).isEqualTo(6)
+
+        first.close()
+        assertThat(pool.lockedCount()).isEqualTo(3)
+        // The second's frames are exactly where they were.
+        for (i in 0 until 3) {
+            val b = second.buffer(i)!!
+            assertThat(b.getShort(0).toInt() and 0xFFFF).isEqualTo((5 - i) and 0x3FF)
+        }
+        second.close()
+        assertThat(pool.lockedCount()).isEqualTo(0)
+    }
+
+    /**
+     * A mosaic node waits for frames exposed after its lock: the ring can
+     * say how many of its ready frames are that fresh.
+     */
+    @Test
+    fun readyFramesCanBeCountedFromATimestamp() {
+        val pool = RawRing.create(smallWidth, smallHeight, 8, frameIntervalNs)!!
+        ring = pool
+        val t0 = 1_000_000_000L
+        assertThat(pool.readyCountSince(0L)).isEqualTo(0)
+        assertThat(pool.newestTimestampNs()).isEqualTo(0L)
+        for (i in 1..8) {
+            pool.push(sourceFrame(smallWidth, smallHeight, i), smallWidth * 2, t0 + i * frameIntervalNs, i.toLong())
+        }
+        assertThat(pool.newestTimestampNs()).isEqualTo(t0 + 8 * frameIntervalNs)
+        // At or after: frames 5, 6, 7, 8.
+        assertThat(pool.readyCountSince(t0 + 5 * frameIntervalNs)).isEqualTo(4)
+        assertThat(pool.readyCountSince(t0 + 5 * frameIntervalNs + 1)).isEqualTo(3)
+        assertThat(pool.readyCountSince(t0)).isEqualTo(8)
+        assertThat(pool.readyCountSince(t0 + 9 * frameIntervalNs)).isEqualTo(0)
+        // Locked frames are not ready, however fresh.
+        pool.lockNewest(2).use {
+            assertThat(pool.readyCountSince(t0 + 5 * frameIntervalNs)).isEqualTo(2)
+        }
+    }
+
+    /**
+     * The stream closes when the lens is switched, and a shot taken a moment
+     * before is still developing on its slots. The mapping has to outlive
+     * the close until that shot lets go, or the develop reads unmapped
+     * memory and takes the process with it.
+     */
+    @Test
+    fun closingTheRingWithASnapshotHeldKeepsTheMappingUntilItIsReleased() {
+        val pool = RawRing.create(smallWidth, smallHeight, 4, frameIntervalNs)!!
+        ring = pool
+        for (i in 1..4) {
+            pool.push(sourceFrame(smallWidth, smallHeight, i), smallWidth * 2,
+                1_000_000_000L + i * frameIntervalNs, i.toLong())
+        }
+        val snapshot = pool.lockNewest(2)
+        assertThat(snapshot.count).isEqualTo(2)
+
+        pool.close()
+        // Closed: no more frames in, no more snapshots out.
+        assertThat(pool.push(sourceFrame(smallWidth, smallHeight, 5), smallWidth * 2, 2_000_000_000L, 5L)).isEqualTo(-1)
+        assertThat(pool.lockNewest(1).count).isEqualTo(0)
+        assertThat(pool.readyCount()).isEqualTo(0)
+        // But the frames in hand are still there, byte for byte.
+        val b = snapshot.buffer(0)!!
+        var sum = 0L
+        for (i in 0 until smallWidth * smallHeight) sum += b.getShort(i * 2).toInt() and 0xFFFF
+        assertThat(sum).isEqualTo((4 and 0x3FF).toLong() * smallWidth * smallHeight)
+        // Letting go destroys the mapping; nothing more is readable, and
+        // closing again is nothing.
+        snapshot.close()
+        assertThat(snapshot.buffer(0)).isNull()
+        pool.close()
+    }
+
+    /** The follower's histogram of one slot is the newest-frame histogram when that slot is the newest. */
+    @Test
+    fun oneSlotHistogramsLikeTheNewest() {
+        val pool = RawRing.create(smallWidth, smallHeight, 4, frameIntervalNs)!!
+        ring = pool
+        val profile = SensorProfile(
+            blackLevel = intArrayOf(64, 64, 64, 64), whiteLevel = 1023,
+            cfaPattern = intArrayOf(0, 1, 1, 2),
+        )
+        var slot = -1
+        for (i in 1..3) {
+            slot = pool.push(sourceFrame(smallWidth, smallHeight, 100 * i), smallWidth * 2,
+                1_000_000_000L + i * frameIntervalNs, i.toLong())
+        }
+        val newest = IntArray(32)
+        val one = IntArray(32)
+        assertThat(pool.histogramNewest(newest, profile)).isTrue()
+        assertThat(pool.histogramSlot(slot, one, profile)).isTrue()
+        assertThat(one.toList()).isEqualTo(newest.toList())
+        // The slot before it is a different frame.
+        val other = IntArray(32)
+        assertThat(pool.histogramSlot((slot + 3) % 4, other, profile)).isTrue()
+        assertThat(other.toList()).isNotEqualTo(newest.toList())
+        // The one slot never pushed to holds nothing, and is not a frame.
+        val empty = (0 until 4).first { it != slot && it != (slot + 3) % 4 && it != (slot + 2) % 4 }
+        assertThat(pool.histogramSlot(empty, other, profile)).isFalse()
+        assertThat(pool.histogramSlot(-1, other, profile)).isFalse()
+    }
+
     @Test
     fun rowStrideLargerThanTheRowIsUnpacked() {
         // Cameras are free to pad rows; the pool stores them packed, and the

@@ -180,7 +180,8 @@ object Haptics {
 
 | Context | Trigger | Haptic Call | Rationale |
 |---|---|---|---|
-| Shutter pressed | `onClick` on shutter button | `Haptics.shutter` | Strong confirmation: a photograph was taken |
+| Shutter pressed | `onClick` on shutter button | `Haptics.shutter` | Strong confirmation: a photograph was taken. On the ZSL path it fires the moment after the frames are locked (`ZslCapture.take`, microseconds into the press), so the frames it could blur are already in the ring's hand and the develop that follows is not waited on; on the sequential path it fires at the press, before the burst starts. With the self-timer it fires at the press and the frames are locked when the countdown ends |
+| Shutter pressed, ring empty | `onClick` with no frame ready | `Haptics.reject` | Nothing was taken; the status says so |
 | Self-timer tick | Each countdown second | `Haptics.tick` | Light metronome, not distracting |
 | Mode toggle | GUARD, 2X, LOCAL TONE, HISTOGRAM, DNG, SUPER RES 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
 | Cycle value | FRAMES, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
@@ -189,9 +190,9 @@ object Haptics {
 | Slider at detent | ISO at round number (100, 200, ...), EV at 0 | `Haptics.tick` | Subtle stop point, not every pixel of drag |
 | Lens switch | New lens selected in strip | `Haptics.segment` | Camera is physically switching |
 | Super Res anchored | First frame taken; the dots appear | `Haptics.segment` | The capture has begun; same detent as the lens switch that preceded it |
-| Super Res node taken | Reticle has held still on a dot through the stability gate; the burst is in hand and the node is done | `Haptics.confirm` | "Got it" — eyes are on the subject. Fires *after* the burst is snapshotted from the ring, never before: the frames a haptic could blur are already in hand. This is the photograph; nothing afterwards can un-take it |
+| Super Res node taken | Reticle has held still on a dot through the stability gate, the fresh frames exposed after the lock are in hand and the node is done | `Haptics.confirm` | "Got it" — eyes are on the subject. Fires *after* the last fresh frame is exposed and the burst is snapshotted, never before or during: the frames a haptic could blur are already in hand. Nothing fires at the lock itself, which only begins the exposure. This is the photograph; nothing afterwards can un-take it |
 | Super Res tile placed | The node's tile is on the canvas, by its pixels or by the attitude | `Haptics.tick` | Light: the canvas caught up; which tier placed it is the log's business |
-| Super Res tile rejected | The burst could not become a tile at all: the ring was empty, the develop failed, the canvas would not take it | `Haptics.reject` | "Try again" — also eyes on subject; the dot flashes red for a beat. Never for a registration that found nothing: that tile is placed by the attitude |
+| Super Res tile rejected | The burst could not become a tile at all: the hand did not hold for the fresh frames within 2.5 s, the ring was empty, the develop failed, the canvas would not take it | `Haptics.reject` | "Try again" — also eyes on subject; the dot flashes red for a beat. Never for a registration that found nothing: that tile is placed by the attitude |
 | Mosaic pan too fast | Frame centre moved most of a tile between polls | `Haptics.reject` | Rate-limited to one per 800 ms; a fast pan is a blurred frame everywhere along it |
 | Mosaic complete | Every node captured | `Haptics.confirm` | The mosaic has finished itself |
 | Error action | Tapping a disabled control, invalid state | `Haptics.reject` | Something went wrong |
@@ -533,11 +534,31 @@ Merged CFA (uint16, Bayer-patterned)
 Output: 8-bit sRGB ARGB int array -> JPEG via libjpeg-turbo
 ```
 
+**The optics, and the border.** The geometric corrections -- Brown–Conrady
+undistortion and the lateral aberration rescale -- run as one fused gather
+on the sRGB buffer beside steps 10 and 11 (`Optics.kt`, `Optics.cpp`; the
+compromise of running them there rather than after step 5 is stated on
+`Optics`). A gather that expands the field reads from beyond the frame
+along every edge, and a channel rescaled for aberration reads a few pixels
+further. The border is read as a *mirror*: a position inside the frame
+reads as it is, a position `d` past an edge reads `d` inside it, and past
+the mirror's reach it is clamped (`LensDistortion.reflectIntoFrame`;
+`Optics.cpp` the same, four lanes at a time). It was an edge clamp, and the
+sixth field test's pictures carried a band of vertical ribs along the top:
+the edge row -- which the demosaic interpolates with a 3×3 gather within
+two pixels of the border, and which alternates in colour column by column
+-- repeated downward into every row the correction overshot. Repeating any
+row is a rib; a mirror repeats nothing and is continuous with the frame at
+the edge, so an edge row the correction does not move stays itself (which
+an inward margin would not allow -- the identity model has to reproduce
+the image exactly, `LensDistortionTest`). `OpticsParityTest` holds the two
+implementations together at the border as everywhere.
+
 **Future insertions (marked by phase):**
 
 - **After step 5, before step 6 (Phase 2):** Geometric lens distortion
   correction (Brown-Conrady undistortion) and lateral CA correction (per-channel
-  radial warp).
+  radial warp) -- currently beside steps 10–11, see above.
 - **Replacing step 5 (Phase 3):** Sub-pixel kernel accumulation, which produces
   full colour at 2x resolution and removes the demosaic entirely for bursts that
   take that path. See §3.6, and §3.6.5 for what the chain becomes.
@@ -1044,11 +1065,39 @@ canvas between polls, allowed what the ceiling would move it in the same
 time -- `omega_max · Δt · pixelsPerRadian · tileScale`, never more than the
 lock radius -- so the two measures agree by construction (`MosaicGuide.configureGate`).
 Where the lens is unknown the allowance is 2% of a tile per 100 ms. The hold
-is the settle time of steady polls in a row, at least three of them: 170 ms
-(from 250), stretched to cover the burst (`settleFor`: frames × interval +
-40 ms), since the burst is the ring's newest frames and the hold *is* the
-frames' exposure window. The ring fills in proportion and the burst fires
-itself; there is nothing to press.
+is the settle time of steady polls in a row, at least three of them: 150 ms
+(from 250, then 170). It no longer stretches to cover the burst, because
+the burst is no longer the ring's newest frames -- see the next paragraph.
+The ring fills in proportion and the burst begins itself; there is nothing
+to press.
+
+**The burst is exposed after the lock, not before it.** For four field tests
+the lock took the ring's newest frames, and the newest frames in a
+zero-shutter-lag ring at the moment of the lock were exposed a frame or
+three *before* it -- the raw frame reaches the ring some 60–100 ms after
+its exposure -- while the hand was still arriving. The capture felt
+instantaneous because it was: nothing was exposed for it, and the tiles
+carried the approach's blur however still the hand was afterwards. The
+lock now *begins* the burst (`MosaicCapture.Collecting`). Not a frame in the
+ring is taken. The runner records the moment on the sensors' clock
+(`SENSOR_TIMESTAMP` is on `elapsedRealtimeNanos` where
+`SENSOR_INFO_TIMESTAMP_SOURCE` is realtime; elsewhere the newest frame's
+stamp plus one) and waits for `tileFrames` ready frames whose exposure
+began at or after it (`RawRing.readyCountSince`), polling at 33 ms with the
+gate held through the wait: a gyroscope peak past the ceiling discards the
+frames exposed during it and restarts the count; the reticle leaving the
+radius gives the node back (`MosaicGuide.release`: pending again, no red,
+no beat); `COLLECT_TIMEOUT_MILLIS` (2.5 s) without the frames rejects it
+with "hold still for the burst". Then the newest `tileFrames` are
+snapshotted -- they are the fresh ones, being the newest -- the node is
+done, `CONFIRM` fires (after the last frame is exposed, so the motor cannot
+reach it), and the log says how long after the lock the first frame was
+exposed. The screen draws the exposure as the lock ring filling a second
+time in `Confirm` ink (`MosaicGuideView.exposeProgress`, fresh over wanted)
+with the hint `EXPOSING · HOLD`; a turn empties it and it fills again.
+Five frames at 30 fps is 165 ms plus the delivery latency: some 250 ms the
+hand holds for on purpose, which is the deliberate exposure the field test
+asked to feel.
 
 **The radius is the radius.** In and out at one lock radius, five percent
 of a tile, for every node in every state; see the retired magnet above. A
@@ -1061,11 +1110,12 @@ hold is 150 ms, so it is not a costly restart.
 can be approached or locked. The guidance draws it as the one target, with
 its ring and, when it is off the reticle, an arrow from the reticle's edge
 toward it; the nodes taken are dim checkmarks; the nodes to come are faint
-dots. The capture sequence is: the ring fills over the hold (150 ms, or the
-burst's span plus a poll where that is longer -- five frames is 200 ms);
-the burst is snapshotted, the node is done, `CONFIRM` fires; a pulse expands
-from the reticle for `LATCH_MILLIS` (150 ms, driven by the view's `latch`
-field the runner advances every poll); the arrow turns to the next target.
+dots. The capture sequence is: the ring fills over the hold (150 ms); the
+ring fills again, in `Confirm`, as the fresh frames are exposed (about 250
+ms); the burst is snapshotted, the node is done, `CONFIRM` fires; a pulse
+expands from the reticle for `LATCH_MILLIS` (150 ms, driven by the view's
+`latch` field the runner advances every poll); the arrow turns to the next
+target.
 Four identical dots asked the user which to go to, and a choice is a
 hesitation.
 
@@ -1082,7 +1132,12 @@ factor is one. The preview is constrained to the raw stream's own aspect
 4–6 frames per tile: fewer is grain from a small telephoto sensor at high
 ISO, more is a hold longer than a hand keeps. The merge is logged per tile
 -- `merged N of M frames, mean contribution` -- and on the live device test
-merges 4 of 4 at 0.95–0.97.
+merges 4 of 4 at 0.95–0.97. Each frame's ring slot is released the moment
+the merge has read it (`RingSnapshot.release`), so the ring refills under
+the merge and the next node's fresh frames have somewhere to land; the
+old rule that closing one snapshot freed every locked slot, which made the
+guidance wait for the previous tile's merge before taking the next burst,
+is gone (`RawRing.Unlock(slots)` is per slot).
 
 **The mesh.** A tile's fine band is sampled bilinearly onto the canvas, and
 a projected sample almost never lands on a tile pixel centre; where it does
@@ -1094,6 +1149,34 @@ the canvas's -- the fifth field test's "4K TV screen" over every dark tile.
 side of the point (a half-pixel box prefilter), which makes the variance
 nearly uniform; the detail is a quarter-pixel wider, which the sharpen
 already paid.
+
+**The cross-hatch, and the noise floor.** The prefilter takes most of the
+mesh out, not all. Where two tiles overlap, each turned a little against
+the other by the hand, two residual meshes at two orientations lie over
+each other and the eye reads the sum as weave -- the sixth field test's
+cross-hatching across every shadowed overlap at ISO 3200. It lives in the
+detail band alone; the coarser bands are box means of 16 and 256 pixels
+and carry none of it. So the blend has a *noise floor*
+(`MosaicCanvas.SetNoiseFloor`, applied in `Compose`): the finest band's own
+detail, `A_0 − up(B_1)`, is scaled back by the product of three factors --
+the ISO the lock pinned (`MosaicCanvas.detailAttenuationFor`: nothing at
+800 and under, the whole allowance from 1600 up, a straight ramp between;
+`MosaicSession.lockNoise` sets it with the lock), how much of an overlap
+the pixel is (the log₂ of the wide level's accumulated weight at the
+nearest coarse pixel: one tile at full weight is 0, two is 1), and how dark
+the pixel is (the coarse level's luminance, full below sRGB 48, nothing
+above 144, a smoothstep between). Where all three are full,
+`MAX_DETAIL_ATTENUATION` = half the fine band goes, and the shadow is the
+4×4 mean plus half its detail -- at ISO 3200 half its noise, and at the
+scale a mosaic lands at none of its picture. Everywhere else nothing
+changes: in a single tile's own ground the overlap factor is zero and the
+subtraction is of zero, so the blend's A/A null holds with the floor set
+(`MosaicBlendDeviceTest.theNoiseFloorChangesNothingWhereTilesDoNotOverlap`,
+to the byte), and two grainy shadows that overlap lose at least a fifth
+of their grain in the overlap and none outside it
+(`theNoiseFloorQuietensTheShadowedOverlapAndOnlyThat`). This is a decision
+about which of two tiles' noise to keep less of where they meet; it is not
+a denoise of the picture and it does not run on a single capture.
 
 **Why the old rule fired.** "Inside the radius for 250 ms, drift under a
 radius" -- with the tracker at the time polling every 300 ms, the second
@@ -1489,6 +1572,90 @@ photograph is.
 
 ---
 
+### 3.7 The Shutter: Zero Lag, and the Develop Behind the Viewfinder
+
+**Two calls.** `ZslCapture.take(stream, frames)` is the shutter: it locks
+the newest frames in the ring (`RawRing.lockNewest`, a mutex and a scan of
+at most 32 entries) and returns, in microseconds, on the thread that
+pressed the button. The frames were exposed before the press; there is
+nothing to wait for. `ZslCapture.develop(shot)` is everything after -- the
+merge, the render, the write -- and the screen runs it on a worker, one
+shot at a time in the order taken (`CameraScreen`'s `developQueue`, a
+`Channel<PendingShot>` consumed on `Dispatchers.Default` under
+`NonCancellable`: a shot in hand is a photograph owed). The viewfinder is
+never paused, because it never was -- the preview is a separate output --
+and the shutter is never *busy* for a ZSL shot: `busy` is the sequential
+camera's and the self-timer's. The haptic fires after the lock, so the
+frames it could blur are already in the ring's hand. `captureAndMerge` is
+the two in one call, for a caller that wants to wait (the device tests).
+
+**The ring under a develop.** Eight of twelve slots locked for the half
+second a merge takes would leave the next press two frames. So the merge
+gives each frame's slot back the moment it has read it
+(`RingSnapshot.release(i)` → `RawRing.Unlock(slots, n)`, per slot; the
+reference's after `setReference` copied it), and the camera refills under
+the merge: a press half a second later finds a full burst, a press a
+tenth of a second later finds four or five
+(`ZslStreamDeviceTest.backToBackShotsBothDevelopAndTheRingRefillsUnderTheFirst`).
+Two snapshots hold their own slots; closing one frees none of the
+other's (`RawRingTest.twoSnapshotsHoldTheirOwnSlots`). Under the 2× canvas
+the slots are held to the end, because the canvas reads every frame again
+once the burst is aligned. And the ring's mapping outlives its close while
+a snapshot holds slots -- the lens switched under a developing shot closes
+the stream, and freeing the pages under the merge would take the process
+down -- the last release destroys it
+(`RawRingTest.closingTheRingWithASnapshotHeldKeepsTheMappingUntilItIsReleased`).
+
+**How many frames.** AUTO takes the burst setting up to
+`CaptureModes.AUTO_MAX_FRAMES` = 10 however deep the ring: signal-to-noise
+grows as √N, so twenty frames over ten is half a stop for a burst window
+twice as long -- twice the hand's drift for the alignment to chase, twice
+the chance the subject moved. NIGHT, on a scene that is still, takes what
+the ring has. ACTION takes four. AUTO that the histogram resolves to night
+(a dark scene) takes night's guard -- none -- but AUTO's ten frames and
+AUTO's cap: the mode the user chose says whose hand is holding the phone,
+and NIGHT chosen by name is the still scene.
+
+**The shutter cap.** AUTO's frames are exposed no longer than
+`CaptureModes.AUTO_EXPOSURE_NS` = 1/60 s (ACTION's 1/250 s; NIGHT's 1/4 s
+is longer than the frame and so no cap). It was 1/30 s -- the frame
+interval, which is to say no cap at all -- and the sixth field test's dusk
+pictures were soft in every frame of the burst: the camera's meter
+lengthens the shutter before it raises the gain, and a hand does not hold
+1/30 s on a 24mm lens. The merge takes the noise out of eight fast frames;
+it cannot take the blur out of eight slow ones. Camera2 has no "longest
+exposure" for auto-exposure to honour, and the frame-rate range that
+bounds the frame cannot tighten on a stream that reads out at 30 fps, so
+the cap is a *follower* (`ShutterCap`, pure; `ZslRawStream.setExposureCap`
+and `onFramePushed`, on the reader thread as each frame lands):
+
+```
+Auto:  the meter has the exposure. Each frame's result is read; when its
+       exposure runs past cap · 1.05, the light it chose (ISO · t) is
+       re-split as (ISO · t / cap, cap), the frame's mean level from the
+       ring's histogram (green sites, linear) becomes the target, and the
+       request goes manual.
+Held:  each frame exposed at the held values (within 6%; after eight that
+       are not, the frame is taken as the hold's at the values the sensor
+       reports) is measured; outside a tenth of a stop of the target the
+       ISO alone is corrected, at most a stop and a half a frame.
+       ISO' would fall under 0.8 · ISO_min → the meter has the exposure
+         back (it will keep the shutter inside the cap by itself; if it
+         asks for more, it is taken again).
+       ISO' would run past ISO_max → the cap gives way: ISO_max, and the
+         exposure the light needs, up to the frame. A dark frame is not a
+         photograph either; once the gain is spent the blur is the smaller
+         loss. (The same decision as the mosaic's `sweepExposure`.)
+```
+
+The highlight guard speaks to the meter through exposure compensation,
+which a held exposure does not hear; while the cap holds, a change in the
+guard's pull moves the target by the same stops instead
+(`ShutterCap.retarget`). A manual exposure is the photographer's and the
+cap does nothing; a mosaic's lock takes the exposure first and the cap
+follows afresh on unlock. `ShutterCapTest` walks the engage, the hold, the
+release with hysteresis, the dark end and the guard.
+
 ## Appendix: File Inventory by Subsystem
 
 ### Pipeline (app/src/main/java/dev/multiframe/camera/pipeline/)
@@ -1500,7 +1667,7 @@ photograph is.
 | **2x canvas** | `SubPixelAccumulator.kt` (reference), `NativeSubPixel.kt` (strips, and the develop entry points), `SubPixelCoverage.kt` (the prediction and its bounds), `LinearDeveloper.kt` (the linear develop, reference), `SuperResCapture.kt` (the outputs) |
 | **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `BilateralGrid.kt` (local tone, reference), `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
 | **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` |
-| **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt` |
+| **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt`, `ShutterCap.kt` (shutter priority under the meter, §3.7) |
 | **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `LensProfile.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |
 | **DCG calibration** | `DcgCalibration.kt`, `DcgProfiler.kt`, `DcgCalibrationStore.kt` |
 | **Super Res (mosaic)** | `SuperResMachine.kt` (the mode's lifecycle), `MosaicSession.kt`, `MosaicCapture.kt` (the guided runner), `ImuGuidance.kt` (the dots, from the attitude), `MotionSensor.kt` (gyroscope and rotation vector), `StabilityGate.kt` (the ceiling, the shutter floor), `MosaicGuide.kt` (the lock rule, the magnet), `MosaicPlanner.kt` (presets, regions, nodes), `MosaicAssembler.kt` (anchor, locate, place), `MosaicCanvas.kt`, `MosaicRefiner.kt` |
@@ -1519,8 +1686,8 @@ photograph is.
 | `SubPixel.cpp` | Sub-pixel kernel accumulation onto a 2x canvas, strip-major over an mmap output, tiled for cache residency (§3.6). Held to `SubPixelAccumulator.kt` within one 16-bit count. Also the JNI for the canvas's develop. |
 | `LinearDevelop.cpp` / `.h` | The develop for the 2x canvas: black, shading, white balance, matrix and tone from `Tone.h`, sharpen on band-local luma, into three-byte RGB with the canvas released strip by strip, then the strip encoder (§3.6.5). Held to `LinearDeveloper.kt`. |
 | `Align.cpp` | Native 4-level pyramid tile alignment with equiangular sub-pixel refinement at the finest level (§3.3.1). Held to `Aligner.kt` at zero differing tiles. |
-| `RingBuffer.cpp` / `.h` | mmap-backed AHardwareBuffer ring buffer |
-| `Mosaic.cpp` / `.h` | Native mosaic canvas: running-mean compositing in three frequency bands (§3.4.3), flattening and compression from its own pages |
+| `RingBuffer.cpp` / `.h` | mmap-backed raw frame ring: push, per-slot lock and release, fresh-frame counts by timestamp, in-place histograms (§3.7) |
+| `Mosaic.cpp` / `.h` | Native mosaic canvas: running-mean compositing in three frequency bands (§3.4.3), the noise floor on the detail band in shadowed overlaps (§3.4.4), flattening and compression from its own pages |
 | `Rotate.cpp` | NEON-accelerated image rotation |
 | `Jpeg.cpp` / `.h` | libjpeg-turbo strip encoder, parallel; the header exposes it to the linear develop for RGB from native memory |
 | `GpuCrossing.cpp` | Vulkan crossing cost benchmark (not production) |

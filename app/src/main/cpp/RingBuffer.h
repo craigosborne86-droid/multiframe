@@ -112,15 +112,31 @@ public:
     int LockNewest(int count, int* outSlots, int64_t* outTimestamps, int64_t* outFrameNumbers);
 
     /**
-     * Releases every locked slot. The frames are discarded rather than
+     * Releases the given locked slots. The frames are discarded rather than
      * returned to the ready pool: a snapshot consumes what it locked.
+     *
+     * Per slot rather than all at once, so that two snapshots can be in hand
+     * together -- a shot developing in the background while the next is
+     * taken -- and a merge can give back each frame the moment it has read
+     * it, rather than holding the whole burst until the last is merged. A
+     * slot that is not locked is left alone.
      */
-    void Unlock();
+    void Unlock(const int* slots, int count);
 
     int lockedCount() const;
 
     /** Frames available to a snapshot right now. */
     int readyCount() const;
+
+    /**
+     * Frames available to a snapshot whose exposure began at or after
+     * [sinceNs] on the sensor's clock: the frames a mosaic node waits for,
+     * exposed after the hold on it was confirmed and not during the approach.
+     */
+    int readyCountSince(int64_t sinceNs) const;
+
+    /** The sensor timestamp of the newest ready frame, or 0 with none. */
+    int64_t newestTimestampNs() const;
 
     /**
      * Histograms the newest ready frame without consuming it.
@@ -135,6 +151,14 @@ public:
      */
     bool HistogramNewest(int* bins, int binCount, int stride,
                          const int* black, int white, const int* cfa) const;
+
+    /**
+     * The same histogram of one ready slot: the frame just pushed, for the
+     * shutter cap's follower, which needs the level of the frame whose
+     * capture result it holds. False when the slot is not a ready frame.
+     */
+    bool HistogramSlot(int slot, int* bins, int binCount, int stride,
+                       const int* black, int white, const int* cfa) const;
 
     /**
      * Writes a downscaled luma view of the newest frame, without consuming it.
@@ -166,6 +190,10 @@ public:
 
 private:
     RawRing() = default;
+
+    /** The histogram body, over a slot the caller has checked. Caller holds the mutex. */
+    void histogramOf(int slot, int* bins, int binCount, int stride,
+                     const int* black, int white, const int* cfa) const;
 
     struct Slot {
         SlotState state = SlotState::kFree;

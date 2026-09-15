@@ -224,11 +224,135 @@ class ZslRawStream private constructor(
     private var lastSettings: ManualSettings? = null
     private var lastCaps: CameraCapabilities? = null
 
+    /**
+     * The shutter cap, where the capture mode has set one: auto-exposure is
+     * let run until it asks for a frame longer than the cap, and the frame
+     * is then taken at the cap with the gain making up the light. See
+     * [ShutterCap] for the rule, [setExposureCap] for who sets it, and
+     * [onFramePushed] for the follower.
+     */
+    @Volatile
+    private var shutterCap: ShutterCap? = null
+    private val capBins = IntArray(64)
+    private var lastCapLog = 0L
+
+    /** The exposure the cap is holding, or null while the camera's meter has it or there is no cap. */
+    val heldExposureOrNull: ShutterCap.Held? get() = if (locked) null else shutterCap?.held
+
+    /**
+     * Sets the longest exposure a frame may have under auto-exposure, or
+     * lifts it with zero. A cap at or past the frame interval is no cap:
+     * the stream's own rate already bounds the frame there. Needs a sensor
+     * that can be told its exposure and its gain; on one that cannot, the
+     * meter keeps the exposure and nothing changes.
+     */
+    fun setExposureCap(capNs: Long, settings: ManualSettings, caps: CameraCapabilities) {
+        if (closed) return
+        val current = shutterCap
+        if ((current?.capNs ?: 0L) == capNs) return
+        val wasHeld = current?.isHeld == true
+        val isoMin = caps.isoMin
+        val isoMax = caps.isoMax
+        shutterCap = if (capNs > 0L && capNs < config.minFrameDurationNs && caps.hasManualSensor &&
+            isoMin != null && isoMax != null && isoMax > isoMin
+        ) {
+            ShutterCap(capNs, isoMin, isoMax, caps.exposureMinNs ?: 0L, config.minFrameDurationNs)
+        } else null
+        Log.i(TAG, if (shutterCap != null) "shutter cap: 1/%d s".format((1e9 / capNs).toInt()) else "shutter cap lifted")
+        // A hold that was in force goes back to the meter with the old cap;
+        // the new one takes the exposure again if the meter overruns it.
+        if (wasHeld) applySettings(settings, caps)
+    }
+
+    /**
+     * The follower: every frame the ring takes, on the reader thread. While
+     * the meter has the exposure, a frame exposed past the cap hands it to
+     * the cap; while the cap holds, the frame's level corrects the gain.
+     * Nothing here while a mosaic has the exposure locked or the
+     * photographer has set it by hand, and nothing on a stream without a cap.
+     */
+    internal fun onFramePushed(slot: Int, timestampNs: Long) {
+        val cap = shutterCap ?: return
+        if (closed || locked) return
+        val s = lastSettings ?: return
+        val c = lastCaps ?: return
+        if (s.manualExposureActive(c)) return
+        // The frame's own result, or the newest within a frame of it: the
+        // level and the settings have to describe the same exposure, or
+        // the correction is about the wrong frame.
+        val result = resultNear(timestampNs) ?: return
+        // Under dual conversion gain only the low frames meter.
+        if (dcg && result.request.tag == TAG_HIGH) return
+        val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return
+        val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return
+
+        if (!cap.isHeld) {
+            // Cheap first: only a frame past the cap costs a histogram.
+            if (exposure <= (cap.effectiveCapNs * ShutterCap.ENGAGE_MARGIN).toLong()) return
+            // And only a frame the meter has settled on: taken mid-search,
+            // the level the hold would keep is the level of a frame the
+            // meter itself was about to correct.
+            val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+            if (aeState != null && aeState != CameraMetadata.CONTROL_AE_STATE_CONVERGED &&
+                aeState != CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
+            ) return
+            if (!ring.histogramSlot(slot, capBins, sensorProfile)) return
+            val held = cap.onAutoResult(iso, exposure, ShutterCap.meanLevel(capBins)) ?: return
+            Log.i(
+                TAG,
+                "shutter cap: meter at 1/%d s ISO %d; holding 1/%d s at ISO %d, level %.3f".format(
+                    (1e9 / exposure).toInt(), iso, (1e9 / held.exposureNs).toInt(), held.iso, held.targetLevel,
+                ),
+            )
+            submitRepeating(s, c)
+            return
+        }
+
+        if (!ring.histogramSlot(slot, capBins, sensorProfile)) return
+        when (val step = cap.onHeldFrame(iso, exposure, ShutterCap.meanLevel(capBins))) {
+            ShutterCap.Step.Keep -> Unit
+            is ShutterCap.Step.Adjust -> {
+                val now = System.currentTimeMillis()
+                if (now - lastCapLog > 1000L) {
+                    lastCapLog = now
+                    Log.i(
+                        TAG,
+                        "shutter cap: 1/%d s at ISO %d%s".format(
+                            (1e9 / step.held.exposureNs).toInt(), step.held.iso,
+                            if (cap.stretched) " (stretched for the light)" else "",
+                        ),
+                    )
+                }
+                submitRepeating(s, c)
+            }
+            ShutterCap.Step.Release -> {
+                Log.i(TAG, "shutter cap: bright enough for the meter; releasing")
+                submitRepeating(s, c)
+            }
+        }
+    }
+
+    /** The result for [timestampNs] exactly, else the newest within a frame and a half of it, else null. */
+    private fun resultNear(timestampNs: Long): TotalCaptureResult? = synchronized(resultLock) {
+        for (i in resultSlots.indices) {
+            if (resultStamps[i] == timestampNs) return resultSlots[i]
+        }
+        val newest = newestLocked() ?: return null
+        val stamp = newest.get(CaptureResult.SENSOR_TIMESTAMP) ?: return null
+        return if (kotlin.math.abs(stamp - timestampNs) <= config.minFrameDurationNs * 3 / 2) newest else null
+    }
+
     val ringCapacity: Int get() = ring.capacity
     val ringReservedBytes: Long get() = ring.reservedBytes
 
     /** Frames a shutter press could take right now. */
     fun readyFrames(): Int = if (closed) 0 else ring.readyCount()
+
+    /** Frames a snapshot could take that were exposed at or after [sinceNs] on the sensor's clock. */
+    fun readyFramesSince(sinceNs: Long): Int = if (closed) 0 else ring.readyCountSince(sinceNs)
+
+    /** The sensor timestamp of the newest frame in the ring, or 0 with none. */
+    fun newestFrameTimestampNs(): Long = if (closed) 0L else ring.newestTimestampNs()
 
     /** Largest burst this ring can serve while still accepting incoming frames. */
     val maxBurst: Int get() = RawRingBudget.burstForDepth(ring.capacity)
@@ -292,8 +416,12 @@ class ZslRawStream private constructor(
             dcgRatio = if (dcg) DCG_RATIO else 1,
         )
         if (index != evOverride) {
+            val before = pullStops
             evOverride = index
             pullStops = index * caps.evStep
+            // A held exposure does not hear exposure compensation; its
+            // target moves by the same stops instead.
+            shutterCap?.retarget(pullStops - before)
             Log.i(
                 TAG,
                 "highlight guard: clipped %.3f, pulling %.2f stops (EV index %d)".format(
@@ -390,6 +518,9 @@ class ZslRawStream private constructor(
         if (closed || !locked) return
         locked = false
         sweepExposure = null
+        // The cap's hold, if it had one, is from before the mosaic; the
+        // meter has the exposure again and the cap follows it afresh.
+        shutterCap?.release()
         if (dcgSuspended) {
             dcgSuspended = false
             dcg = true
@@ -513,8 +644,10 @@ class ZslRawStream private constructor(
     /** Releases the guard's hold on exposure, back to what the user asked for. */
     fun clearHighlightProtection(caps: CameraCapabilities, settings: ManualSettings) {
         if (closed || evOverride == null) return
+        val before = pullStops
         evOverride = null
         pullStops = 0f
+        shutterCap?.retarget(-before)
         applySettings(settings, caps)
     }
 
@@ -797,15 +930,20 @@ class ZslRawStream private constructor(
             builder.set(CaptureRequest.CONTROL_AWB_LOCK, true)
         }
 
-        // The mosaic's floored shutter is a manual exposure the mosaic chose.
+        // The mosaic's floored shutter is a manual exposure the mosaic chose;
+        // the cap's held shutter is one the capture mode chose. The mosaic's
+        // lock comes first: it has the whole exposure.
         val pinned = if (locked) sweepExposure else null
-        if (settings.manualExposureActive(caps) || pinned != null) {
+        val held = if (!locked) shutterCap?.held else null
+        val chosenIso = pinned?.iso ?: held?.iso
+        val chosenExposure = pinned?.exposureNs ?: held?.exposureNs
+        if (settings.manualExposureActive(caps) || chosenIso != null) {
             builder.set(
                 CaptureRequest.CONTROL_AE_MODE,
                 android.hardware.camera2.CameraMetadata.CONTROL_AE_MODE_OFF,
             )
-            builder.set(CaptureRequest.SENSOR_SENSITIVITY, pinned?.iso ?: settings.effectiveIso(caps))
-            val exposure = pinned?.exposureNs ?: settings.effectiveExposureTimeNs(caps)
+            builder.set(CaptureRequest.SENSOR_SENSITIVITY, chosenIso ?: settings.effectiveIso(caps))
+            val exposure = chosenExposure ?: settings.effectiveExposureTimeNs(caps)
             builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
             // Frame duration must cover the exposure or the stream slows to it.
             builder.set(
@@ -1003,6 +1141,10 @@ class ZslRawStream private constructor(
             // Frames are numbered as they are taken, so a ring snapshot can be
             // traced back to the order they arrived in.
             val delivered = AtomicLong(0)
+            // The stream is built after its reader; the shutter cap's
+            // follower reads each frame as it lands, so the reader reaches
+            // it through this once it exists.
+            val onPushed = java.util.concurrent.atomic.AtomicReference<((Int, Long) -> Unit)?>(null)
             reader.setOnImageAvailableListener({ r ->
                 val image = try {
                     r.acquireNextImage()
@@ -1010,10 +1152,13 @@ class ZslRawStream private constructor(
                     Log.w(TAG, "reader exhausted", e)
                     null
                 } ?: return@setOnImageAvailableListener
+                var slot = -1
+                var stamp = 0L
                 try {
                     val plane = image.planes[0]
-                    ring.push(
-                        plane.buffer, plane.rowStride, image.timestamp,
+                    stamp = image.timestamp
+                    slot = ring.push(
+                        plane.buffer, plane.rowStride, stamp,
                         delivered.incrementAndGet(),
                     )
                 } catch (e: Exception) {
@@ -1021,6 +1166,7 @@ class ZslRawStream private constructor(
                 } finally {
                     image.close()
                 }
+                if (slot >= 0) onPushed.get()?.invoke(slot, stamp)
             }, readerHandler)
 
             val device = try {
@@ -1062,6 +1208,7 @@ class ZslRawStream private constructor(
                 device, session, reader, ring, previewSurface,
                 readerThread, cameraThread, config, characteristics, lens,
             )
+            onPushed.set { slot, stamp -> stream.onFramePushed(slot, stamp) }
 
             return try {
                 stream.applySettings(settings, caps)

@@ -240,10 +240,13 @@ int RawRing::LockNewest(int count, int* outSlots, int64_t* outTimestamps,
     return n;
 }
 
-void RawRing::Unlock() {
+void RawRing::Unlock(const int* slots, int count) {
     std::lock_guard<std::mutex> guard(mutex_);
-    for (int i = 0; i < capacity_; ++i) {
-        Slot& s = slots_[static_cast<size_t>(i)];
+    if (slots == nullptr) return;
+    for (int i = 0; i < count; ++i) {
+        const int slot = slots[i];
+        if (slot < 0 || slot >= capacity_) continue;
+        Slot& s = slots_[static_cast<size_t>(slot)];
         if (s.state != SlotState::kLocked) continue;
         // Freed, not merely unlocked. A snapshot consumes its frames: they have
         // been merged, and by the time the merge finishes they are seconds old.
@@ -255,8 +258,8 @@ void RawRing::Unlock() {
         s.sequence = -1;
         s.timestampNs = 0;
         s.frameNumber = -1;
+        if (lockedCount_ > 0) --lockedCount_;
     }
-    lockedCount_ = 0;
 }
 
 int RawRing::lockedCount() const {
@@ -271,6 +274,26 @@ int RawRing::readyCount() const {
         if (slots_[static_cast<size_t>(i)].state == SlotState::kReady) ++n;
     }
     return n;
+}
+
+int RawRing::readyCountSince(int64_t sinceNs) const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    int n = 0;
+    for (int i = 0; i < capacity_; ++i) {
+        const Slot& s = slots_[static_cast<size_t>(i)];
+        if (s.state == SlotState::kReady && s.timestampNs >= sinceNs) ++n;
+    }
+    return n;
+}
+
+int64_t RawRing::newestTimestampNs() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    int64_t newest = 0;
+    for (int i = 0; i < capacity_; ++i) {
+        const Slot& s = slots_[static_cast<size_t>(i)];
+        if (s.state == SlotState::kReady && s.timestampNs > newest) newest = s.timestampNs;
+    }
+    return newest;
 }
 
 bool RawRing::HistogramNewest(int* bins, int binCount, int stride,
@@ -289,28 +312,54 @@ bool RawRing::HistogramNewest(int* bins, int binCount, int stride,
         }
     }
     if (newest < 0) return false;
+    histogramOf(newest, bins, binCount, stride, black, white, cfa);
+    return true;
+}
 
+bool RawRing::HistogramSlot(int slot, int* bins, int binCount, int stride,
+                            const int* black, int white, const int* cfa) const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (base_ == nullptr || bins == nullptr || binCount <= 0) return false;
+    if (slot < 0 || slot >= capacity_) return false;
+    if (slots_[static_cast<size_t>(slot)].state != SlotState::kReady) return false;
+    histogramOf(slot, bins, binCount, stride, black, white, cfa);
+    return true;
+}
+
+void RawRing::histogramOf(int slot, int* bins, int binCount, int stride,
+                          const int* black, int white, const int* cfa) const {
     const auto* src = reinterpret_cast<const uint16_t*>(
-        base_ + static_cast<size_t>(newest) * slotBytes_);
+        base_ + static_cast<size_t>(slot) * slotBytes_);
     int lo = std::min(std::min(black[0], black[1]), std::min(black[2], black[3]));
     const float range = static_cast<float>(std::max(1, white - lo));
     const int step = std::max(1, stride);
 
     std::fill(bins, bins + binCount, 0);
     for (int y = 0; y < height_; y += step) {
-        for (int x = 0; x < width_; x += step) {
-            // Green sites only: half the sensor, and where the luminance is.
-            if (cfa[(y & 1) * 2 + (x & 1)] != 1) continue;
+        // Green sites only: half the sensor, and where the luminance is.
+        // Every row of a Bayer pattern has a green site at one of its two
+        // phases; the row starts there, and an even step keeps the phase.
+        // A version tested each sample's phase instead and, with an even
+        // step from column zero, only ever saw phase (0, 0): on a sensor
+        // whose (0, 0) is not green -- RGGB, BGGR -- the histogram was empty
+        // and the highlight guard had no scene to read.
+        const int rowPhase = (y & 1) * 2;
+        int x0 = -1;
+        for (int p = 0; p < 2; ++p) {
+            if (cfa[rowPhase + p] == 1) { x0 = p; break; }
+        }
+        if (x0 < 0) continue;
+        const int stepX = (step & 1) ? step + 1 : step;
+        for (int x = x0; x < width_; x += stepX) {
             const float lin =
                 (static_cast<float>(src[static_cast<size_t>(y) * width_ + x]) -
-                 black[(y & 1) * 2 + (x & 1)]) / range;
+                 black[rowPhase + (x & 1)]) / range;
             const int bin = std::clamp(
                 static_cast<int>(std::clamp(lin, 0.0f, 1.0f) * (binCount - 1)),
                 0, binCount - 1);
             bins[bin]++;
         }
     }
-    return true;
 }
 
 bool RawRing::LumaNewest(uint8_t* out, int outWidth, int outHeight,
@@ -543,9 +592,16 @@ Java_dev_multiframe_camera_pipeline_RawRing_nLockNewest(
 }
 
 JNIEXPORT void JNICALL
-Java_dev_multiframe_camera_pipeline_RawRing_nUnlock(JNIEnv*, jobject, jlong handle) {
+Java_dev_multiframe_camera_pipeline_RawRing_nUnlock(
+        JNIEnv* env, jobject, jlong handle, jintArray slots, jint count) {
     RawRing* ring = ringOf(handle);
-    if (ring != nullptr) ring->Unlock();
+    if (ring == nullptr || slots == nullptr || count <= 0) return;
+    const jsize have = env->GetArrayLength(slots);
+    const int n = std::min(static_cast<int>(have), static_cast<int>(count));
+    if (n <= 0) return;
+    std::vector<int> which(static_cast<size_t>(n));
+    env->GetIntArrayRegion(slots, 0, n, which.data());
+    ring->Unlock(which.data(), n);
 }
 
 /**
@@ -596,6 +652,19 @@ JNIEXPORT jint JNICALL
 Java_dev_multiframe_camera_pipeline_RawRing_nReadyCount(JNIEnv*, jobject, jlong handle) {
     RawRing* ring = ringOf(handle);
     return ring == nullptr ? 0 : ring->readyCount();
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_multiframe_camera_pipeline_RawRing_nReadyCountSince(
+        JNIEnv*, jobject, jlong handle, jlong sinceNs) {
+    RawRing* ring = ringOf(handle);
+    return ring == nullptr ? 0 : ring->readyCountSince(static_cast<int64_t>(sinceNs));
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_multiframe_camera_pipeline_RawRing_nNewestTimestamp(JNIEnv*, jobject, jlong handle) {
+    RawRing* ring = ringOf(handle);
+    return ring == nullptr ? 0 : static_cast<jlong>(ring->newestTimestampNs());
 }
 
 JNIEXPORT jboolean JNICALL
@@ -676,6 +745,28 @@ Java_dev_multiframe_camera_pipeline_RawRing_nHistogramNewest(
 
     std::vector<int> bins(static_cast<size_t>(binCount));
     if (!ring->HistogramNewest(bins.data(), binCount, stride, black, white, cfa)) {
+        return JNI_FALSE;
+    }
+    env->SetIntArrayRegion(outBins, 0, binCount, bins.data());
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_multiframe_camera_pipeline_RawRing_nHistogramSlot(
+        JNIEnv* env, jobject, jlong handle, jint slot, jintArray outBins, jint stride,
+        jintArray jblack, jint white, jintArray jcfa) {
+    RawRing* ring = ringOf(handle);
+    if (ring == nullptr) return JNI_FALSE;
+
+    const jsize binCount = env->GetArrayLength(outBins);
+    if (binCount <= 0) return JNI_FALSE;
+
+    int black[4], cfa[4];
+    env->GetIntArrayRegion(jblack, 0, 4, black);
+    env->GetIntArrayRegion(jcfa, 0, 4, cfa);
+
+    std::vector<int> bins(static_cast<size_t>(binCount));
+    if (!ring->HistogramSlot(slot, bins.data(), binCount, stride, black, white, cfa)) {
         return JNI_FALSE;
     }
     env->SetIntArrayRegion(outBins, 0, binCount, bins.data());

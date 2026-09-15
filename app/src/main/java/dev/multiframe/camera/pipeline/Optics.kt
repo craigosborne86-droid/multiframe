@@ -325,7 +325,10 @@ object Optics {
         }
     }
 
-    /** One channel, bilinear, clamped at the border, rounded to nearest even. */
+    /**
+     * One channel, bilinear, the border mirrored (see
+     * [LensDistortion.reflectIntoFrame]), rounded to nearest even.
+     */
     private fun sample(
         src: IntArray,
         width: Int,
@@ -335,8 +338,8 @@ object Optics {
         fy: Float,
         shift: Int,
     ): Int {
-        val cx = fx.coerceIn(0f, maxX.toFloat())
-        val cy = fy.coerceIn(0f, maxY.toFloat())
+        val cx = LensDistortion.reflectIntoFrame(fx, maxX)
+        val cy = LensDistortion.reflectIntoFrame(fy, maxY)
         val x0 = cx.toInt()
         val y0 = cy.toInt()
         val x1 = if (x0 < maxX) x0 + 1 else x0

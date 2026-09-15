@@ -295,6 +295,125 @@ class ZslStreamDeviceTest {
     }
 
     /**
+     * The shutter as two calls: the frames locked at the press, in
+     * microseconds, and the develop after -- with the next press taken
+     * while the first develops. The ring gives each slot back as the merge
+     * reads it, so under the first develop the camera refills, and the
+     * second shot, taken as soon as the first's merge has read its frames,
+     * is a burst and not two frames.
+     */
+    @Test
+    fun backToBackShotsBothDevelopAndTheRingRefillsUnderTheFirst() {
+        val s = openStream() ?: return
+        stream = s
+        assertThat(waitForFrames(s, 12)).isTrue()
+
+        val first = ZslCapture.take(s, 8)
+        assertThat(first.count).isAtLeast(6)
+        assertThat(first.handoverMicros).isLessThan(10_000)
+        // Pressed again at once: whatever is ready -- the ring had eight of
+        // its twelve locked a moment ago -- is a shot, not a refusal.
+        val second = ZslCapture.take(s, 8)
+        assertThat(second.count).isAtLeast(1)
+        Log.i(TAG, "back to back: ${first.count} then ${second.count} frames, ${s.readyFrames()} ready after both")
+
+        val results = runBlocking {
+            val r1 = ZslCapture.develop(context, s, first, rotationDegrees = 0, writeDng = false)
+            // The first's slots went back as it merged: the ring is full again.
+            val readyAfterFirst = s.readyFrames()
+            val third = ZslCapture.take(s, 8)
+            val r2 = ZslCapture.develop(context, s, second, rotationDegrees = 0, writeDng = false)
+            val r3 = ZslCapture.develop(context, s, third, rotationDegrees = 0, writeDng = false)
+            Triple(r1, r2, r3) to (readyAfterFirst to third.count)
+        }
+        val (r1, r2, r3) = results.first
+        val (readyAfterFirst, thirdCount) = results.second
+        Log.i(TAG, "back to back: first ${r1.message}; second ${r2.message}; third ${r3.message}; " +
+            "$readyAfterFirst ready after the first develop, third shot $thirdCount frames")
+
+        assertThat(r1.savedJpeg).isNotNull()
+        assertThat(r1.stats!!.framesMerged).isAtLeast(6)
+        assertThat(r2.savedJpeg).isNotNull()
+        assertThat(r3.savedJpeg).isNotNull()
+        // A shot taken after the first develop finds a full burst: the ring
+        // refilled under the merge, which is what the per-slot release buys.
+        // Minus the frame the second shot holds and the one in flight.
+        assertThat(thirdCount).isAtLeast(6)
+        assertThat(r3.stats!!.framesMerged).isAtLeast(6)
+        assertThat(s.stats().ring.droppedNoSlot).isEqualTo(0)
+    }
+
+    /**
+     * The shutter cap against the real meter, in whatever light the phone
+     * is lying in. Where the meter has chosen a frame longer than a
+     * sixtieth and has gain left to trade, the cap takes the exposure: the
+     * frames that follow are at the cap (or, where the gain ran out, a
+     * stretched frame no longer than the frame interval) and carry the
+     * light the meter chose, within half a stop. Where the meter is already
+     * inside the cap, or already at the sensor's ceiling, nothing is held.
+     * Either way the cap lifts cleanly.
+     */
+    @Test
+    fun theShutterCapHoldsTheMeterInsideTheCap() {
+        val s = openStream() ?: return
+        stream = s
+        assertThat(waitForFrames(s, 12)).isTrue()
+        val settleDeadline = System.currentTimeMillis() + 4_000
+        while (System.currentTimeMillis() < settleDeadline && s.controlsConverged() != true) Thread.sleep(50)
+        val before = s.latestExposure() ?: return
+        val isoRange = s.characteristics.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: return
+        val exposureRange = s.characteristics.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val caps = CameraCapabilities(
+            hasManualSensor = true, isoMin = isoRange.lower, isoMax = isoRange.upper,
+            exposureMinNs = exposureRange?.lower, exposureMaxNs = exposureRange?.upper,
+            minFocusDiopters = 0f, awbModes = listOf(1), afModes = emptyList(),
+            noiseReductionModes = emptyList(), edgeModes = emptyList(),
+            evMin = 0, evMax = 0, evStep = 0f, sensorOrientation = 90, supportsRaw = true,
+            supportedOutputFormats = emptySet(),
+        )
+        val cap = CaptureModes.AUTO_EXPOSURE_NS
+        s.setExposureCap(cap, ManualSettings(), caps)
+
+        // Two seconds for the follower: the engage, and the frames at the
+        // held values to arrive and be measured.
+        val deadline = System.currentTimeMillis() + 3_000
+        var held: ShutterCap.Held? = null
+        var after: Pair<Int, Long>? = null
+        while (System.currentTimeMillis() < deadline) {
+            Thread.sleep(100)
+            held = s.heldExposureOrNull
+            after = s.latestExposure()
+            if (held != null && after != null && after.second <= held.exposureNs * 1.06) break
+        }
+        Log.i(TAG, "shutter cap: meter chose 1/%d s ISO %d; held %s; sensor now 1/%d s ISO %d".format(
+            (1e9 / before.second).toInt(), before.first, held,
+            after?.second?.let { (1e9 / it).toInt() } ?: 0, after?.first ?: 0))
+
+        val meterOverran = before.second > (cap * ShutterCap.ENGAGE_MARGIN).toLong()
+        val gainLeft = before.first < isoRange.upper
+        if (meterOverran && gainLeft) {
+            assertThat(held).isNotNull()
+            val h = held!!
+            // At the cap, or stretched past it for the light but never past the frame.
+            assertThat(h.exposureNs).isAtLeast(cap)
+            assertThat(h.exposureNs).isAtMost(s.config.minFrameDurationNs)
+            if (h.iso < isoRange.upper) assertThat(h.exposureNs).isEqualTo(cap)
+            // The sensor is doing what it was asked.
+            assertThat(after).isNotNull()
+            assertThat(after!!.second.toDouble()).isAtMost(h.exposureNs * 1.06)
+            // And the light the meter chose is kept, within half a stop.
+            val ratio = (h.iso.toDouble() * h.exposureNs) / (before.first.toDouble() * before.second)
+            assertThat(ratio).isGreaterThan(0.7)
+            assertThat(ratio).isLessThan(1.42)
+        } else {
+            assertThat(held).isNull()
+        }
+
+        s.setExposureCap(0L, ManualSettings(), caps)
+        assertThat(s.heldExposureOrNull).isNull()
+    }
+
+    /**
      * The mosaic orchestration, against the real camera.
      *
      * A stationary phone cannot pan, so this does not test the panning -- that
@@ -334,6 +453,7 @@ class ZslStreamDeviceTest {
         val events = java.util.concurrent.CopyOnWriteArrayList<String>()
         var lastView: MosaicGuideView? = null
         var sawHold = false
+        var sawExposure = false
         var polls = 0
         var turning = 0
         val deadline = System.currentTimeMillis() + 15_000
@@ -374,6 +494,7 @@ class ZslStreamDeviceTest {
                     onView = { v ->
                         lastView = v
                         if (v.holdProgress > 0f) sawHold = true
+                        if (v.exposeProgress >= 0f) sawExposure = true
                         if (v.anchored) {
                             polls++
                             if (v.unsteady == MosaicGuide.Unsteady.TURNING) turning++
@@ -439,8 +560,10 @@ class ZslStreamDeviceTest {
         // In the dark the pixels cannot have placed it.
         if (dark) assertThat(placed.single()).contains("byAttitude=true")
         assertThat(result.savedName).isNotNull()
-        // The ring filled before the burst fired.
+        // The ring filled before the burst began, and filled again as the
+        // fresh frames were exposed after the lock.
         assertThat(sawHold).isTrue()
+        assertThat(sawExposure).isTrue()
         val node = lastView!!.nodes.single()
         assertThat(node.state).isEqualTo(MosaicGuide.NodeState.DONE)
         assertThat(lastView!!.captureLensLabel).isEqualTo(s.lens.label)

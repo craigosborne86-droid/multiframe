@@ -166,6 +166,7 @@ import dev.multiframe.camera.pipeline.SuperResMachine
 import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
@@ -227,7 +228,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // CameraX does not surface directly.
     val lastCaptureResult = remember { AtomicReference<TotalCaptureResult?>(null) }
     var burstFrames by remember { mutableIntStateOf(restored.burstFrames) }
+    // Busy is the sequential camera's and the self-timer's: the shutter is
+    // theirs until they are done. A ZSL shot is never busy -- its frames
+    // are locked at the press and developed behind the viewfinder, see
+    // `developing` -- so the next press is taken as soon as it comes.
     var busy by remember { mutableStateOf(false) }
+    // Shots taken and not yet written: the number the develop queue holds.
+    var developing by remember { mutableIntStateOf(0) }
+    // Bumped as each shot is written, for the thumbnail to reload on.
+    var shotsWritten by remember { mutableIntStateOf(0) }
 
     var camera by remember { mutableStateOf<Camera?>(null) }
     var caps by remember { mutableStateOf<CameraCapabilities?>(null) }
@@ -411,7 +420,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
     // The last capture, refreshed whenever one completes -- and whenever the
     // gallery closes, because what it pointed at may have been deleted there.
-    LaunchedEffect(busy, showGallery) {
+    LaunchedEffect(busy, showGallery, shotsWritten) {
         if (busy || showGallery) return@LaunchedEffect
         val shot = withContext(Dispatchers.IO) { RecentCapture.latest(context) }
         lastShot = shot
@@ -434,6 +443,65 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             availableFrames = stream.maxBurst,
             requestedFrames = burstFrames,
         )
+    }
+
+    // The develop queue: every ZSL shot, in the order taken, merged and
+    // written one at a time on a worker while the viewfinder runs on. One
+    // at a time because the merge already spans every core; two at once
+    // would only contend. A shot in hand is a photograph owed, so a develop
+    // is not cancelled once begun.
+    val developQueue = remember { Channel<PendingShot>(Channel.UNLIMITED) }
+    LaunchedEffect(Unit) {
+        for (pending in developQueue) {
+            val r = try {
+                withContext(Dispatchers.Default + NonCancellable) {
+                    ZslCapture.develop(
+                        context, pending.stream, pending.shot, pending.rotation,
+                        lensProfile = pending.lensProfile,
+                        outputFormat = pending.outputFormat,
+                        superRes = pending.canvas2x,
+                        develop = pending.develop,
+                        writeDng = pending.writeDng,
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "develop failed", e)
+                null
+            }
+            developing = (developing - 1).coerceAtLeast(0)
+            if (r != null) {
+                Log.i(TAG, "ZSL result: $r")
+                r.streamStats?.let { Log.i(TAG, "stream health: $it") }
+                Log.i(
+                    TAG,
+                    ("handover %.2fms  span %dms  merge %dms  " +
+                        "develop %dms  write %dms").format(
+                        r.handoverMicros / 1000.0, r.burstSpanMillis,
+                        r.mergeMillis, r.developMillis, r.writeMillis,
+                    ),
+                )
+                val readout = r.stats?.let {
+                    CaptureReadout.of(
+                        it.framesMerged, it.meanContribution,
+                        dcgActive = r.dcgActive,
+                        superRes = r.superRes,
+                    )
+                } ?: r.message
+                status = if (developing > 0) "$readout · $developing developing" else readout
+                shotsWritten++
+            }
+        }
+    }
+    DisposableEffect(developQueue) {
+        onDispose {
+            // Whatever is still queued gives its frames back; the mapping
+            // they held is freed with the last of them.
+            developQueue.close()
+            while (true) {
+                val pending = developQueue.tryReceive().getOrNull() ?: break
+                pending.shot.close()
+            }
+        }
     }
 
     // The ring is the largest allocation in the app by a wide margin, and
@@ -955,6 +1023,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // to settle after a change, and chasing it faster oscillates.
             kotlinx.coroutines.delay(700)
         }
+    }
+
+    // The shutter cap: the longest frame the mode allows under auto-exposure.
+    // AUTO's is 1/60 s, ACTION's 1/250 s, NIGHT's longer than the frame and
+    // so no cap. The stream holds the meter to it; see `ShutterCap`.
+    LaunchedEffect(zslStream, capturePlan?.maxExposureNs, caps) {
+        val stream = zslStream ?: return@LaunchedEffect
+        val c = caps ?: return@LaunchedEffect
+        stream.setExposureCap(capturePlan?.maxExposureNs ?: 0L, settings, c)
     }
 
     // The ring, tried again. A ring the memory refused, or one released
@@ -1710,29 +1787,60 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 return@ShutterButton
                             }
 
-                            // Fires here, at the press, and nowhere later: the
-                            // burst has not started yet, so the motor is still
-                            // by the time the sensor is integrating. A haptic
-                            // during the burst would be motion blur.
-                            Haptics.shutter(view)
-
                             // Zero shutter lag: the frames already exist, so this press
-                            // locks them rather than starting a capture.
+                            // locks them rather than starting a capture -- and
+                            // returns. The merge, the render and the write are
+                            // the develop queue's, behind the viewfinder; the
+                            // next press is taken whenever it comes.
                             val stream = zslStream
                             if (stream != null) {
                                 val plan = capturePlan
                                 val frames = plan?.frames ?: burstFrames
-                                busy = true
-                                status = "%s: %d frames…".format(
-                                    plan?.resolved?.label ?: "ZSL", frames,
-                                )
+                                val label = plan?.resolved?.label ?: "ZSL"
                                 val rot = caps?.let {
                                     orientation.captureRotation(it.sensorOrientation)
                                 } ?: 0
+                                val lensProfile = lensProfiles[stream.lensId]
+                                val canvas2x = superRes && caps?.supportsSuperRes == true
+                                val params = DevelopParams(
+                                    localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
+                                )
+                                val dng = dngEnabled
+                                val format = outputFormat
+
+                                // The shutter itself: the frames locked, in
+                                // microseconds, on this thread -- the frames were
+                                // exposed before the press, so there is nothing
+                                // to wait for. Then the haptic: the frames a
+                                // haptic could blur are in the ring's hand.
+                                fun lockAndQueue() {
+                                    val shot = ZslCapture.take(stream, frames)
+                                    if (shot.count == 0) {
+                                        shot.close()
+                                        Haptics.reject(view)
+                                        status = "ring empty: no frames buffered yet"
+                                        return
+                                    }
+                                    Haptics.shutter(view)
+                                    developing++
+                                    status = "%s: %d frames".format(label, shot.count)
+                                    developQueue.trySend(
+                                        PendingShot(shot, stream, rot, lensProfile, format, canvas2x, params, dng),
+                                    )
+                                }
+
+                                if (timerSeconds <= 0) {
+                                    lockAndQueue()
+                                    return@ShutterButton
+                                }
+
+                                // The timer runs before anything is locked, so the
+                                // frames captured are the ones from the moment the
+                                // countdown ends rather than when it began. Busy
+                                // for the countdown only: it is what the second
+                                // press cancels.
+                                busy = true
                                 captureJob = scope.launch {
-                                    // The timer runs before anything is locked, so the
-                                    // frames captured are the ones from the moment the
-                                    // countdown ends rather than when it began.
                                     for (remaining in timerSeconds downTo 1) {
                                         countdown = remaining
                                         // A metronome you can feel without
@@ -1743,40 +1851,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                         kotlinx.coroutines.delay(1000)
                                     }
                                     countdown = 0
-
-                                    val r = withContext(Dispatchers.Default) {
-                                        ZslCapture.captureAndMerge(
-                                            context, stream, frames, rot,
-                                            lensProfile = lensProfiles[stream.lensId],
-                                            outputFormat = outputFormat,
-                                            superRes = superRes && caps?.supportsSuperRes == true,
-                                            develop = DevelopParams(
-                                                localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
-                                            ),
-                                            writeDng = dngEnabled,
-                                        )
-                                    }
-                                    Log.i(TAG, "ZSL result: $r")
-                                    r.streamStats?.let { Log.i(TAG, "stream health: $it") }
-                                    Log.i(
-                                        TAG,
-                                        ("handover %.2fms  span %dms  merge %dms  " +
-                                            "develop %dms  write %dms").format(
-                                            r.handoverMicros / 1000.0, r.burstSpanMillis,
-                                            r.mergeMillis, r.developMillis, r.writeMillis,
-                                        ),
-                                    )
-                                    status = r.stats?.let {
-                                        CaptureReadout.of(
-                                            it.framesMerged, it.meanContribution,
-                                            dcgActive = r.dcgActive,
-                                            superRes = r.superRes,
-                                        )
-                                    } ?: r.message
                                     busy = false
+                                    lockAndQueue()
                                 }
                                 return@ShutterButton
                             }
+
+                            // Fires here, at the press, and nowhere later: the
+                            // burst has not started yet, so the motor is still
+                            // by the time the sensor is integrating. A haptic
+                            // during the burst would be motion blur.
+                            Haptics.shutter(view)
 
                             // Without a ring -- the hardware refused one, or the
                             // memory did -- the sequential path is the camera.
@@ -1973,13 +2058,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         )
                     }
                 }
-                // The hold's hint: what the gate is waiting for.
-                v.unsteady?.let { why ->
+                // The hold's hint: what the gate is waiting for -- and,
+                // once the hold is confirmed, the exposure it is held for.
+                val hint = when {
+                    v.exposeProgress in 0f..1f -> "EXPOSING · HOLD"
+                    v.unsteady == MosaicGuide.Unsteady.TURNING -> "HOLD STILL"
+                    v.unsteady == MosaicGuide.Unsteady.DRIFTING -> "HOLD STEADY ON THE DOT"
+                    else -> null
+                }
+                hint?.let { text ->
                     Text(
-                        text = when (why) {
-                            MosaicGuide.Unsteady.TURNING -> "HOLD STILL"
-                            MosaicGuide.Unsteady.DRIFTING -> "HOLD STEADY ON THE DOT"
-                        },
+                        text = text,
                         style = Type.Instruction,
                         color = Ink.Muted,
                         modifier = Modifier
@@ -2208,6 +2297,23 @@ private fun LensChip(
         )
     }
 }
+
+/**
+ * A ZSL shot the shutter took and the develop queue owes: the locked burst
+ * and everything the press knew that the develop needs. The settings are
+ * read at the press, so a chip changed while the shot develops changes the
+ * next one and not this.
+ */
+private class PendingShot(
+    val shot: ZslCapture.Shot,
+    val stream: ZslRawStream,
+    val rotation: Int,
+    val lensProfile: LensProfile?,
+    val outputFormat: OutputFormat,
+    val canvas2x: Boolean,
+    val develop: DevelopParams,
+    val writeDng: Boolean,
+)
 
 @Composable
 private fun ShutterButton(

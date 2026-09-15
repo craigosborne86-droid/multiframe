@@ -543,6 +543,71 @@ bool sampleLevelPair(const uint16_t* a, const uint16_t* b, int width, int height
 
 }  // namespace
 
+/**
+ * The noise floor: where two tiles overlap in the shadows at high ISO, part
+ * of the finest band is given up for the level beneath it.
+ *
+ * ### What the cross-hatch is
+ *
+ * A tile's grain, projected onto the canvas, is not stationary: bilinear
+ * resampling carries a pixel's whole variance where a sample lands on a
+ * tile pixel and half or a quarter of it between, so the grain's variance
+ * beats with the tile's grid against the canvas's. The half-pixel
+ * prefilter in accumulateFull takes most of that out, not all. In one tile
+ * what remains is a faint mesh; where two tiles overlap, each turned a
+ * little against the other by the hand, two meshes at two orientations
+ * lie over each other and the eye reads the sum as weave -- the fifth
+ * field test's cross-hatching over every dark overlap at ISO 3200. It is
+ * an artefact of the detail band alone: the coarser bands are box means of
+ * sixteen and two hundred and fifty-six pixels and carry none of it.
+ *
+ * ### What is done about it
+ *
+ * The finest band's own contribution -- A_0 less the coarse level beneath
+ * it, up(B_1) -- is scaled back by a factor of three things: how high the
+ * ISO was (the canvas is told, MosaicCanvas.kt turns it into an
+ * attenuation), how much of an overlap the pixel is (the log of the wide
+ * level's accumulated weight: one tile at full weight is none, two is
+ * one), and how dark the pixel is (the coarse level's luminance, full in
+ * the shadows and nothing from the midtones up). Where all three are full
+ * half the fine band goes and the shadow is the 4x4 mean plus half its
+ * detail, which at ISO 3200 is half its noise. Nowhere else changes: a
+ * single tile is composed exactly as before, to the bit, because the
+ * overlap factor there is zero and the subtraction is of zero. The blend's
+ * A/A null (one tile in one band and three) holds with the floor set, and
+ * MosaicBlendDeviceTest holds it there.
+ *
+ * Not a denoise of the picture: a decision about which of two tiles' noise
+ * to keep less of where they meet, keyed on where the eye sees the beat.
+ */
+void MosaicCanvas::SetNoiseFloor(float detailAttenuation) {
+    detailAttenuation_ = std::clamp(detailAttenuation, 0.0f, 1.0f);
+}
+
+namespace {
+
+/** How much of an overlap the pixel is, 0 at one tile's full weight and 1 at two, from the weight code. */
+inline float overlapAt(const uint16_t* level, int levelWidth, int levelHeight,
+                       int scale, int x, int y) {
+    if (level == nullptr) return 0.0f;
+    const int ix = std::clamp(static_cast<int>((x + 0.5) / scale), 0, levelWidth - 1);
+    const int iy = std::clamp(static_cast<int>((y + 0.5) / scale), 0, levelHeight - 1);
+    const uint16_t code = level[(static_cast<size_t>(iy) * levelWidth + ix) * 4 + 3];
+    if (code == 0) return 0.0f;
+    // The code is 2048 per octave about one: the log the factor wants.
+    return std::clamp((static_cast<float>(code) - kWeightZeroCode) / kWeightCodesPerOctave, 0.0f, 1.0f);
+}
+
+/** Full in the shadows, nothing from the midtones up; [luma] on the 16-bit scale. */
+inline float shadowAt(float luma) {
+    constexpr float kLow = 48.0f * 257.0f;
+    constexpr float kHigh = 144.0f * 257.0f;
+    const float t = std::clamp((luma - kLow) / (kHigh - kLow), 0.0f, 1.0f);
+    return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
+}  // namespace
+
 bool MosaicCanvas::Compose(int x, int y, float* rgb) const {
     const uint16_t* px = data_ + (static_cast<size_t>(y) * width_ + x) * kChannels;
     if (px[3] == 0) return false;
@@ -556,6 +621,19 @@ bool MosaicCanvas::Compose(int x, int y, float* rgb) const {
         const Level& w = wide_[k];
         const Level& n = narrow_[k];
         if (!sampleLevelPair(w.data, n.data, w.width, w.height, w.scale, x, y, wide, narrow)) continue;
+        if (k == 0 && detailAttenuation_ > 0.0f) {
+            // The noise floor, see SetNoiseFloor: `narrow` here is up(B_1),
+            // the coarse level beneath the finest band under the finest
+            // mask, so A_0 - narrow is the finest band's own detail.
+            const float overlap = overlapAt(w.data, w.width, w.height, w.scale, x, y);
+            if (overlap > 0.0f) {
+                const float luma = 0.2126f * narrow[0] + 0.7152f * narrow[1] + 0.0722f * narrow[2];
+                const float give = detailAttenuation_ * overlap * shadowAt(luma);
+                if (give > 0.0f) {
+                    for (int c = 0; c < 3; ++c) rgb[c] -= give * (rgb[c] - narrow[c]);
+                }
+            }
+        }
         for (int c = 0; c < 3; ++c) rgb[c] += wide[c] - narrow[c];
     }
     return true;
@@ -798,6 +876,13 @@ Java_dev_multiframe_camera_pipeline_MosaicCanvas_nAddTile(
         static_cast<int>(info.stride), h, feathers);
     AndroidBitmap_unlockPixels(env, tile);
     return touched;
+}
+
+JNIEXPORT void JNICALL
+Java_dev_multiframe_camera_pipeline_MosaicCanvas_nSetNoiseFloor(
+        JNIEnv*, jobject, jlong handle, jfloat attenuation) {
+    MosaicCanvas* canvas = canvasOf(handle);
+    if (canvas != nullptr) canvas->SetNoiseFloor(attenuation);
 }
 
 JNIEXPORT jfloat JNICALL

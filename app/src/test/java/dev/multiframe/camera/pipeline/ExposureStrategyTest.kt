@@ -1,6 +1,7 @@
 package dev.multiframe.camera.pipeline
 
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import org.junit.Test
 
 /**
@@ -251,5 +252,34 @@ class ExposureStrategyTest {
 
         assertThat(brightAnalysis.highlightLevel).isGreaterThan(darkAnalysis.highlightLevel)
         assertThat(brightAnalysis.clippedFraction).isGreaterThan(0.5f)
+    }
+
+    @Test
+    fun `the histogram reads green sites on every colour filter arrangement`() {
+        // Green at 900, red and blue at 100: a histogram of green sites is
+        // all in the top bins, whatever phase the pattern puts green at. A
+        // version sampled every fourth column from zero and tested the
+        // phase, which on RGGB and BGGR -- green at (0, 1) and (1, 0) --
+        // never landed on a green site and read an empty scene.
+        val w = 64
+        val h = 48
+        for ((name, cfa) in listOf(
+            "RGGB" to intArrayOf(0, 1, 1, 2), "GRBG" to intArrayOf(1, 0, 2, 1),
+            "GBRG" to intArrayOf(1, 2, 0, 1), "BGGR" to intArrayOf(2, 1, 1, 0),
+        )) {
+            val sensor = SensorProfile(intArrayOf(64, 64, 64, 64), 1023, cfa)
+            val data = ShortArray(w * h) { i ->
+                val x = i % w
+                val y = i / w
+                if (cfa[(y and 1) * 2 + (x and 1)] == 1) 900 else 100
+            }
+            val histogram = ExposureStrategy.histogramOf(BayerFrame(w, h, data), sensor)
+            val total = histogram.sum()
+            assertWithMessage(name).that(total).isGreaterThan(0)
+            // Every sample is a green site: nothing in the bottom half.
+            assertWithMessage(name).that(histogram.take(32).sum()).isEqualTo(0)
+            // And the stride visits the same number of sites on each pattern.
+            assertWithMessage(name).that(total).isEqualTo((w / 4) * (h / 4))
+        }
     }
 }

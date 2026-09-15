@@ -107,6 +107,14 @@ public:
 
     int bands() const { return bands_; }
 
+    /**
+     * How much of the detail band to give up where tiles overlap in the
+     * shadows, 0 to 1. Zero, the default, changes nothing; see the note on
+     * the noise floor in Mosaic.cpp for what a positive value does and why.
+     */
+    void SetNoiseFloor(float detailAttenuation);
+    float noiseFloor() const { return detailAttenuation_; }
+
     /** Fraction of the canvas that any tile has covered. */
     float Coverage() const;
 
@@ -200,6 +208,7 @@ private:
     int width_ = 0;
     int height_ = 0;
     int bands_ = 1;
+    float detailAttenuation_ = 0.0f;
     // wide_[k] and narrow_[k] for coarser level k+1, k = 0 .. bands_-2.
     Level wide_[2];
     Level narrow_[2];

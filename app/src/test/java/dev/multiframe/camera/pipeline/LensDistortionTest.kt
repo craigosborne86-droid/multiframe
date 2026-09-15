@@ -424,4 +424,84 @@ class LensDistortionTest {
         // Pincushion compresses the corners and is never a stretch.
         assertThat(LensDistortion.peakStretch(barrel(k1 = 0.05f), width, height)).isWithin(1e-3f).of(1f)
     }
+
+    // --- the border --------------------------------------------------------
+
+    /**
+     * A source position past the frame reads the frame as a mirror: nothing
+     * repeated, and continuous with the frame at its edge.
+     */
+    @Test
+    fun `the border is a mirror, never the edge pixel repeated`() {
+        val max = 99
+        // Inside: untouched, the edge rows included.
+        for (v in listOf(0f, 0.5f, 1f, 50f, 98.5f, 99f)) {
+            assertThat(LensDistortion.reflectIntoFrame(v, max)).isEqualTo(v)
+        }
+        // A pixel past the edge reads a pixel inside it: -3 reads 3, 104 reads 94.
+        assertThat(LensDistortion.reflectIntoFrame(-3f, max)).isEqualTo(3f)
+        assertThat(LensDistortion.reflectIntoFrame(-0.5f, max)).isEqualTo(0.5f)
+        assertThat(LensDistortion.reflectIntoFrame(104f, max)).isEqualTo(94f)
+        assertThat(LensDistortion.reflectIntoFrame(99.25f, max)).isEqualTo(98.75f)
+        // No two positions past the edge read the same row: that is the rib.
+        val reads = (1..20).map { LensDistortion.reflectIntoFrame(-it.toFloat(), max) }
+        assertThat(reads.toSet()).hasSize(reads.size)
+        // Past the mirror's reach: clamped, not reflected back out.
+        assertThat(LensDistortion.reflectIntoFrame(-500f, max)).isEqualTo(0f)
+        assertThat(LensDistortion.reflectIntoFrame(700f, max)).isEqualTo(max.toFloat())
+    }
+
+    /**
+     * The field test's ribs: a correction that pulls from above the frame
+     * along the top edge repeated the edge row -- which alternates in colour
+     * column by column, as a demosaic's edge does -- down into every row it
+     * overshot. Here the edge row is marked and the rows under it are flat;
+     * a pincushion correction that reads from above the frame must never
+     * carry the mark into the output.
+     */
+    @Test
+    fun `a correction that reads past the top edge does not repeat the edge row into ribs`() {
+        val w = 64
+        val h = 48
+        val src = IntArray(w * h) { i ->
+            val y = i / w
+            val x = i % w
+            val v = when {
+                // The edge rows: alternating columns, the demosaic's worst.
+                y < 2 -> if (x % 2 == 0) 250 else 20
+                else -> 128
+            }
+            (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+        }
+        // Pincushion: the source of an output pixel lies further from the
+        // centre than the pixel, so the top rows read from above the frame.
+        val model = LensDistortion.Model(
+            fx = 40f, fy = 40f, cx = (w - 1) / 2f, cy = (h - 1) / 2f, skew = 0f,
+            k1 = 0.25f, k2 = 0f, k3 = 0f, p1 = 0f, p2 = 0f,
+        )
+        val probe = FloatArray(2)
+        LensDistortion.sourceFor(model, w / 2f, 0f, probe)
+        assertThat(probe[1]).isLessThan(0f)
+
+        val dst = IntArray(w * h)
+        LensDistortion.apply(src, dst, w, h, model)
+        // Measured over the middle columns: the radial term bends the band
+        // the overshoot reaches, deeper at the corners than in the middle,
+        // and the rows below are about the middle.
+        fun spread(y: Int): Int {
+            val row = (w / 4 until 3 * w / 4).map { x -> (dst[y * w + x] shr 8) and 0xFF }
+            return row.max() - row.min()
+        }
+        // The top output row reads two pixels above the frame, which the
+        // mirror reads as two pixels inside it: flat, not the edge row again.
+        assertThat(spread(0)).isLessThan(8)
+        // The marked rows appear where the mirror puts them and where they
+        // are, and nowhere else: the source has two of them, so at most
+        // three output rows carry the pattern, never a band of it. An edge
+        // clamp would have carried it into every row that read above.
+        val ribbed = (0 until 8).count { spread(it) > 100 }
+        assertThat(ribbed).isAtMost(3)
+        // And from the fourth row down, only the picture.
+        for (y in 5 until 8) assertThat(spread(y)).isLessThan(8)
+    }
 }

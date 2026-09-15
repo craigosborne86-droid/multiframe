@@ -9,7 +9,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicInteger
 
 private const val TAG = "Multiframe"
 
@@ -73,6 +72,13 @@ data class MosaicGuideView(
      * the reticle, where the capture happened.
      */
     val latch: Float = -1f,
+    /**
+     * How far the burst at the capturing node has come: the fresh frames
+     * exposed since the hold was confirmed over the frames the tile wants,
+     * 0 to 1; -1 when no burst is being exposed. The ring the screen fills
+     * a second time, so the hand is held through the exposure.
+     */
+    val exposeProgress: Float = -1f,
 )
 
 /** Moments the screen answers with a haptic or a flash. */
@@ -81,8 +87,9 @@ sealed interface MosaicEvent {
     data object Anchored : MosaicEvent
 
     /**
-     * The reticle has held on [node], its burst is in hand, and the node is
-     * done. This is the moment the photograph was taken, whatever the canvas
+     * The reticle has held on [node], its burst -- fresh frames, exposed
+     * after the hold was confirmed -- is in hand, and the node is done.
+     * This is the moment the photograph was taken, whatever the canvas
      * makes of it afterwards; the guidance moves on.
      */
     data class Locked(val node: MosaicNode) : MosaicEvent
@@ -157,6 +164,23 @@ sealed interface MosaicEvent {
  * the overlap and under the blend; a tile refused is a hole and a user
  * trapped.
  *
+ * ### The burst is exposed after the lock, not before it
+ *
+ * The lock confirms the hand: a hundred and fifty milliseconds still inside
+ * the radius. The first four field tests then took the ring's newest frames
+ * -- and the newest frames in a zero-shutter-lag ring at the moment of the
+ * lock were exposed a frame or three *before* it, while the hand was still
+ * arriving. The capture felt instantaneous because it was: nothing was
+ * exposed for it. The tiles carried the approach's blur however still the
+ * hand was afterwards. So the lock begins the burst instead. The frames in
+ * the ring are left there; the runner waits for [tileFrames] frames whose
+ * sensor timestamp is at or after the lock, with the gyroscope's gate held
+ * through the wait -- a turn past the ceiling discards the frames exposed
+ * during it and starts the count again, the reticle leaving the radius
+ * gives the node back -- and takes those. Two hundred milliseconds the
+ * hand holds for on purpose, drawn as the ring filling a second time, and
+ * the haptic after the last of them.
+ *
  * ### Why only bursts are developed
  *
  * Developing a full-resolution tile costs around half a second. Ten frames a
@@ -207,12 +231,30 @@ object MosaicCapture {
      * Frames per tile: the burst setting, held to this range. Fewer than four
      * frames is grain -- a single frame from a small telephoto sensor at high
      * ISO has no signal to speak of -- and more than six is a hold longer
-     * than a hand keeps: the burst is the hold (`MosaicGuide.settleFor`).
+     * than a hand keeps: the frames are exposed after the lock, one frame
+     * interval each, while the hand holds.
      */
     const val MIN_TILE_FRAMES = 4
     const val MAX_TILE_FRAMES = 6
     fun tileFrames(burstFrames: Int, ringBurst: Int): Int =
         burstFrames.coerceIn(MIN_TILE_FRAMES, MAX_TILE_FRAMES).coerceAtMost(ringBurst.coerceAtLeast(1))
+
+    /**
+     * How long a node's fresh burst may take to come together before the
+     * node is given back: the frames want a fifth of a second; a hand that
+     * keeps turning past the gate restarts the count each time, and after
+     * this long it has not held.
+     */
+    const val COLLECT_TIMEOUT_MILLIS = 2_500L
+
+    /**
+     * A burst being exposed at a node: the frames are the ring's newest
+     * with a timestamp at or after [sinceNs], which is reset whenever the
+     * gyroscope reads a turn -- the frames exposed during it are not taken.
+     */
+    private class Collecting(val node: MosaicNode, var sinceNs: Long, val startedAtMillis: Long) {
+        var restarts = 0
+    }
 
     /**
      * The thread tiles are placed on: merged, registered, developed and
@@ -311,6 +353,8 @@ object MosaicCapture {
         }
         stream.lockForSweep(settings, caps, steady = steadyNow)
         val pinned = stream.sweepExposureOrNull
+        // The ISO every tile will be shot at sets the blend's noise floor.
+        session.lockNoise(pinned?.iso ?: stream.latestExposure()?.first)
 
         // The stability gate's ceiling, from the exposure the lock holds and
         // the lens's focal length in pixels. Logged, because it is the number
@@ -339,7 +383,7 @@ object MosaicCapture {
         Log.i(TAG, "tiles: $tileFrames frames each (setting $frames, ring burst ${stream.maxBurst})")
         guide.configureGate(
             maxAngularSpeed = maxSpeed,
-            settleMillis = MosaicGuide.settleFor(tileFrames, stream.config.minFrameDurationNs),
+            settleMillis = MosaicGuide.DEFAULT_SETTLE_MILLIS,
             canvasPixelsPerRadian = pixelsPerRadian * session.plan.tileScale,
         )
         val imu = ImuGuidance(session.plan, pixelsPerRadian, sensorOrientation)
@@ -355,10 +399,8 @@ object MosaicCapture {
         // What the placement thread has done, for the guidance thread to
         // draw: the session's own counters are not read across the two.
         val coverage = java.util.concurrent.atomic.AtomicReference(0f)
-        // Whether a burst's slots are still in the ring's hand. The ring
-        // locks one burst at a time -- closing one releases every locked slot
-        // -- so the next burst is not taken until the last is merged.
-        val slotsHeld = AtomicInteger(0)
+        // The burst being exposed at a node, between its lock and its frames.
+        var collecting: Collecting? = null
         // Tiles the worker could not make: handed back to the guidance thread,
         // which owns the guide, to put the node back to pending.
         val failed = java.util.concurrent.ConcurrentLinkedQueue<Pair<MosaicNode, String>>()
@@ -376,7 +418,7 @@ object MosaicCapture {
             val worker = launch(placementDispatcher) {
                 for (pending in tiles) {
                     val outcome = runCatching {
-                        placeTile(stream, session, profile, lensProfile, scale, imu, pending, slotsHeld)
+                        placeTile(stream, session, profile, lensProfile, scale, imu, pending)
                     }.onFailure { Log.w(TAG, "node ${pending.node.index} could not be placed", it) }
                         .getOrElse { PlaceOutcome.Failed(it.message ?: "placement failed") }
                     when (outcome) {
@@ -464,7 +506,75 @@ object MosaicCapture {
                     val now = System.currentTimeMillis()
                     val reticle = rotation?.let { imu.reticleOnCanvas(it) }
                     val decision = guide.observe(reticle?.first, reticle?.second, now, peak)
-                    onView(imuView(guide, imu, rotation, captureLabel, now, coverage.get()))
+
+                    // The burst at the locked node, coming together from
+                    // frames exposed after the lock and under the gate.
+                    var exposeProgress = -1f
+                    collecting?.let { c ->
+                        val onTarget = reticle != null &&
+                            kotlin.math.hypot(c.node.canvasX - reticle.first, c.node.canvasY - reticle.second) <= guide.lockRadius
+                        when {
+                            !onTarget -> {
+                                // The reticle left before the frames came: the
+                                // node is pending again, no burst taken.
+                                Log.i(TAG, "node ${c.node.index}: reticle left before the burst; node given back")
+                                guide.release(c.node)
+                                collecting = null
+                            }
+                            !peak.isNaN() && peak > guide.maxAngularSpeed -> {
+                                // A turn: whatever was exposed during it is not a
+                                // frame of this tile. The count starts again.
+                                c.sinceNs = freshSince(motion, stream, realtimeStamps)
+                                c.restarts++
+                                if (now - c.startedAtMillis > COLLECT_TIMEOUT_MILLIS) {
+                                    Log.i(TAG, "node ${c.node.index}: the hand did not hold for the burst (${c.restarts} restarts)")
+                                    guide.rejected(c.node, now)
+                                    onEvent(MosaicEvent.Rejected(c.node, "hold still for the burst"))
+                                    collecting = null
+                                } else {
+                                    exposeProgress = 0f
+                                }
+                            }
+                            else -> {
+                                val fresh = stream.readyFramesSince(c.sinceNs)
+                                exposeProgress = (fresh.toFloat() / tileFrames).coerceIn(0f, 1f)
+                                if (fresh >= tileFrames) {
+                                    val burst = stream.snapshot(tileFrames)
+                                    if (burst.count == 0) {
+                                        burst.close()
+                                        guide.rejected(c.node, now)
+                                        onEvent(MosaicEvent.Rejected(c.node, "ring empty"))
+                                    } else {
+                                        // The photograph is taken. The node is done, the
+                                        // haptic fires -- the frames a haptic could blur are
+                                        // in the ring's hand -- and the guidance moves on.
+                                        // The tile is the worker's from here.
+                                        val atFrame = frameRotation(motion, burst.results.getOrNull(0) ?: burst.referenceResult, realtimeStamps)
+                                        guide.captured(c.node, now)
+                                        val oldest = burst.frames.timestampsNs.minOrNull() ?: c.sinceNs
+                                        Log.i(
+                                            TAG,
+                                            "node ${c.node.index}: burst of ${burst.count} fresh frames in hand, " +
+                                                "first exposed %.0f ms after the lock%s".format(
+                                                    (oldest - c.sinceNs) / 1e6,
+                                                    if (c.restarts > 0) ", after ${c.restarts} restarts" else "",
+                                                ),
+                                        )
+                                        onEvent(MosaicEvent.Locked(c.node))
+                                        tiles.send(PendingTile(c.node, burst, atFrame))
+                                    }
+                                    collecting = null
+                                    exposeProgress = -1f
+                                } else if (now - c.startedAtMillis > COLLECT_TIMEOUT_MILLIS) {
+                                    Log.i(TAG, "node ${c.node.index}: only $fresh fresh frames in ${COLLECT_TIMEOUT_MILLIS} ms; node given back")
+                                    guide.rejected(c.node, now)
+                                    onEvent(MosaicEvent.Rejected(c.node, "the ring gave no frames"))
+                                    collecting = null
+                                }
+                            }
+                        }
+                    }
+                    onView(imuView(guide, imu, rotation, captureLabel, now, coverage.get(), exposeProgress))
                     // The gate's readings, once a second: what the hold is waiting on.
                     if (now - lastGateLog > 1000L) {
                         lastGateLog = now
@@ -483,35 +593,14 @@ object MosaicCapture {
                     when (decision) {
                         is MosaicGuide.Decision.TooFast -> onEvent(MosaicEvent.TooFast)
                         is MosaicGuide.Decision.Capture -> {
-                            // The previous burst's slots first, if the ring still
-                            // holds them: the ring locks one burst at a time, and
-                            // closing one releases every locked slot, so a second
-                            // burst taken now would lose its frames under the
-                            // merge. The merge takes a fraction of a second and
-                            // the hand is still; the hold simply runs a little
-                            // longer.
-                            while (slotsHeld.get() > 0 && shouldContinue()) delay(20)
-                            if (!shouldContinue()) break
-
-                            val burst = stream.snapshot(tileFrames)
-                            if (burst.count == 0) {
-                                burst.close()
-                                guide.rejected(decision.node, System.currentTimeMillis())
-                                onEvent(MosaicEvent.Rejected(decision.node, "ring empty"))
-                            } else {
-                                // The photograph is taken. The node is done, the
-                                // haptic fires -- the frames a haptic could blur are
-                                // in the ring's hand -- and the guidance moves on.
-                                // The tile is the worker's from here.
-                                slotsHeld.incrementAndGet()
-                                val atFrame = frameRotation(motion, burst.results.getOrNull(0) ?: burst.referenceResult, realtimeStamps)
-                                guide.captured(decision.node, System.currentTimeMillis())
-                                Log.i(TAG, "node ${decision.node.index}: burst of ${burst.count} frames in hand")
-                                onEvent(MosaicEvent.Locked(decision.node))
-                                tiles.send(PendingTile(decision.node, burst, atFrame))
-                            }
-                            onView(imuView(guide, imu, motion.rotation(), captureLabel, System.currentTimeMillis(), coverage.get()))
-                            lastPollNs = motion.nowNs()
+                            // The hold is confirmed. Not a frame in the ring is
+                            // taken for it: they were exposed while the hand
+                            // arrived. The burst is the next `tileFrames` frames
+                            // the sensor exposes, from now, with the gate held
+                            // through them; see the note on the class.
+                            collecting = Collecting(decision.node, freshSince(motion, stream, realtimeStamps), now)
+                            Log.i(TAG, "node ${decision.node.index}: hold confirmed; exposing $tileFrames fresh frames")
+                            onView(imuView(guide, imu, rotation, captureLabel, now, coverage.get(), 0f))
                         }
                         MosaicGuide.Decision.Idle -> Unit
                     }
@@ -523,7 +612,9 @@ object MosaicCapture {
                 // while the last tiles are still being placed. The sensors are
                 // the caller's -- the screen keeps them running while the mode
                 // is armed, so the next run anchors on an attitude that has
-                // long since settled.
+                // long since settled. A burst begun and not taken is no burst:
+                // its node is pending, not capturing, in the final view.
+                collecting?.let { guide.release(it.node) }
                 tiles.close()
                 stream.unlock(settings, caps)
             }
@@ -571,6 +662,7 @@ object MosaicCapture {
         captureLabel: String,
         nowMillis: Long,
         coverage: Float,
+        exposeProgress: Float = -1f,
     ): MosaicGuideView {
         val positions = rotation?.let { imu.nodesInFrame(it) }
         val nodes = guide.nodes.mapIndexed { i, node ->
@@ -591,8 +683,19 @@ object MosaicCapture {
             anchored = true,
             activeNode = guide.activeNode?.index ?: -1,
             latch = latchAt(guide, nowMillis),
+            exposeProgress = exposeProgress,
         )
     }
+
+    /**
+     * The moment from which a frame counts as exposed for the burst: now,
+     * on the sensors' clock, where the camera stamps frames on it -- a frame
+     * whose exposure began before the lock is not fresh however soon it
+     * lands -- and otherwise just after the newest frame the ring holds,
+     * which admits the frames in flight but none the ring already has.
+     */
+    private fun freshSince(motion: MotionSensor, stream: ZslRawStream, realtimeStamps: Boolean): Long =
+        if (realtimeStamps) motion.nowNs() else stream.newestFrameTimestampNs() + 1
 
     /** How far through its [MosaicGuide.LATCH_MILLIS] the latch is, or -1 when none is being drawn. */
     private fun latchAt(guide: MosaicGuide, nowMillis: Long): Float {
@@ -736,8 +839,9 @@ object MosaicCapture {
      * attitude says the phone was pointing if they did not. The two tiers.
      *
      * Runs on [placementDispatcher] while the guidance thread keeps polling.
-     * The ring's slots are released the moment the merge has read them,
-     * before anything slower; [slotsHeld] tells the guidance thread when.
+     * Each of the ring's slots is released the moment the merge has read it
+     * ([RingSnapshot.release]), so the ring refills under the merge and the
+     * next node's fresh frames have somewhere to land.
      */
     private fun placeTile(
         stream: ZslRawStream,
@@ -747,12 +851,11 @@ object MosaicCapture {
         proxyScale: Float,
         imu: ImuGuidance,
         pending: PendingTile,
-        slotsHeld: AtomicInteger,
     ): PlaceOutcome {
         val burst = pending.burst
         val frameCount = burst.count
         val merger = NativeMerge.create(stream.config.width, stream.config.height, profile)
-            ?: run { burst.close(); slotsHeld.decrementAndGet(); return PlaceOutcome.Failed("no memory for the merge") }
+            ?: run { burst.close(); return PlaceOutcome.Failed("no memory for the merge") }
 
         return merger.use { m ->
             val stride = burst.frames.rowStride
@@ -761,9 +864,17 @@ object MosaicCapture {
             val refIndex = 0
             val referenceResult = burst.results.getOrNull(refIndex) ?: burst.referenceResult
             val refBuffer = burst.frames.buffer(refIndex)
-                ?: run { burst.close(); slotsHeld.decrementAndGet(); return@use PlaceOutcome.Failed("reference unreadable") }
+                ?: run { burst.close(); return@use PlaceOutcome.Failed("reference unreadable") }
             m.setReference(refBuffer, stride)
             val refProxy = m.lumaProxy(refBuffer, stride)
+            // The registration view of the reference frame, read through the
+            // same sampling as the anchor's; then its slot goes back.
+            val smallData = ByteArray(TRACK_WIDTH * TRACK_HEIGHT)
+            RawRing.trackingLumaOf(refBuffer, stream.config.width, stream.config.height, stride,
+                smallData, TRACK_WIDTH, TRACK_HEIGHT, profile)
+            val small = Plane(TRACK_WIDTH, TRACK_HEIGHT, smallData)
+            burst.frames.release(refIndex)
+
             val tilesX = maxOf(1, m.proxyWidth / TILE_TARGET)
             val tilesY = maxOf(1, m.proxyHeight / TILE_TARGET)
             for (i in 0 until burst.count) {
@@ -773,17 +884,9 @@ object MosaicCapture {
                 val field = Aligner.alignNative(refProxy, proxy, tilesX, tilesY)
                     ?: Aligner.align(Aligner.buildPyramid(refProxy), Aligner.buildPyramid(proxy), tilesX, tilesY)
                 m.addFrame(buffer, stride, field)
+                burst.frames.release(i)
             }
-
-            // The registration view of the reference frame, read through the
-            // same sampling as the anchor's. Then the slots go back to the
-            // ring: nothing below needs them.
-            val smallData = ByteArray(TRACK_WIDTH * TRACK_HEIGHT)
-            RawRing.trackingLumaOf(refBuffer, stream.config.width, stream.config.height, stride,
-                smallData, TRACK_WIDTH, TRACK_HEIGHT, profile)
-            val small = Plane(TRACK_WIDTH, TRACK_HEIGHT, smallData)
             burst.close()
-            slotsHeld.decrementAndGet()
 
             // Tier one: the pixels. Tier two: the attitude. The attitude's
             // transform is computed either way, because it is what tier one

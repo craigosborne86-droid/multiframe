@@ -40,7 +40,11 @@ enum class CaptureMode {
  */
 data class CapturePlan(
     val frames: Int,
-    /** Longest single exposure allowed, to keep motion from smearing. */
+    /**
+     * Longest single exposure allowed, to keep motion from smearing. The
+     * stream holds auto-exposure to it ([ZslRawStream.setExposureCap]); a
+     * value at or past the frame interval is no cap.
+     */
     val maxExposureNs: Long,
     /** Whether the highlight guard may pull exposure down. */
     val protectHighlights: Boolean,
@@ -76,11 +80,34 @@ object CaptureModes {
     /** Long enough to gather light, short enough that a held phone stays sharp. */
     const val NIGHT_EXPOSURE_NS = 250_000_000L
 
-    /** Fast enough to stop ordinary movement. */
+    /** Fast enough to stop ordinary movement: 1/250 s. */
     const val ACTION_EXPOSURE_NS = 4_000_000L
 
-    /** Ordinary handheld limit before shake shows. */
-    const val AUTO_EXPOSURE_NS = 33_000_000L
+    /**
+     * The longest a handheld frame is exposed in AUTO: 1/60 s.
+     *
+     * Was 1/30 s, the frame interval, which is to say no cap at all; and the
+     * field test's dusk pictures were soft in every frame of the burst,
+     * because the camera's meter lengthens the shutter before it raises the
+     * gain and a hand does not hold 1/30 s on a 24mm lens. The merge takes
+     * the noise out of eight fast frames; it cannot take the blur out of
+     * eight slow ones. So the frame is capped and the gain makes up the
+     * stop, and the burst's sqrt(N) makes up the gain. The cap is a cap on
+     * the *meter*: where the sensor's gain runs out it gives way, see
+     * `ShutterCap`. Applied by the stream through `ZslRawStream.setExposureCap`.
+     */
+    const val AUTO_EXPOSURE_NS = 16_666_667L
+
+    /**
+     * The most frames an AUTO burst takes from the ring.
+     *
+     * Signal-to-noise grows as the square root of the count: eight frames
+     * are a stop and a half, ten a little more, and twenty are only a
+     * further half stop for a burst window twice as long -- twice the hand's
+     * drift for the alignment to chase and twice the chance the subject
+     * moved. Night mode, on a scene that is still, takes what the ring has.
+     */
+    const val AUTO_MAX_FRAMES = 10
 
     /**
      * Frames worth taking for a moving subject.
@@ -109,9 +136,14 @@ object CaptureModes {
         return when (resolved) {
             CaptureMode.NIGHT -> CapturePlan(
                 // Everything the ring can give: the scene is still, so every
-                // extra frame is a real improvement.
-                frames = ceiling,
-                maxExposureNs = NIGHT_EXPOSURE_NS,
+                // extra frame is a real improvement. Unless the mode the user
+                // chose was AUTO and the histogram resolved it here: then the
+                // hand is a hand, and the frame count and the shutter cap are
+                // AUTO's -- ten frames, a sixtieth -- with night's guard,
+                // since a dark scene has no highlights to protect. NIGHT
+                // chosen by name is the still scene, and gathers light.
+                frames = if (mode == CaptureMode.NIGHT) ceiling else minOf(ceiling, AUTO_MAX_FRAMES),
+                maxExposureNs = if (mode == CaptureMode.NIGHT) NIGHT_EXPOSURE_NS else AUTO_EXPOSURE_NS,
                 // A dark scene has no highlights worth protecting, and pulling
                 // exposure would spend the shadow detail the mode exists for.
                 protectHighlights = false,
@@ -128,7 +160,7 @@ object CaptureModes {
             )
 
             CaptureMode.AUTO, CaptureMode.SUPER_RES -> CapturePlan(
-                frames = requestedFrames.coerceIn(1, ceiling),
+                frames = requestedFrames.coerceIn(1, minOf(ceiling, AUTO_MAX_FRAMES)),
                 maxExposureNs = AUTO_EXPOSURE_NS,
                 protectHighlights = true,
                 resolved = CaptureMode.AUTO,

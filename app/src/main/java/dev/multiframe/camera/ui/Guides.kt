@@ -420,8 +420,27 @@ fun MosaicGuidance(
                     }
                 }
                 dev.multiframe.camera.pipeline.MosaicGuide.NodeState.CAPTURING -> {
-                    drawCircle(Ink.Confirm, radius = lockRing, center = centre, style = Stroke(stroke * 1.5f))
+                    // The exposure: the ring fills a second time, in the
+                    // confirm ink, as the fresh frames come in -- so the hand
+                    // is held for the burst and not only for the lock. A
+                    // turn empties it and it fills again.
                     drawCircle(Ink.Confirm, radius = dot * 0.5f, center = centre)
+                    if (view.exposeProgress in 0f..1f) {
+                        drawCircle(Ink.Confirm.copy(alpha = 0.35f), radius = lockRing, center = centre, style = Stroke(stroke))
+                        if (view.exposeProgress > 0f) {
+                            drawArc(
+                                color = Ink.Confirm,
+                                startAngle = -90f,
+                                sweepAngle = 360f * view.exposeProgress,
+                                useCenter = false,
+                                topLeft = Offset(centre.x - lockRing, centre.y - lockRing),
+                                size = Size(lockRing * 2, lockRing * 2),
+                                style = Stroke(stroke * 1.5f),
+                            )
+                        }
+                    } else {
+                        drawCircle(Ink.Confirm, radius = lockRing, center = centre, style = Stroke(stroke * 1.5f))
+                    }
                 }
                 dev.multiframe.camera.pipeline.MosaicGuide.NodeState.NEAR -> {
                     drawCircle(Ink.Amber, radius = ring, center = centre, style = Stroke(stroke))

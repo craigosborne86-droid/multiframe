@@ -214,16 +214,28 @@ object ExposureStrategy {
         val out = IntArray(bins)
         val range = sensor.range.toFloat()
         val cfa = sensor.cfaPattern
+        // Every row of a Bayer pattern has a green site at one of its two
+        // phases; each sampled row starts there and an even stride keeps
+        // the phase. Testing each sample's phase from column zero saw only
+        // phase (0, 0), and on a sensor whose (0, 0) is not green the
+        // histogram was empty. The native ring samples the same way.
+        val stepX = if (stride and 1 == 1) stride + 1 else stride
         var y = 0
         while (y < frame.height) {
-            var x = 0
-            while (x < frame.width) {
-                if (cfa[(y and 1) * 2 + (x and 1)] == 1) {
+            val rowPhase = (y and 1) * 2
+            val x0 = when {
+                cfa[rowPhase] == 1 -> 0
+                cfa[rowPhase + 1] == 1 -> 1
+                else -> -1
+            }
+            if (x0 >= 0) {
+                var x = x0
+                while (x < frame.width) {
                     val raw = frame.data[y * frame.width + x].toInt() and 0xFFFF
                     val lin = ((raw - sensor.blackAt(x, y)) / range).coerceIn(0f, 1f)
                     out[(lin * (bins - 1)).toInt()]++
+                    x += stepX
                 }
-                x += stride
             }
             y += stride
         }

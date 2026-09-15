@@ -18,10 +18,52 @@ private const val TAG = "Multiframe"
  * a shutter press *starts* an 8-frame sequential capture spanning several
  * seconds. Here the same 8 frames already exist, 33 ms apart, and the shutter
  * costs a mutex.
+ *
+ * ### The shutter and the develop are two calls
+ *
+ * [take] is the shutter: it locks the frames and returns, in microseconds,
+ * on the thread that pressed the button. [develop] is everything after --
+ * the merge, the render, the write -- and it runs on a worker while the
+ * viewfinder goes on and the next shutter press takes the next burst. The
+ * ring gives back each frame's slot the moment the merge has read it
+ * ([RingSnapshot.release]), so under a develop the camera refills the ring
+ * and a press half a second later finds a full burst waiting.
+ * [captureAndMerge] is the two in one call, for a caller that wants to wait.
  */
 object ZslCapture {
 
     private const val TILE_TARGET = 32
+
+    /** A burst in hand, with what the shutter press knew about it. */
+    class Shot internal constructor(
+        val burst: ZslBurst,
+        val frameCount: Int,
+        /** Shutter press to frames in hand, in microseconds. */
+        val handoverMicros: Long,
+        internal val statsBefore: String,
+    ) : AutoCloseable {
+        val count: Int get() = burst.count
+        override fun close() = burst.close()
+    }
+
+    /**
+     * The shutter: locks the newest [frameCount] frames. Costs a mutex and a
+     * scan of the ring, whatever the frame size.
+     */
+    fun take(stream: ZslRawStream, frameCount: Int): Shot {
+        val statsBefore = stream.stats().toString()
+        val handoverStart = System.nanoTime()
+        val burst = stream.snapshot(frameCount)
+        val handoverMicros = (System.nanoTime() - handoverStart) / 1000
+        if (burst.count > 0) {
+            Log.i(
+                TAG,
+                "ZSL handover: ${burst.count} frames in ${handoverMicros}us, " +
+                    "span %.0fms".format(burst.frames.spanNs / 1e6),
+            )
+        }
+        return Shot(burst, frameCount, handoverMicros, statsBefore)
+    }
 
     suspend fun captureAndMerge(
         context: Context,
@@ -43,30 +85,42 @@ object ZslCapture {
         /** Whether the merged raw is written as a DNG beside the JPEG. */
         writeDng: Boolean = true,
         onProgress: (String) -> Unit = {},
+    ): RawBurstResult = develop(
+        context, stream, take(stream, frameCount), rotationDegrees,
+        lensProfile, outputFormat, superRes, develop, writeDng, onProgress,
+    )
+
+    /**
+     * Everything after the shutter: merges [shot]'s burst, renders and
+     * writes it. Closes the shot. Runs wherever it is called from -- the
+     * screen calls it on a worker, one shot at a time, in the order taken.
+     */
+    suspend fun develop(
+        context: Context,
+        stream: ZslRawStream,
+        shot: Shot,
+        rotationDegrees: Int,
+        lensProfile: LensProfile? = null,
+        outputFormat: OutputFormat = OutputFormat.JPEG,
+        superRes: Boolean = false,
+        develop: DevelopParams = DevelopParams(),
+        writeDng: Boolean = true,
+        onProgress: (String) -> Unit = {},
     ): RawBurstResult {
         val profile = SensorProfile.from(stream.characteristics)
-        val statsBefore = stream.stats()
-
-        // The handover: shutter press to frames in hand. Measured around the
-        // lock alone, because that is the only part a user waits for.
-        val handoverStart = System.nanoTime()
-        val burst = stream.snapshot(frameCount)
-        val handoverMicros = (System.nanoTime() - handoverStart) / 1000
+        val statsBefore = shot.statsBefore
+        val frameCount = shot.frameCount
+        val handoverMicros = shot.handoverMicros
+        val burst = shot.burst
 
         if (burst.count == 0) {
             burst.close()
             return RawBurstResult(
                 frameCount, 0, null, 0, 0, 0, 0, null, null,
                 "ring empty: no frames buffered yet",
-                handoverMicros, 0, statsBefore.toString(),
+                handoverMicros, 0, statsBefore,
             )
         }
-
-        Log.i(
-            TAG,
-            "ZSL handover: ${burst.count} frames in ${handoverMicros}us, " +
-                "span %.0fms".format(burst.frames.spanNs / 1e6),
-        )
 
         var merger: NativeMerge? = null
         // The 2x canvas, when one is built. Closed in the finally below as
@@ -84,7 +138,7 @@ object ZslCapture {
                     return RawBurstResult(
                         frameCount, 0, null, 0, 0, 0, 0, null, null,
                         "native accumulator allocation failed",
-                        handoverMicros, 0, statsBefore.toString(),
+                        handoverMicros, 0, statsBefore,
                     )
                 }
             merger = m
@@ -120,6 +174,10 @@ object ZslCapture {
             // pyramid, and native builds its own.
             val refPyramid by lazy { Aligner.buildPyramid(refProxy) }
             captured = 1
+            // The merge has its own copy of the reference; the slot goes
+            // back to the ring now. Not under the 2x canvas, which reads
+            // every frame again once the burst is aligned.
+            if (!superRes) burst.frames.release(refIndex)
 
             // Split out because the single "merge" figure bundles native
             // accumulation together with alignment, and alignment runs on the
@@ -164,6 +222,11 @@ object ZslCapture {
 
                 aligned.add(AlignedFrame(buffer, field, gainScale))
                 captured++
+                // Read once, given back at once: the camera refills this
+                // slot while the next frame is merged, and the next shutter
+                // press finds a burst rather than the two frames a held
+                // ring would have left it.
+                if (!superRes) burst.frames.release(i)
             }
             mergeMillis = System.currentTimeMillis() - t0
 
@@ -278,9 +341,10 @@ object ZslCapture {
             return RawBurstResult(
                 frameCount, captured, null, 0, mergeMillis, 0, 0, null, null,
                 "ZSL merge failed: ${e.message}",
-                handoverMicros, 0, statsBefore.toString(),
+                handoverMicros, 0, statsBefore,
             )
         } finally {
+            burst.close()
             canvas?.close()
             merger?.close()
         }

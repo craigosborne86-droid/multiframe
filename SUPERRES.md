@@ -100,7 +100,7 @@ to tell the user this in the interface rather than let them discover it.
 | Match verification | Done | Brown-Lowe criterion; refuses noise and repeated patterns |
 | Capture planning and geometry | Done | 12 unit tests; presets 2x2, 3x3 and a drawn region, 7 more |
 | Native compositing canvas, three-band blending | Done | One tile is identical to the byte in one band and three; two tiles a quarter-stop and a pixel apart keep their texture and lose their step (`MosaicBlendDeviceTest`) |
-| Reticle and dot guidance, from the attitude, with a stability gate | Done, revised after three field tests | 18 unit tests on the lock rule against scripted pans, including a hand still settling and a gyroscope veto; 8 on the attitude geometry, turning the phone by known angles and reading the dots -- `f · tan` to a twentieth of a pixel, and a node that stays where the world put it; the overlay draws the canvas outline and each node where the attitude puts it, and nothing moves a dot |
+| Reticle and dot guidance, from the attitude, with a stability gate; the burst exposed after the lock | Done, revised after five field tests | 18 unit tests on the lock rule against scripted pans, including a hand still settling and a gyroscope veto; 8 on the attitude geometry, turning the phone by known angles and reading the dots -- `f · tan` to a twentieth of a pixel, and a node that stays where the world put it; the overlay draws the canvas outline and each node where the attitude puts it, and nothing moves a dot |
 | Angular grid at thirty percent overlap, hole-free write | Done | The planner's `gridGeometry`: 4 unit tests on the step, the canvas reach and the seventy-degree limit; the canvas writes the largest fully covered rectangle, read back with no black pixel (`MosaicCanvasTest`) |
 | Two-tier placement: registration, then the attitude | Done, after the fourth field test | A node is done when its burst is in hand; the tile is placed by its pixels where they fit believably (ten inliers, within a quarter of a tile of the attitude, a tile's size) and by the attitude's transform onto the canvas plane otherwise. The live device test requires a dark run to complete by the attitude |
 | Low-light shutter stretch | Done | Where the floor would need more than ISO 3200, a still hand (< 4°/s) gets the floor stretched toward 1/60 s and the gate tightened to match; 1 unit test walks the evening case |
@@ -144,13 +144,20 @@ right way to test the algorithm.
    a panorama's are: a dot laid over a doorknob stays on the doorknob as the
    phone pans, and nothing that happens afterwards moves it. The user follows
    the arrow onto the dot and holds *still*: the ring around the dot fills
-   over 150 ms -- or the burst's span, where that is longer -- and empties
-   the moment the gyroscope reads more than six degrees a second or the
-   reticle drifts more than that would move it. The ring closes: a burst of
-   four to six frames is taken from the ring, the node is done, the haptic
-   fires, a pulse expands from the reticle for a beat, the dot becomes a
-   check and the arrow turns to the next. Pan too fast and the phone says
-   so. STOP, or the back gesture, ends the capture keeping what was taken.
+   over 150 ms and empties the moment the gyroscope reads more than six
+   degrees a second or the reticle drifts more than that would move it. The
+   ring closes -- and *then the burst is exposed*. Not a frame already in
+   the raw ring is used: those were exposed while the hand was arriving, and
+   four field tests' tiles carried that blur. The ring around the dot fills
+   a second time, in the confirm colour, as four to six fresh frames are
+   exposed after the lock with the gate still held -- a turn discards the
+   frames exposed during it and starts the count again; leaving the dot
+   gives it back -- about a quarter of a second the hand holds for on
+   purpose, with EXPOSING · HOLD under the count. Then the node is done, the
+   haptic fires (after the last frame, so the motor cannot reach it), a
+   pulse expands from the reticle for a beat, the dot becomes a check and
+   the arrow turns to the next. Pan too fast and the phone says so. STOP,
+   or the back gesture, ends the capture keeping what was taken.
 4. The node is done the moment the burst is in hand: the checkmark, the
    haptic, the next dot. On its own thread the burst is merged like any other
    photograph, developed with the anchor's colour and gain (the gain scaled
@@ -165,7 +172,12 @@ right way to test the algorithm.
 5. Compositing is in three frequency bands: the fine detail is handed from
    one tile to the next along the line where they are equally deep, the broad
    differences between them are spread over six hundred pixels, so the texture
-   is kept and the step is hidden.
+   is kept and the step is hidden. At high ISO -- from 1600, ramping in from
+   800 -- the blend keeps a *noise floor*: in the shadows where two tiles
+   overlap, up to half the finest band is given up for the level beneath
+   it, because two grainy tiles turned a little against each other lay two
+   resampling meshes over each other and the eye reads the sum as weave.
+   Nowhere else changes; a single tile composes exactly as before.
 6. The count reads "3 of 9 nodes". Every node captured is the mosaic complete;
    stopping early keeps what was taken. The file is the largest rectangle
    with no hole in it -- nine hand-held tiles are nine slightly turned
