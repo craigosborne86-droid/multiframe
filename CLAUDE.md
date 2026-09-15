@@ -23,7 +23,13 @@ picture, the sensor saw it in the scene."
 - **Exposure in AUTO:** the meter is bounded by a shutter cap (1/60 s,
   `ShutterCap`) that takes the exposure by hand only when the meter overruns
   it and hands it back when it can. Do not lengthen `AUTO_EXPOSURE_NS` past
-  the frame interval; that is no cap at all.
+  the frame interval; that is no cap at all. The highlight guard carries a
+  standing bias of a stop (`HIGHLIGHT_BIAS_STOPS`) that the develop's
+  auto-exposure and the filmic shoulder spend on the highlights; do not
+  remove it to "fix" a dark preview.
+- **The mosaic's detail band is blended by seam, not by weight.** Every
+  detail-band pixel comes from one tile (`MosaicCanvas::cutSeam`); the
+  coarse bands feather. Do not reintroduce averaging in the detail band.
 - **Native:** NEON-vectorized merge, alignment, shading, rotation, JPEG encode
   (vendored libjpeg-turbo). All native code is in `app/src/main/cpp/`.
 - **No external image libraries.** No OpenCV, no RenderScript, no third-party

@@ -108,7 +108,7 @@ class GuidesTest {
     }
 
     @Test
-    fun theSuperResPillOffersTheGridsWithTheirMegapixelsAndReportsATap() {
+    fun theSuperResPillOffersBothEnginesWithTheirMegapixelsAndReportsATap() {
         var chosen by mutableStateOf(dev.multiframe.camera.pipeline.MosaicPreset.DETAIL_BOOST)
         render {
             MosaicPresetPill(
@@ -116,20 +116,39 @@ class GuidesTest {
                 customOffered = false,
                 onPreset = { chosen = it },
                 megapixels = mapOf(
+                    dev.multiframe.camera.pipeline.MosaicPreset.ONE_SHOT to 50.0,
                     dev.multiframe.camera.pipeline.MosaicPreset.DETAIL_BOOST to 33.2,
                     dev.multiframe.camera.pipeline.MosaicPreset.LARGE_FORMAT to 75.0,
                 ),
             )
         }
-        // The badge is part of the grid's name: the choice is between two pictures.
+        // The badge is part of each engine's name: the choice is between three pictures.
+        compose.onNodeWithContentDescription("super res 1-SHOT · 50 MP").assertIsDisplayed()
         compose.onNodeWithContentDescription("super res 2×2 · 33 MP").assertIsDisplayed()
         compose.onNodeWithContentDescription("super res 3×3 · 75 MP").performClick()
         compose.waitForIdle()
         assertThat(chosen).isEqualTo(dev.multiframe.camera.pipeline.MosaicPreset.LARGE_FORMAT)
+        compose.onNodeWithContentDescription("super res 1-SHOT · 50 MP").performClick()
+        compose.waitForIdle()
+        assertThat(chosen).isEqualTo(dev.multiframe.camera.pipeline.MosaicPreset.ONE_SHOT)
         // The drawn region is not on the pill.
         compose.onNodeWithContentDescription("super res CUSTOM").assertDoesNotExist()
         // And nothing here is still called a mosaic.
         compose.onNodeWithContentDescription("mosaic 3×3").assertDoesNotExist()
+    }
+
+    @Test
+    fun theOneShotIsAbsentWhereTheDeviceCannotHoldItsCanvas() {
+        render {
+            MosaicPresetPill(
+                preset = dev.multiframe.camera.pipeline.MosaicPreset.DETAIL_BOOST,
+                customOffered = false,
+                onPreset = {},
+                oneShotOffered = false,
+            )
+        }
+        compose.onNodeWithContentDescription("super res 1-SHOT").assertDoesNotExist()
+        compose.onNodeWithContentDescription("super res 2×2").assertIsDisplayed()
     }
 
     @Test

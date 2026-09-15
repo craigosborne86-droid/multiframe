@@ -238,4 +238,68 @@ class ToneCurveTest {
         assertThat(withToe).isLessThan(without)
         assertThat(withToe).isAtLeast(0f)
     }
+
+    // ------------------------------------------------------------------
+    // The filmic shoulder.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `the shoulder is linear to the knee, continuous in slope there, and white at the white point`() {
+        val knee = 0.7f
+        val white = DevelopParams.SHOULDER_WHITE
+        for (x in listOf(0.1f, 0.4f, 0.69f, knee)) {
+            assertThat(ToneCurve.shoulder(x, knee, white)).isWithin(1e-6f).of(x)
+        }
+        // No crease at the knee: the slope just above it is one.
+        val eps = 1e-3f
+        val slope = (ToneCurve.shoulder(knee + eps, knee, white) - knee) / eps
+        assertThat(slope).isWithin(0.02f).of(1f)
+        // White at the white point, and past it.
+        assertThat(ToneCurve.shoulder(white, knee, white)).isWithin(1e-6f).of(1f)
+        assertThat(ToneCurve.shoulder(white * 3f, knee, white)).isEqualTo(1f)
+        // Monotonic all the way.
+        var previous = 0f
+        var x = 0f
+        while (x < white * 2f) {
+            val y = ToneCurve.shoulder(x, knee, white)
+            assertThat(y).isAtLeast(previous)
+            assertThat(y).isAtMost(1f)
+            previous = y
+            x += 0.01f
+        }
+    }
+
+    @Test
+    fun `the shoulder spends its headroom evenly in stops, which is what keeps a cloud's tones apart`() {
+        // The exponential this replaced was white two stops over the knee:
+        // everything brighter than that rendered the same. Here each
+        // doubling above the knee earns about the same increment, out to
+        // the white point.
+        val knee = 0.7f
+        val white = DevelopParams.SHOULDER_WHITE
+        val headroom = 1f - knee
+        val stops = (0..4).map { ToneCurve.shoulder(knee + headroom * (1 shl it), knee, white) }
+        val increments = stops.zipWithNext { a, b -> b - a }
+        println("shoulder per stop above the knee: ${stops.joinToString { "%.3f".format(it) }}")
+        for (d in increments) {
+            assertThat(d).isGreaterThan(0.03f)
+            assertThat(d).isLessThan(0.06f)
+        }
+        // A stop over the knee is not yet near white; two stops over is not white.
+        assertThat(stops[1]).isLessThan(0.87f)
+        assertThat(stops[2]).isLessThan(0.93f)
+        // And the old curve's failure, stated: two stops over the knee it was
+        // white to within a hundredth.
+        val old = knee + headroom * (1f - kotlin.math.exp(-4f))
+        assertThat(old).isGreaterThan(0.99f)
+    }
+
+    @Test
+    fun `the steepness solves its own equation`() {
+        for (uMax in listOf(2f, 5f, 14.33f, 50f)) {
+            val a = ToneCurve.shoulderSteepness(uMax)
+            assertThat(a).isWithin(1e-4f).of(kotlin.math.ln(1f + a * uMax))
+        }
+        assertThat(ToneCurve.shoulderSteepness(1f)).isEqualTo(1f)
+    }
 }

@@ -183,7 +183,7 @@ object Haptics {
 | Shutter pressed | `onClick` on shutter button | `Haptics.shutter` | Strong confirmation: a photograph was taken. On the ZSL path it fires the moment after the frames are locked (`ZslCapture.take`, microseconds into the press), so the frames it could blur are already in the ring's hand and the develop that follows is not waited on; on the sequential path it fires at the press, before the burst starts. With the self-timer it fires at the press and the frames are locked when the countdown ends |
 | Shutter pressed, ring empty | `onClick` with no frame ready | `Haptics.reject` | Nothing was taken; the status says so |
 | Self-timer tick | Each countdown second | `Haptics.tick` | Light metronome, not distracting |
-| Mode toggle | GUARD, 2X, LOCAL TONE, HISTOGRAM, DNG, SUPER RES 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
+| Mode toggle | GUARD, LOCAL TONE, HISTOGRAM, DNG, SUPER RES 1-SHOT/2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
 | Cycle value | FRAMES, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
 | Mode selected | AUTO, NIGHT, ACTION or SUPER RES chosen in the carousel | `Haptics.segment` | A dial detent; selecting SUPER RES also switches the lens, which has the same detent |
 | Super Res stopped | STOP tapped, or the back gesture while running | `Haptics.segment` | Acknowledging the request; the stop itself lands a moment later and is not felt |
@@ -463,6 +463,22 @@ Merged CFA (uint16, Bayer-patterned)
       the clip that follows flattens its gradation to a single value and, on
       other hues, rotates them. The max-channel key is the one that needs no
       clip.)
+      `T` is the **filmic shoulder** (`ToneCurve.shoulder`, `Tone.h`
+      `shoulderCurveParts`): linear to the knee (0.7 of nominal white), then
+      `knee + h · ln(1 + a·u) / ln(1 + a·u_w)` with `u = (m − knee)/h`,
+      `h = 1 − knee`, `u_w = (white − knee)/h`, white = `SHOULDER_WHITE` = 5.0
+      of nominal white, and `a` the root of `a = ln(1 + a·u_w)` so the slope
+      at the knee is one. A logarithm spends the headroom evenly in stops:
+      the stops above the knee land at 0.82, 0.86, 0.90, 0.95, 1.0. The
+      exponential it replaced, `knee + h(1 − e^{−u})`, had given up nine
+      tenths of its headroom one stop over the knee and was white to the
+      last place two stops over — every cloud brighter than that rendered
+      the same, the sixth field test's chalk. Above the white point the
+      curve is 1; the desaturation of stage (b) has already taken such a
+      pixel to neutral. Both native develops tabulate the same curve
+      (`ShoulderLut`, knee to white, interpolated), and `ToneCurveTest`
+      holds the shape: C¹ at the knee, even increments per stop, white at
+      the white point, monotonic throughout.
    b. Highlight desaturation, keyed on **luminance**: `Y = 0.2126R + 0.7152G +
       0.0722B`, measured on the scene-linear values before compression; a
       pixel whose Y exceeds `desaturationStart` blends toward neutral by
@@ -844,8 +860,8 @@ out = A_0 - up(B_1) + up(A_1 - up(B_2) + up(A_2))
 
 | Level | Scale | Canvases | Mask |
 |---|---|---|---|
-| 0 | 1 | the canvas as before | ramp 24 px × hand-off |
-| 1 | 1/4 | `wide_[0]` (M_1), `narrow_[0]` (M_0) | M_1: ramp 160 px |
+| 0 | 1 | the canvas as before | the seam cut (below); the ramp 24 px × hand-off weight is what is stored |
+| 1 | 1/4 | `wide_[0]` (M_1), `narrow_[0]` (M_0 = the seam) | M_1: ramp 160 px |
 | 2 | 1/16 | `wide_[1]` (M_2), `narrow_[1]` (M_1) | M_2: ramp 600 px |
 
 The pyramid steps by four, not two: the corrections are for exposure and
@@ -860,13 +876,55 @@ overlap both tiles weigh the same -- so the overlap's interior is an average
 of two textures a registration error apart, a double image, whatever the
 ramp's width. The bands changed nothing because the detail band was averaging
 exactly as the single feather had. The spec's Voronoi seam is what was
-missing: the tile whose centre is nearer owns the pixel. In the running-mean
-form that is a weight that rises steeply with depth into the tile,
+missing: the tile whose centre is nearer owns the pixel. The first answer was
+a weight that rises steeply with depth into the tile,
 `ramp² × (edge / halfTile)^12`, so the deeper tile outweighs the shallower by
 a large ratio everywhere but a narrow zone about the equidistant line -- a
-soft Voronoi, a fifteenth of a 35% overlap wide. The coarser bands keep plain
-ramps, and each level's `narrow_` canvas carries the finer level's mask,
-hand-off included, since that is the blend it corrects.
+soft Voronoi, a fifteenth of a 35% overlap wide. Inside that zone the two
+tiles were still averaged, and the sixth field test saw the soft band along
+every seam.
+
+**The seam cut** (`MosaicCanvas::cutSeam`, `Seam` in Mosaic.h). The detail
+band is now blended by *ownership*: every pixel of it comes from one tile.
+Before a tile is written, a binary labelling of its footprint on the canvas
+-- new tile or canvas -- is chosen by a minimum cut (Dinic's max-flow on a
+grid at one node per 8 canvas px, some 70,000 nodes for a tile, tens of
+milliseconds on the placement thread). A node the canvas does not cover is
+the new tile's; a node outside the new tile is the canvas's; the rest are
+free. Cutting between two neighbouring nodes costs their *disagreement*,
+`8 · (|ΔY(p)| + |ΔY(q)|) + 4` with ΔY the mean luma difference between the
+tile and the canvas over sixteen of each node's pixels (every other pixel
+each way, read at pixel centres as the accumulation reads them, so a texture
+at the pixel scale is measured rather than blurred between two pixels;
+capped at 64 codes),
+so the seam runs where the tiles agree -- a sky, a shadow, an edge that
+registered -- and not across a texture they place a pixel apart. Giving a
+node to the shallower tile costs `4 · |depth_new − depth_old|` in tile
+pixels -- a seam displaced five nodes from the equidistant line to skirt a
+texture the tiles place a pixel apart pays about what cutting through it
+would, so it moves that far for a real disagreement and no further for
+noise: the Voronoi line is where the seam falls when nothing in the picture
+argues, and the deeper tile is the sharper one. The canvas's depth at a node is read
+back from the weight it stores -- the hand-off wrote `(depth/halfTile)^12`,
+so its twelfth root is the depth of whichever tile owns the pixel now -- and
+a node inside the new tile's own 24 px ramp is given away wherever anything
+else covers it. The labelling is read back bilinearly and steepened so the
+transition spans `Seam::kFeatherPx` = 2.5 canvas pixels: the micro-feather.
+In the accumulation, where the new tile owns a pixel its value replaces the
+canvas's and its own hand-off weight is stored (so the next tile's cut reads
+this tile's depth); where the canvas owns it the new tile writes nothing; in
+the feather the two mix. `narrow_[0]`, the coarse level the detail band's
+correction is made against, follows the same seam, so `A_0 − up(B_1)` is one
+tile's detail everywhere. The coarser bands keep their wide ramps: a seam is
+a decision about texture, and a step in exposure is still spread across the
+overlap by `wide_[0]` and `wide_[1]`.
+
+`MosaicBlendDeviceTest.theSeamKeepsTheOverlapsTextureAtOneTilesContrast`
+holds the overlap's texture within 3% of a single tile's (it was 87% under
+the hand-off); `theSeamRoutesAroundWhatTheTilesDisagreeOn` puts a bright
+disc in one tile on the equidistant line and requires it whole or absent,
+never a half-moon; the one-tile null below still holds to the byte, since a
+tile that overlaps nothing has no free node and no seam.
 
 **Which forced the weight into a logarithm.** The canvas stored its weight as
 fixed point at 512 per unit; a twelfth-power hand-off at the far side of an
@@ -900,8 +958,8 @@ a quarter stop brighter and placed a pixel off; masks scaled to the tile, 12 /
 
 The bands spread the step as the wide ramp does and keep more of the texture
 than either ramp -- the measurement window straddles the equidistant line, so
-a third of it is the hand-off zone where the two tiles still mix; away from
-that line the detail is one tile's alone.
+under the hand-off a third of it was the zone where the two tiles still
+mixed. With the seam cut the whole window is one tile's texture (see above).
 
 #### 3.4.4 The Stability Gate and the Attitude Guidance
 
@@ -1029,12 +1087,23 @@ sample in a 33 ms poll, not the exposure's mean, and the tile lands on the
 canvas at half to two-thirds scale. The cap is 12°/s, where a very short
 exposure would otherwise accept a wobble the merge's alignment has to chase.
 
+**The lock.** `ZslRawStream.lockForSweep` pins the sensor for the mosaic's
+duration: exposure as a *manual* exposure -- the meter's converged ISO and
+shutter, or the floored pair below -- rather than an AE lock, which is the
+meter's promise rather than the sensor's setting; white balance locked; and
+focus held at the distance the lens was at (`LENS_FOCUS_DISTANCE` from the
+latest result, sent back as `CONTROL_AF_MODE_OFF` with that distance where
+the lens accepts one, single-shot `CONTROL_AF_MODE_AUTO` with no trigger
+where it does not). A continuous autofocus left running refocused tile by
+tile as the reticle crossed the scene, and tiles focused at different
+distances stitch at different scales. Every tile is shot at one focus and
+one exposure; the anchor's colour and develop gain are held beside them.
+
 **The shutter floor, and how it gives way in the dark.** What keeps 6°/s at
 five pixels rather than forty is the exposure. Auto exposure on a dim scene
 chooses 1/30 s without regard to the lens. When the mosaic locks the stream
-(`ZslRawStream.lockForSweep`) and the converged exposure is longer than the
-lens's floor, the stream is pinned at the floor with the ISO scaled to keep
-the light:
+and the converged exposure is longer than the lens's floor, the stream is
+pinned at the floor with the ISO scaled to keep the light:
 
 ```
 t_floor(eq) = 4 ms · 105 / eq       clamped to [2 ms, 16.7 ms]   (1/250 s at 105mm)
@@ -1150,33 +1219,16 @@ side of the point (a half-pixel box prefilter), which makes the variance
 nearly uniform; the detail is a quarter-pixel wider, which the sharpen
 already paid.
 
-**The cross-hatch, and the noise floor.** The prefilter takes most of the
-mesh out, not all. Where two tiles overlap, each turned a little against
-the other by the hand, two residual meshes at two orientations lie over
-each other and the eye reads the sum as weave -- the sixth field test's
-cross-hatching across every shadowed overlap at ISO 3200. It lives in the
-detail band alone; the coarser bands are box means of 16 and 256 pixels
-and carry none of it. So the blend has a *noise floor*
-(`MosaicCanvas.SetNoiseFloor`, applied in `Compose`): the finest band's own
-detail, `A_0 − up(B_1)`, is scaled back by the product of three factors --
-the ISO the lock pinned (`MosaicCanvas.detailAttenuationFor`: nothing at
-800 and under, the whole allowance from 1600 up, a straight ramp between;
-`MosaicSession.lockNoise` sets it with the lock), how much of an overlap
-the pixel is (the log₂ of the wide level's accumulated weight at the
-nearest coarse pixel: one tile at full weight is 0, two is 1), and how dark
-the pixel is (the coarse level's luminance, full below sRGB 48, nothing
-above 144, a smoothstep between). Where all three are full,
-`MAX_DETAIL_ATTENUATION` = half the fine band goes, and the shadow is the
-4×4 mean plus half its detail -- at ISO 3200 half its noise, and at the
-scale a mosaic lands at none of its picture. Everywhere else nothing
-changes: in a single tile's own ground the overlap factor is zero and the
-subtraction is of zero, so the blend's A/A null holds with the floor set
-(`MosaicBlendDeviceTest.theNoiseFloorChangesNothingWhereTilesDoNotOverlap`,
-to the byte), and two grainy shadows that overlap lose at least a fifth
-of their grain in the overlap and none outside it
-(`theNoiseFloorQuietensTheShadowedOverlapAndOnlyThat`). This is a decision
-about which of two tiles' noise to keep less of where they meet; it is not
-a denoise of the picture and it does not run on a single capture.
+**The cross-hatch.** The prefilter takes most of the mesh out, not all.
+Where two tiles overlapped, each turned a little against the other by the
+hand, two residual meshes at two orientations lay over each other in the
+hand-off's mixing zone and the eye read the sum as weave -- the sixth field
+test's cross-hatching across every shadowed overlap at ISO 3200. A *noise
+floor* (the detail band scaled back in shadowed overlaps at high ISO) was
+built for it and then retired in the same week: the seam cut of §3.4.3
+takes every detail-band pixel from one tile, so there is no longer a zone
+where two meshes are summed, and the floor had nothing left to do but soften
+shadows.
 
 **Why the old rule fired.** "Inside the radius for 250 ms, drift under a
 radius" -- with the tracker at the time polling every 300 ms, the second
@@ -1219,8 +1271,13 @@ carry `COLOR_CORRECTION_GAINS`.
 ### 3.5 Bilateral Grid Local Tone Mapping
 
 **As built** (`Tone.h` `BilateralGrid`, `BilateralGrid.kt` as the reference,
-in both develops behind `DevelopParams.localTone`; off by default, the
-`LOCAL TONE` control turns it on at 0.5).
+in both develops behind `DevelopParams.localTone`; **on by default at 0.5**
+since the sixth field test, the `LOCAL TONE` control turns it off. Off had
+been the PRD's photographic default -- a global scale and a roll-off -- and
+the field test's blown skies said the global chain alone was leaving stops
+of the raw's range on the table: the operator brings the base layer's range
+in and carries the detail layer through untouched, which is the
+micro-contrast that rendering was protective of.)
 
 ```
 Input: linear RGB after the colour matrix and the exposure gain, before the
@@ -1466,10 +1523,19 @@ on the same DRAM. The sweep is therefore done in **tiles** of the accumulator,
 32 canvas rows by 256 columns -- under 200 KB across both planes and three
 channels, resident in a little core's L2 for the whole of the tile's sweep
 across every frame -- claimed dynamically because the cores are not alike. A
-tile is swept by every sensor row and column whose samples can reach it, its
-own extent plus the alignment's reach, and a tile's own cells are the only
-ones it writes, so the tiles are bit-identical to the single sweep they
-replaced. Measured interleaved on one burst: full-width bands of 8 rows
+tile is swept by every sensor row and column whose samples can reach it --
+per *alignment* tile, its own extent plus that tile's own displacement, in
+the same row-then-column order as ever -- and a tile's own cells are the
+only ones it writes, so the tiles are bit-identical to the single sweep they
+replaced. Per alignment tile, because the first version swept the frame-wide
+reach for every accumulator tile: on a real burst, one alignment tile that
+had wandered to the search's limit on a patch of blank wall set the reach
+for the whole frame, and a sixteen-frame one-shot took 235 s to accumulate
+where synthetic frames took three. Per tile an outlier costs only its own
+area, and the same burst accumulates in 2.1 s
+(`ZslStreamDeviceTest.aOneShotBurstRunsTheCanvasAndSaysWhatItDid`;
+`SubPixelParityTest` holds the sample set and order to the bit). Measured
+interleaved on one burst: full-width bands of 8 rows
 771 ms, of 32 rows 1271 ms; tiles of 64×512 661 ms, 128×1024 722 ms, 32×256
 **534 ms**, against 1140 ms single-threaded. The Gaussian is a 4096-entry
 table on the squared distance, interpolated, in place of nine hundred million
@@ -1548,13 +1614,20 @@ the resolution they asked for. The pair carry one name and one gallery entry.
 
 **This does not replace the existing merge.** A single frame, a burst without
 the diversity, a device short of memory, or a user who has not asked all take
-the §3.2 path. The 2x path is asked for by a setting (`AppSettings.superRes`,
-the `2X` toggle, shown only where `CameraCapabilities.supportsSuperRes` holds),
-and which one ran is recorded in the readout as `· 2X` or `· 2X declined`,
-in the file name as `_sr2x_`, in the EXIF description as "accumulated at 2x",
-and in the gallery as a `SUPER-RES 2X` badge -- because a 2x output is a
-different claim about the photograph and should say so everywhere the
-photograph is.
+the §3.2 path. The 2x path is asked for as **`1-SHOT`**, the first preset of
+the Super Res pill (`MosaicPreset.ONE_SHOT`; offered only where
+`CameraCapabilities.supportsSuperRes` holds; the `2X` set-once toggle it
+absorbed is gone): a shutter tap in Super Res with it selected takes
+`MosaicPreset.ONE_SHOT_FRAMES` = 16 frames from the ring on whatever lens
+is up -- the one-shot is for any distance, and the lens strip stays offered
+for it -- and sends them through the same develop queue as any shot with
+the canvas asked for (§3.7). Sixteen because §3.6.3 measured an eight-frame
+handheld burst leaving a fifth of the chroma cells to the fill, and at
+30 fps sixteen is half a second the hand is holding anyway. Which path ran
+is recorded in the readout as `· 2X` or `· 2X declined`, in the file name
+as `_sr2x_`, in the EXIF description as "accumulated at 2x", and in the
+gallery as a `SUPER-RES 2X` badge -- because a 2x output is a different
+claim about the photograph and should say so everywhere the photograph is.
 
 #### 3.6.6 Verification
 
@@ -1648,10 +1721,22 @@ Held:  each frame exposed at the held values (within 6%; after eight that
          loss. (The same decision as the mosaic's `sweepExposure`.)
 ```
 
-The highlight guard speaks to the meter through exposure compensation,
-which a held exposure does not hear; while the cap holds, a change in the
-guard's pull moves the target by the same stops instead
-(`ShutterCap.retarget`). A manual exposure is the photographer's and the
+**The highlight bias.** The guard (`ExposureStrategy.recommendedPullStops`)
+now carries a standing pull of `HIGHLIGHT_BIAS_STOPS` = 1.0 on every scene
+whose bright end is above `BIAS_FLOOR_LEVEL` (a tenth of white), before any
+clipping is seen, and pulls further -- up to what the burst affords,
+`0.5 · log2(N)` stops -- where the histogram shows clipping: −1.0 EV on an
+ordinary scene at eight frames, −1.5 on a blown sky, −2.0 on a blown sky at
+sixteen. The guard used to act only once the histogram showed clipping,
+which is to say once the sky was already gone in the frames the shutter
+would take. The raw's clip point moves a stop above the scene's bright end;
+the develop's own auto-exposure (92nd percentile to 0.62) puts the midtones
+back; the filmic shoulder of §3.1 step 7 spends the stop on the highlights'
+tones; the merge takes the shadows' stop of noise back. NIGHT, and AUTO on a
+dark scene, run without the guard and without the bias. The guard speaks to
+the meter through exposure compensation, which a held exposure does not
+hear; while the cap holds, a change in the guard's pull moves the target by
+the same stops instead (`ShutterCap.retarget`). A manual exposure is the photographer's and the
 cap does nothing; a mosaic's lock takes the exposure first and the cap
 follows afresh on unlock. `ShutterCapTest` walks the engage, the hold, the
 release with hysteresis, the dark end and the guard.
@@ -1701,7 +1786,7 @@ release with hysteresis, the dark end and the guard.
 | `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`; the builders `chrome` (the one opener over the picture), `pro` (the manual drawer's opener beside the shutter), `settings` (the settings screen's chips: FRAMES, TIMER, DNG, GUIDES, HISTOGRAM, INFO), `carousel` (AUTO · NIGHT · ACTION · SUPER RES), `actions` (STOP, while a Super Res runs; nothing otherwise) |
 | `ControlChips.kt` | Composable rendering: `ChromeOpeners`, `SettingsChips`, `ModeCarousel`, `ActionStrip`, `ControlChip` |
 | `SettingsScreen.kt` | Everything set once, on a screen of its own: the settings chips and the set-once panel |
-| `ControlsPanel.kt` | `ManualPanel` -- exposure, focus, WB, in the PRO drawer over the bottom bar; `SetOncePanel` -- GUARD, 2X, LOCAL TONE, HEIF, reset, the capability summary, on the settings screen |
+| `ControlsPanel.kt` | `ManualPanel` -- exposure, focus, WB, in the PRO drawer over the bottom bar; `SetOncePanel` -- GUARD, LOCAL TONE, HEIF, reset, the capability summary, on the settings screen |
 | `BackNavigation.kt` | What the system back gesture does, given what is open: a pure stack, tested |
 | `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation; its own back handler |
 | `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), `MosaicGuidance` -- the outline, the reticle and the dots -- and `MosaicPresetPill` (`2×2 · 33 MP | 3×3 · 75 MP`) |

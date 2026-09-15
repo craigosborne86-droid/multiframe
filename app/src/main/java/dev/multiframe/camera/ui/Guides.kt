@@ -484,13 +484,16 @@ fun MosaicGuidance(
 }
 
 /**
- * The grid, chosen above the shutter: `2×2 · 33 MP | 3×3 · 75 MP`.
+ * The engine, chosen above the shutter: `1-SHOT · 50 MP | 2×2 · 33 MP | 3×3 · 75 MP`.
  *
- * Each grid carries what the canvas would be on this lens, so the choice is
- * between two pictures rather than two numbers of tiles. The megapixels are
- * the planner's, from the same call the capture makes; the pill draws what it
- * is given and draws no badge where it is given none. Selection by weight:
- * the chosen grid is filled bone, the other is the pane.
+ * Two engines in one pill: the single-framing 2x canvas, on whatever lens
+ * is up, and the telephoto grids. Each carries what its picture would be
+ * on this device, so the choice is between three pictures rather than a
+ * setting and two numbers of tiles. The megapixels are the planner's, from
+ * the same calls the captures make; the pill draws what it is given and
+ * draws no badge where it is given none. Selection by weight: the chosen
+ * one is filled bone, the others are the pane. The one-shot is offered
+ * only where the device can hold its canvas.
  */
 @Composable
 fun MosaicPresetPill(
@@ -498,10 +501,13 @@ fun MosaicPresetPill(
     customOffered: Boolean,
     onPreset: (dev.multiframe.camera.pipeline.MosaicPreset) -> Unit,
     modifier: Modifier = Modifier,
-    /** The canvas each grid would make, in megapixels, where known. */
+    /** The canvas each engine would make, in megapixels, where known. */
     megapixels: Map<dev.multiframe.camera.pipeline.MosaicPreset, Double> = emptyMap(),
+    /** Whether the single-framing 2x canvas is offered on this device. */
+    oneShotOffered: Boolean = true,
 ) {
     val options = buildList {
+        if (oneShotOffered) add(dev.multiframe.camera.pipeline.MosaicPreset.ONE_SHOT)
         add(dev.multiframe.camera.pipeline.MosaicPreset.DETAIL_BOOST)
         add(dev.multiframe.camera.pipeline.MosaicPreset.LARGE_FORMAT)
         if (customOffered) add(dev.multiframe.camera.pipeline.MosaicPreset.CUSTOM)

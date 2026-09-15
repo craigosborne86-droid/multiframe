@@ -64,6 +64,27 @@ object ExposureStrategy {
     const val ALLOWED_CLIPPING = 0.005f
 
     /**
+     * The standing highlight bias: a stop under what the meter would choose,
+     * on every scene the burst can pay for, before any clipping is seen.
+     *
+     * The guard used to act only once the histogram showed clipping, which
+     * is to say once the sky was already gone in the frames the shutter
+     * would take. A stop of headroom kept in hand is what a cloud needs to
+     * stay a cloud: the raw's clip moves a stop above the bright end of the
+     * scene, the develop's own exposure puts the midtones back where the
+     * meter had them, and the filmic shoulder spends the stop on the
+     * highlights' tones. The shadows pay a stop of noise and the merge takes
+     * it back -- eight frames are a stop and a half. A scene with clipping
+     * in it is pulled further, up to what the burst affords; a dark scene,
+     * one whose bright end is under [BIAS_FLOOR_LEVEL], has no highlights to
+     * hold and is not biased at all.
+     */
+    const val HIGHLIGHT_BIAS_STOPS = 1.0f
+
+    /** Below this bright end there is nothing to protect and the bias stays off. */
+    const val BIAS_FLOOR_LEVEL = 0.10f
+
+    /**
      * Stops of exposure a burst of [frameCount] can give up while ending at the
      * same shadow noise as a single frame.
      *
@@ -139,30 +160,33 @@ object ExposureStrategy {
         frameCount: Int,
         maxPull: Float = MAX_UNDEREXPOSURE_STOPS,
         dcgRatio: Int = 1,
+        /** The standing bias, see [HIGHLIGHT_BIAS_STOPS]; zero asks for the clipping guard alone. */
+        bias: Float = HIGHLIGHT_BIAS_STOPS,
     ): Float {
-        // Nothing bright enough to be at risk.
-        if (analysis.clippedFraction <= ALLOWED_CLIPPING &&
-            analysis.highlightLevel <= HIGHLIGHT_SAFETY
-        ) {
-            return 0f
-        }
+        // The bias, on any scene with a bright end worth holding.
+        val standing = if (bias > 0f && analysis.highlightLevel > BIAS_FLOOR_LEVEL) bias else 0f
+
+        // Nothing bright enough to be at risk beyond that.
+        val atRisk = analysis.clippedFraction > ALLOWED_CLIPPING ||
+            analysis.highlightLevel > HIGHLIGHT_SAFETY
 
         // Stops needed to bring the highlight percentile back under the safety
         // level. A ratio of levels is a ratio of light, so its log base two is
         // the number of stops directly.
-        val needed = if (analysis.highlightLevel <= 1e-4f) 0f
+        val needed = if (!atRisk || analysis.highlightLevel <= 1e-4f) 0f
         else (ln((analysis.highlightLevel / HIGHLIGHT_SAFETY).toDouble()) / ln(2.0)).toFloat()
 
         // Clipping that the percentile has not caught: heavily blown scenes
         // pin the top percentile at 1.0 and understate how far down to pull.
         val extraForClipping = when {
+            !atRisk -> 0f
             analysis.clippedFraction > 0.10f -> 1.5f
             analysis.clippedFraction > 0.03f -> 0.8f
             analysis.clippedFraction > ALLOWED_CLIPPING -> 0.3f
             else -> 0f
         }
 
-        val wanted = max(needed, 0f) + extraForClipping
+        val wanted = standing + max(needed, 0f) + extraForClipping
         // Only spend what the burst can pay back. Pulling further than the
         // merge can recover trades a blown highlight for a noisy shadow, which
         // is not obviously a better picture.

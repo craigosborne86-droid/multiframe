@@ -117,7 +117,7 @@ class NativeMerge private constructor(
         val ok = nDevelop(
             merged, bitmap, width, height,
             profile.cfaPattern, black, profile.whiteLevel,
-            color.gains, color.matrix, gain, params.shoulderKnee,
+            color.gains, color.matrix, gain, params.shoulderKnee, params.shoulderWhite,
             params.contrast, params.highlightDesaturation,
             params.desaturationStart, params.blackPoint,
             shading?.gains, shading?.columns ?: 0, shading?.rows ?: 0,
@@ -188,7 +188,7 @@ class NativeMerge private constructor(
         merged: ByteBuffer, bitmap: Bitmap, width: Int, height: Int,
         cfa: IntArray, black: IntArray, white: Int,
         gains: FloatArray, matrix: FloatArray,
-        exposureGain: Float, knee: Float,
+        exposureGain: Float, knee: Float, shoulderWhite: Float,
         contrast: Float, desatStrength: Float, desatStart: Float, blackPoint: Float,
         shading: FloatArray?, shadingColumns: Int, shadingRows: Int,
         hotPixelThreshold: Float, localTone: Float,
@@ -210,7 +210,7 @@ class NativeMerge private constructor(
     ): LongArray?
     private external fun nToneBench(
         width: Int, height: Int, cfa: IntArray, matrix: FloatArray,
-        exposureGain: Float, knee: Float, contrast: Float,
+        exposureGain: Float, knee: Float, shoulderWhite: Float, contrast: Float,
         desatStrength: Float, desatStart: Float, blackPoint: Float,
         variantA: Int, variantB: Int, rounds: Int,
     ): LongArray?
@@ -320,7 +320,7 @@ class NativeMerge private constructor(
             if (!isAvailable()) return null
             return NativeMerge(0L, 0, 0, profile).nToneBench(
                 width, height, profile.cfaPattern, color.matrix,
-                params.exposureGain, params.shoulderKnee, params.contrast,
+                params.exposureGain, params.shoulderKnee, params.shoulderWhite, params.contrast,
                 params.highlightDesaturation, params.desaturationStart,
                 params.blackPoint, variantA, variantB, rounds,
             )

@@ -164,8 +164,8 @@ fun ManualPanel(
  * rendered and written, a way back to the defaults, and what this camera
  * can do.
  *
- * Every toggle is a photograph's decision -- protect the highlights, build
- * the 2x canvas, run the local tone operator, write HEIF -- and none is an
+ * Every toggle is a photograph's decision -- protect the highlights, run
+ * the local tone operator, write HEIF -- and none is an
  * ablation. Each is gated on the hardware where the hardware has a say, and a
  * control the hardware cannot honour is absent rather than dimmed.
  */
@@ -176,9 +176,6 @@ fun SetOncePanel(
     /** Null where there is no zero-shutter-lag stream to guard highlights for. */
     highlightGuard: Boolean? = null,
     onHighlightGuard: (Boolean) -> Unit = {},
-    /** Null where the device cannot hold a 2x canvas of this sensor, or has no native library. */
-    superRes: Boolean? = null,
-    onSuperRes: (Boolean) -> Unit = {},
     localTone: Boolean = false,
     onLocalTone: (Boolean) -> Unit = {},
     /** Null where the device cannot write HEIF, in which case there is no choice. */
@@ -200,15 +197,10 @@ fun SetOncePanel(
             highlightGuard?.let { on ->
                 Toggle("GUARD ${if (on) "ON" else "OFF"}", on) { onHighlightGuard(!on) }
             }
-            // The 2x sub-pixel canvas. Asked for, not promised: a burst
-            // without the diversity declines to the ordinary merge and the
-            // readout says so. A choice about output size and develop time
-            // rather than about the shot, hence set once.
-            superRes?.let { on ->
-                Toggle("2X ${if (on) "ON" else "OFF"}", on) { onSuperRes(!on) }
-            }
             // The bilateral-grid local tone operator. A rendering decision
-            // rather than a shot decision: set once.
+            // rather than a shot decision: set once. On by default; the 2X
+            // toggle that sat beside it is gone -- the 2x canvas is the
+            // one-shot engine, chosen above the shutter in Super Res.
             Toggle("LOCAL TONE ${if (localTone) "ON" else "OFF"}", localTone) { onLocalTone(!localTone) }
             // Only where the device can actually write one. A control that
             // silently produces JPEGs is worse than no control.

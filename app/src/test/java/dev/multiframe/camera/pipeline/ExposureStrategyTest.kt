@@ -131,14 +131,38 @@ class ExposureStrategyTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `an ordinary scene is left alone`() {
-        // Most photographs need no protection, and pulling them down would
-        // just add noise for nothing.
+    fun `an ordinary scene carries the standing bias and nothing more`() {
+        // A stop in hand before any clipping is seen: the sky the shutter
+        // would take is the sky the guard has to protect, and once the
+        // histogram shows it clipping it is already gone. The clipping guard
+        // alone -- bias zero -- still leaves an ordinary scene as it is.
         val ordinary = ExposureStrategy.analyse(histogram(peakBin = 20))
 
         assertThat(ordinary.clippedFraction).isLessThan(0.01f)
         assertThat(ExposureStrategy.recommendedPullStops(ordinary, frameCount = 8))
+            .isWithin(1e-6f).of(-ExposureStrategy.HIGHLIGHT_BIAS_STOPS)
+        assertThat(ExposureStrategy.recommendedPullStops(ordinary, frameCount = 8, bias = 0f))
             .isEqualTo(0f)
+        assertThat(ExposureStrategy.HIGHLIGHT_BIAS_STOPS).isEqualTo(1.0f)
+    }
+
+    @Test
+    fun `the bias is paid for by the burst, and a dark scene is not biased`() {
+        val ordinary = ExposureStrategy.analyse(histogram(peakBin = 20))
+        // One frame affords nothing; two afford half a stop; eight the whole stop.
+        assertThat(ExposureStrategy.recommendedPullStops(ordinary, frameCount = 1)).isEqualTo(0f)
+        assertThat(ExposureStrategy.recommendedPullStops(ordinary, frameCount = 2)).isWithin(1e-6f).of(-0.5f)
+        assertThat(ExposureStrategy.recommendedPullStops(ordinary, frameCount = 8)).isWithin(1e-6f).of(-1f)
+        // A blown sky is pulled past the bias, to what eight frames afford.
+        val blown = ExposureStrategy.analyse(histogram(clippedFraction = 0.15f, peakBin = 45))
+        assertThat(ExposureStrategy.recommendedPullStops(blown, frameCount = 8)).isWithin(1e-6f).of(-1.5f)
+        // Sixteen frames afford two stops, and a blown scene takes them.
+        assertThat(ExposureStrategy.recommendedPullStops(blown, frameCount = 16)).isWithin(1e-6f).of(-2f)
+        // A dark scene -- its bright end under a tenth of white -- has no
+        // highlights to hold, and is left to gather its light.
+        val dark = ExposureStrategy.analyse(IntArray(64).also { it[1] = 900; it[3] = 100 })
+        assertThat(dark.highlightLevel).isLessThan(ExposureStrategy.BIAS_FLOOR_LEVEL)
+        assertThat(ExposureStrategy.recommendedPullStops(dark, frameCount = 8)).isEqualTo(0f)
     }
 
     @Test
@@ -169,8 +193,11 @@ class ExposureStrategyTest {
         // protecting, and darkening the whole picture for it would be wrong.
         val speculars = ExposureStrategy.analyse(histogram(clippedFraction = 0.002f, peakBin = 20))
 
-        assertThat(ExposureStrategy.recommendedPullStops(speculars, frameCount = 16))
+        assertThat(ExposureStrategy.recommendedPullStops(speculars, frameCount = 16, bias = 0f))
             .isEqualTo(0f)
+        // With the standing bias, the bias and no more.
+        assertThat(ExposureStrategy.recommendedPullStops(speculars, frameCount = 16))
+            .isWithin(1e-6f).of(-ExposureStrategy.HIGHLIGHT_BIAS_STOPS)
     }
 
     @Test

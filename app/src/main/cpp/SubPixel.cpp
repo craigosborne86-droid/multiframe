@@ -549,54 +549,114 @@ void SubPixelCanvas::accumulateStrip(int stripY0, int stripY1, std::vector<float
 
         RefSample rs;
         for (const Frame& f : alts_) {
-            // Sensor rows and columns that can land in this tile, given how
-            // far this frame's alignment moves them.
-            const int sy0 = std::max(0, (rowMin - 2) / 2 - f.maxRowReach);
-            const int sy1 = std::min(sensorH_ - 1, (rowMax + 2) / 2 + f.maxRowReach);
-            const int sx0 = std::max(0, (colMin - 2) / 2 - f.maxColReach);
-            const int sx1 = std::min(sensorW_ - 1, (colMax + 2) / 2 + f.maxColReach);
+            // The alignment tiles whose samples could land in this accumulator
+            // tile, bounded by the frame's furthest displacement -- and then,
+            // within each, exactly the sensor rows and columns that tile's
+            // own displacement carries here. The first version swept the
+            // frame-wide reach for every accumulator tile: one alignment tile
+            // that had wandered to the search's limit on a patch of blank
+            // wall set the reach for the whole frame, and a real sixteen-frame
+            // burst took two hundred seconds to accumulate where synthetic
+            // frames took three. Per tile, an outlier costs only its own area.
+            //
+            // Swept in the same order as before -- sensor row, then column --
+            // so every accumulator cell sums the same samples in the same
+            // order and the Kotlin reference is matched to the bit; a cell a
+            // whisker from the hole threshold would otherwise flip on the
+            // order of two additions.
+            const int tileRowsSensor = 2 * tileH_;
+            const int tileColsSensor = 2 * tileW_;
+            // Clamped at both ends: the sensor's last rows and columns belong
+            // to the last tile however far past a whole tile they run.
+            const int ty0 = std::clamp(((rowMin - 2) / 2 - f.maxRowReach) / tileRowsSensor, 0, tilesY_ - 1);
+            const int ty1 = std::clamp(((rowMax + 2) / 2 + f.maxRowReach) / tileRowsSensor, 0, tilesY_ - 1);
+            const int tx0 = std::clamp(((colMin - 2) / 2 - f.maxColReach) / tileColsSensor, 0, tilesX_ - 1);
+            const int tx1 = std::clamp(((colMax + 2) / 2 + f.maxColReach) / tileColsSensor, 0, tilesX_ - 1);
 
-            for (int ay = sy0; ay <= sy1; ++ay) {
-                const int ty = std::min(std::max((ay / 2) / tileH_, 0), tilesY_ - 1);
-                for (int ax = sx0; ax <= sx1; ++ax) {
-                    const int tx = std::min(std::max((ax / 2) / tileW_, 0), tilesX_ - 1);
+            // Per alignment tile column, the sensor columns of it that can
+            // land here, given its own displacement -- fixed for the row loop
+            // below, since a column's displacement varies with the row's tile.
+            struct Span { int x0, x1; };
+            for (int ty = ty0; ty <= ty1; ++ty) {
+                // This alignment tile row's sensor extent; the last runs to the
+                // sensor's edge, as the clamp of the tile index always made it.
+                const int tileAy0 = ty * tileRowsSensor;
+                const int tileAy1 = (ty == tilesY_ - 1) ? sensorH_ - 1 : (ty + 1) * tileRowsSensor - 1;
+
+                // The rows of this tile row that any of its tiles carries here,
+                // and each tile's own column span.
+                int rowLo = INT32_MAX, rowHi = INT32_MIN;
+                Span spans[64];
+                int rowLoOf[64], rowHiOf[64];
+                const int nTx = tx1 - tx0 + 1;
+                if (nTx > 64) continue;  // never: 4080 wide is 63 tiles at most
+                for (int tx = tx0; tx <= tx1; ++tx) {
                     const int idx = ty * tilesX_ + tx;
-
                     const float dispX = (f.dx[idx] + f.fracDx[idx]) * 2.0f;
                     const float dispY = (f.dy[idx] + f.fracDy[idx]) * 2.0f;
-                    const float fx = ax - dispX;
-                    const float fy = ay - dispY;
-                    if (fx < 0.0f || fy < 0.0f || fx > sensorW_ - 1.0f || fy > sensorH_ - 1.0f) continue;
+                    const int tileAx0 = tx * tileColsSensor;
+                    const int tileAx1 = (tx == tilesX_ - 1) ? sensorW_ - 1 : (tx + 1) * tileColsSensor - 1;
+                    // 2 (ay - dispY) in [rowMin - 2, rowMax + 2], and the same across.
+                    const int sy0 = std::max(std::max(0, tileAy0), static_cast<int>(std::floor((rowMin - 2) / 2.0f + dispY)) - 1);
+                    const int sy1 = std::min(std::min(sensorH_ - 1, tileAy1), static_cast<int>(std::ceil((rowMax + 2) / 2.0f + dispY)) + 1);
+                    const int sx0 = std::max(std::max(0, tileAx0), static_cast<int>(std::floor((colMin - 2) / 2.0f + dispX)) - 1);
+                    const int sx1 = std::min(std::min(sensorW_ - 1, tileAx1), static_cast<int>(std::ceil((colMax + 2) / 2.0f + dispX)) + 1);
+                    const int k = tx - tx0;
+                    if (sy0 > sy1 || sx0 > sx1) {
+                        spans[k] = {1, 0};
+                        rowLoOf[k] = 1; rowHiOf[k] = 0;
+                        continue;
+                    }
+                    spans[k] = {sx0, sx1};
+                    rowLoOf[k] = sy0; rowHiOf[k] = sy1;
+                    rowLo = std::min(rowLo, sy0);
+                    rowHi = std::max(rowHi, sy1);
+                }
+                if (rowLo > rowHi) continue;
 
-                    // Only bother if the canvas position can reach this tile.
-                    const float v = 2.0f * fy;
-                    if (v + kRadius < rowMin || v - kRadius > rowMax) continue;
-                    const float u = 2.0f * fx;
-                    if (u + kRadius < colMin || u - kRadius > colMax) continue;
+                for (int ay = rowLo; ay <= rowHi; ++ay) {
+                    for (int tx = tx0; tx <= tx1; ++tx) {
+                        const int k = tx - tx0;
+                        if (ay < rowLoOf[k] || ay > rowHiOf[k]) continue;
+                        const int idx = ty * tilesX_ + tx;
+                        const float dispX = (f.dx[idx] + f.fracDx[idx]) * 2.0f;
+                        const float dispY = (f.dy[idx] + f.fracDy[idx]) * 2.0f;
+                        for (int ax = spans[k].x0; ax <= spans[k].x1; ++ax) {
+                            const float fx = ax - dispX;
+                            const float fy = ay - dispY;
+                            if (fx < 0.0f || fy < 0.0f || fx > sensorW_ - 1.0f || fy > sensorH_ - 1.0f) continue;
 
-                    const int rawAlt = at(f.data, f.strideBytes, ax, ay);
-                    if (f.invGain < 1.0f && rawAlt >= white_) continue;
-                    const float altV = static_cast<float>(rawAlt) * f.invGain;
+                            // Only bother if the canvas position can reach this tile.
+                            const float v = 2.0f * fy;
+                            if (v + kRadius < rowMin || v - kRadius > rowMax) continue;
+                            const float u = 2.0f * fx;
+                            if (u + kRadius < colMin || u - kRadius > colMax) continue;
 
-                    sampleReference(ax, ay, fx, fy, rs);
-                    const float d = altV - rs.value;
-                    const float d2 = d * d;
-                    const float n2 = noiseVar_[binOf(rs.value)] + rs.uncertainty * rs.uncertainty;
-                    const float r = d2 <= n2 ? 1.0f : n2 / d2;
+                            const int rawAlt = at(f.data, f.strideBytes, ax, ay);
+                            if (f.invGain < 1.0f && rawAlt >= white_) continue;
+                            const float altV = static_cast<float>(rawAlt) * f.invGain;
 
-                    const int c = colourAt(ax, ay);
-                    splat(acc, wsum, base, rows, rowMin, rowMax, colMin, colMax, c, u, v, altV, r);
+                            sampleReference(ax, ay, fx, fy, rs);
+                            const float d = altV - rs.value;
+                            const float d2 = d * d;
+                            const float n2 = noiseVar_[binOf(rs.value)] + rs.uncertainty * rs.uncertainty;
+                            const float r = d2 <= n2 ? 1.0f : n2 / d2;
 
-                    // Counted once per sample, by the tile that owns its
-                    // centre and only within the strip proper, so the mean is
-                    // over samples and not over overlaps.
-                    const int centreRow = static_cast<int>(std::floor(v));
-                    const int centreCol = static_cast<int>(std::floor(u));
-                    if (centreRow >= stripY0 && centreRow < stripY1 &&
-                        centreRow >= rowMin && centreRow <= rowMax &&
-                        centreCol >= colMin && centreCol <= colMax) {
-                        localSum += r;
-                        localCount++;
+                            const int c = colourAt(ax, ay);
+                            splat(acc, wsum, base, rows, rowMin, rowMax, colMin, colMax, c, u, v, altV, r);
+
+                            // Counted once per sample, by the tile that owns its
+                            // centre and only within the strip proper, so the mean is
+                            // over samples and not over overlaps.
+                            const int centreRow = static_cast<int>(std::floor(v));
+                            const int centreCol = static_cast<int>(std::floor(u));
+                            if (centreRow >= stripY0 && centreRow < stripY1 &&
+                                centreRow >= rowMin && centreRow <= rowMax &&
+                                centreCol >= colMin && centreCol <= colMax) {
+                                localSum += r;
+                                localCount++;
+                            }
+                        }
                     }
                 }
             }
@@ -844,10 +904,12 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     }
 
     // exposureGain, knee, contrast, desatStrength, desatStart, blackPoint,
-    // autoPercentile, autoTarget, localTone -- the order NativeSubPixel packs
-    // them in.
-    float tone[9];
-    env->GetFloatArrayRegion(jtone, 0, 9, tone);
+    // autoPercentile, autoTarget, localTone, shoulderWhite -- the order
+    // NativeSubPixel packs them in. The tenth is read where it is given, so
+    // a nine-float caller renders with the shoulder's default white.
+    float tone[10] = {0, 0.7f, 0.3f, 1.0f, 1.0f, 0.012f, 0.92f, 0.62f, 0.0f, 5.0f};
+    const jsize toneCount = env->GetArrayLength(jtone);
+    env->GetFloatArrayRegion(jtone, 0, std::min<jsize>(toneCount, 10), tone);
     p.tone.exposureGain = tone[0];
     p.tone.knee = tone[1];
     p.tone.contrast = tone[2];
@@ -857,6 +919,7 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     p.autoPercentile = tone[6];
     p.autoTarget = tone[7];
     p.localTone = tone[8];
+    p.tone.white = tone[9];
 
     // amount, threshold, maxShift, then the chroma smoothing's radius, sigma
     // and amount -- the order NativeSubPixel packs them in. An older caller

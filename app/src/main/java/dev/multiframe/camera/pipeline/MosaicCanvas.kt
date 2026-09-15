@@ -59,17 +59,6 @@ class MosaicCanvas private constructor(
         return nAddTile(handle, tile, transform.m, feathers)
     }
 
-    /**
-     * Sets the noise floor: how much of the finest band is given up where
-     * tiles overlap in the shadows, 0 to 1. See [detailAttenuationFor] for
-     * the number a mosaic's ISO earns, and Mosaic.cpp's note on the noise
-     * floor for what it does. Zero, the default, changes nothing.
-     */
-    fun setNoiseFloor(detailAttenuation: Float) {
-        if (closed) return
-        nSetNoiseFloor(handle, detailAttenuation.coerceIn(0f, 1f))
-    }
-
     /** Fraction of the canvas any tile has covered, for reporting sweep progress. */
     fun coverage(): Float = if (closed) 0f else nCoverage(handle)
 
@@ -122,7 +111,6 @@ class MosaicCanvas private constructor(
     private external fun nCreate(width: Int, height: Int, bands: Int): Long
     private external fun nDestroy(h: Long)
     private external fun nAddTile(h: Long, tile: Bitmap, transform: DoubleArray, feathers: FloatArray): Long
-    private external fun nSetNoiseFloor(h: Long, attenuation: Float)
     private external fun nCoverage(h: Long): Float
     private external fun nRenderInto(h: Long, bitmap: Bitmap): Boolean
     private external fun nCompressTo(h: Long, fd: Int, quality: Int): Long
@@ -153,34 +141,6 @@ class MosaicCanvas private constructor(
          * step between two tiles is spread across the width of the overlap.
          */
         val BLEND_FEATHERS = floatArrayOf(24f, 160f, 600f)
-
-        /**
-         * The noise floor's reach with the ISO: nothing at [NOISE_ISO_FROM]
-         * and under, the whole [MAX_DETAIL_ATTENUATION] from [NOISE_ISO_FULL]
-         * up, a straight ramp between. Sixteen hundred is where the fifth
-         * field test's cross-hatch showed; eight hundred is where the
-         * develop's own sharpening starts to fade for the same noise
-         * (`DevelopParams.LOW_ISO`), and the two agree about where a
-         * telephoto tile stops being clean.
-         */
-        const val NOISE_ISO_FROM = 800
-        const val NOISE_ISO_FULL = 1600
-
-        /**
-         * Half the finest band, at most: the shadow of an overlap keeps its
-         * 4x4 mean and half its detail, which at ISO 3200 is half its noise
-         * and, at the tile scale a mosaic lands at, none of its picture.
-         * More than half and the overlaps read as soft bands; the field
-         * test's complaint was weave, not grain.
-         */
-        const val MAX_DETAIL_ATTENUATION = 0.5f
-
-        /** The noise floor a mosaic shot at [iso] earns; zero with no ISO known. Pure. */
-        fun detailAttenuationFor(iso: Int?): Float {
-            if (iso == null || iso <= NOISE_ISO_FROM) return 0f
-            val t = ((iso - NOISE_ISO_FROM).toFloat() / (NOISE_ISO_FULL - NOISE_ISO_FROM)).coerceIn(0f, 1f)
-            return MAX_DETAIL_ATTENUATION * t
-        }
 
         /**
          * Allocates a canvas, or null when the device cannot afford one.

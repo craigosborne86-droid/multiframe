@@ -127,6 +127,13 @@ object StabilityGate {
         val exposureNs: Long,
         /** Whether the floor was stretched for the light; the gate tightens when it was. */
         val stretched: Boolean,
+        /**
+         * Whether the shutter was moved to the floor at all. False where the
+         * meter's own values are pinned as they were: the stream pins a
+         * manual exposure for every mosaic, floor or no floor, so that each
+         * tile is shot at the same numbers rather than under a locked meter.
+         */
+        val floored: Boolean = true,
     )
 
     /**

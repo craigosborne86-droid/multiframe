@@ -1,6 +1,6 @@
 package dev.multiframe.camera.pipeline
 
-import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.max
 
 /**
@@ -63,15 +63,64 @@ object ToneCurve {
     const val LUMA_B = 0.0722f
 
     /**
-     * Compresses [x] toward 1 above [knee], smoothly and without ever reaching
-     * it. Linear below the knee, so midtones pass through untouched.
+     * The filmic shoulder: linear below [knee], a logarithm above it that
+     * reaches 1 exactly at [white], the scene-linear level rendered as
+     * display white.
+     *
+     * ### Why a logarithm
+     *
+     * The curve this replaced was exponential -- `knee + h(1 − e^{−u})` --
+     * and an exponential saturates: a stop above the knee it had given up
+     * nine tenths of its headroom, two stops above it was white to the last
+     * place. Everything in a sky brighter than that landed on the same
+     * value, which is the sixth field test's chalk. A logarithm spends the
+     * headroom evenly *in stops*: each doubling of the scene above the knee
+     * earns about the same increment of output, from the knee out to the
+     * white point, which is what a film curve's shoulder does and what a
+     * cloud needs to keep its shape. With the knee at 0.7 and white at 5,
+     * the stops above the knee land at 0.82, 0.86, 0.90, 0.95 and 1.0.
+     *
+     * ### The arithmetic
+     *
+     *     u    = (x − knee) / h,   u_w = (white − knee) / h,   h = 1 − knee
+     *     y    = knee + h · ln(1 + a·u) / ln(1 + a·u_w)
+     *
+     * with `a` chosen so the slope at the knee is one (`a = ln(1 + a·u_w)`,
+     * see [shoulderSteepness]): C¹ at the knee, so a gradient crossing it
+     * has no visible crease. Above [white] the curve is 1, and the caller's
+     * desaturation has already taken such a pixel to neutral. Both native
+     * develops tabulate this same curve (`Tone.h`, `shoulderCurveParts`).
      */
-    fun shoulder(x: Float, knee: Float): Float {
+    fun shoulder(x: Float, knee: Float, white: Float = DevelopParams.SHOULDER_WHITE): Float {
         if (x <= 0f) return 0f
         if (x <= knee) return x
         val headroom = 1f - knee
         if (headroom <= 0f) return knee
-        return knee + headroom * (1f - exp(-(x - knee) / headroom))
+        if (x >= white) return 1f
+        val uMax = (white - knee) / headroom
+        if (uMax <= 0f) return 1f
+        val a = shoulderSteepness(uMax)
+        val u = (x - knee) / headroom
+        return knee + headroom * (ln(1f + a * u) / ln(1f + a * uMax))
+    }
+
+    /**
+     * The `a` of the shoulder for a white point [uMax] headrooms past the
+     * knee: the root of `a = ln(1 + a·uMax)`, which is what makes the slope
+     * at the knee exactly one. Found by fixed-point iteration, which
+     * converges in a dozen steps for any `uMax` above one; the native table
+     * builder solves it the same way. For `uMax` at or under one there is
+     * no such root and the curve is left linear to the white point.
+     */
+    fun shoulderSteepness(uMax: Float): Float {
+        if (uMax <= 1f) return 1f
+        var a = 2f
+        repeat(40) {
+            val next = ln(1f + a * uMax)
+            if (kotlin.math.abs(next - a) < 1e-6f) return next
+            a = next
+        }
+        return a
     }
 
     /**
@@ -113,7 +162,7 @@ object ToneCurve {
         // Stage 1: compress on the brightest channel and scale all three, so
         // the roll-off changes level without touching hue.
         if (scenePeak > params.shoulderKnee) {
-            val scale = shoulder(scenePeak, params.shoulderKnee) / scenePeak
+            val scale = shoulder(scenePeak, params.shoulderKnee, params.shoulderWhite) / scenePeak
             r *= scale
             g *= scale
             b *= scale

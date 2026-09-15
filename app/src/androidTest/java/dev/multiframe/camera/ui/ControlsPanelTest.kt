@@ -131,7 +131,7 @@ class ControlsPanelTest {
         compose.setContent {
             Column(modifier = Modifier.fillMaxSize()) {
                 ManualPanel(settings = ManualSettings(), caps = fullyCapable, onChange = {})
-                SetOncePanel(caps = fullyCapable, highlightGuard = true, superRes = false, outputFormat = null)
+                SetOncePanel(caps = fullyCapable, highlightGuard = true, outputFormat = null)
             }
         }
         compose.assumeRendered()
@@ -141,7 +141,7 @@ class ControlsPanelTest {
         // ...and none of the switches a developer used to flip.
         for (label in listOf(
             "ISP ON", "ISP OFF", "A/B ON", "A/B OFF", "DCG ON", "DCG OFF",
-            "MERGE ON", "MERGE OFF", "ZSL ON", "ZSL OFF",
+            "MERGE ON", "MERGE OFF", "ZSL ON", "ZSL OFF", "2X ON", "2X OFF",
         )) {
             compose.onNodeWithContentDescription(label).assertDoesNotExist()
         }

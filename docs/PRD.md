@@ -218,6 +218,24 @@ normal preview startup, using the existing ZSL ring. The user never sees them.
 - `protectHighlights()`: pulls exposure down by up to the shadow recovery budget,
   preserving highlights that would otherwise clip. The pull amount is the
   `guardPull` shown in the HUD.
+- **The standing highlight bias (sixth field test).** The guard used to act
+  only once the histogram showed clipping -- once the sky was already gone in
+  the frames the shutter would take. It now pulls a stop under the meter on
+  every scene whose bright end is above a tenth of white, before any
+  clipping is seen, and further where clipping shows, up to what the burst
+  affords: −1.0 EV on an ordinary scene at eight frames, −1.5 on a blown sky,
+  −2.0 at sixteen frames (`ExposureStrategy.HIGHLIGHT_BIAS_STOPS`). The
+  develop's own auto-exposure puts the midtones back, the filmic shoulder
+  spends the stop on the highlights' tones, and the merge takes back the
+  shadows' noise. NIGHT, and AUTO on a dark scene, are not biased.
+- **The filmic shoulder.** The tone curve's roll-off is a logarithm from the
+  knee (0.7) to a white point at five times nominal white, spending its
+  headroom evenly in stops, in place of an exponential that was white two
+  stops over the knee (`REFERENCE.md` §3.1 step 7). Highlights roll off
+  toward white; they do not clip into it.
+- **Local tone on by default.** The bilateral-grid operator (§3.5) runs in
+  every develop at its standing strength; the `LOCAL TONE` control turns it
+  off.
 
 ---
 
@@ -237,11 +255,25 @@ output is 263 MP. Practically, overlap reduces this; the default cap is 80 MP /
 
 #### 2.3.2 User-Selectable Matrices
 
-**Built (Phase 4), revised after three field tests.** `MosaicPreset`,
+**Built (Phase 4), revised after four field tests.** `MosaicPreset`,
 remembered in `AppSettings.mosaicPreset`; `MosaicPlanner.planGrid`,
-`planRegion` and `planPreset`; the `2×2 · 37 MP | 3×3 · 80 MP` pill directly
-above the shutter while SUPER RES is armed, with each grid's megapixels from
-the planner on the lens in hand.
+`planRegion` and `planPreset`; the `1-SHOT · 50 MP | 2×2 · 33 MP | 3×3 · 75 MP`
+pill directly above the shutter while SUPER RES is armed, with each engine's
+megapixels from the planner on the lens in hand.
+
+**Two engines in one mode.** The pill's first preset, `1-SHOT`
+(`MosaicPreset.ONE_SHOT`), is not a mosaic: a single tap takes a sixteen-frame
+burst from the ring on whatever lens is up and accumulates it on the 2x
+sub-pixel canvas of §5.2 from the hand's own tremor -- four times the
+sensor's pixels, at any distance, with no stitching and no parallax, for the
+face, the table and the room the grids cannot do. It shoots through the
+same develop queue as any shot, and the readout says `· 2X` or why not. The
+grids are the telephoto engine, for the scene far enough that its tiles
+share a plane; the HUD says so under the count -- `BEST FOR SCENES > 3 M`
+for a grid, `ANY DISTANCE · HOLD STILL` for the one-shot -- and the lens
+strip stays offered for the one-shot alone. The `2X` set-once toggle that
+used to ask for the canvas on every ordinary shot is gone: the canvas is an
+engine of Super Res now, chosen where the other engines are.
 
 **The grid is angular, at thirty percent overlap.** Neighbouring nodes are
 seventy percent of the telephoto's field of view apart, horizontally and
@@ -258,17 +290,19 @@ is SUPER RES on every surface: the carousel, the pill, the settings, the
 enums (`CaptureMode.SUPER_RES`, `SuperResMachine`) and these documents; the
 canvas classes keep their `Mosaic*` names because that is what the object is.
 
-Three presets replace the fixed 7x7 grid:
+Four presets replace the fixed 7x7 grid:
 
 | Preset | Grid | Tiles | Use Case | Approx. Output |
 |---|---|---|---|---|
-| **Detail Boost** | 2x2 | 4 | Quick detail enhancement, handheld-friendly | ~20 MP |
-| **Large Format** | 3x3 | 9 | Medium-format equivalent, manageable | ~45 MP |
+| **1-Shot** | none (2x canvas) | 1 burst of 16 | Any distance: portraits, close-ups, everyday scenes; zero parallax | 4× the sensor: 50 MP on this device |
+| **Detail Boost** | 2x2 | 4 | Quick detail enhancement, handheld-friendly, scenes beyond ~3 m | ~33 MP |
+| **Large Format** | 3x3 | 9 | Medium-format equivalent, manageable, scenes beyond ~3 m | ~75 MP |
 | **Custom Bounding Box** | User-drawn | Variable | Full control over coverage area | Variable |
 
 **The mode is a first-class mode**, beside AUTO, NIGHT and ACTION in the
-carousel under the shutter, and shoots with the longest lens that delivers
-raw. Selecting it *arms* it: the viewfinder switches to that lens and says so,
+carousel under the shutter, and its grids shoot with the longest lens that
+delivers raw (the one-shot shoots on the lens in hand). Selecting it *arms*
+it: for a grid the viewfinder switches to that lens and says so,
 the raw ring is switched on if it was off (the mode needs it and asks nobody
 to know that), the outline of the whole picture -- 1.65 frames across for a
 2x2, 2.3 for a 3x3 -- is drawn on the viewfinder with its tile nodes inside
@@ -399,7 +433,12 @@ For each locked tile:
    active).
 3. Record the tile's homography relative to the first tile (estimated from
    feature matching between overlapping regions).
-4. Composite onto the mmap-backed canvas with feathered blending.
+4. Composite onto the mmap-backed canvas: the fine detail by *seam* -- every
+   detail-band pixel from one tile, the seam cut by minimum disagreement
+   with a Voronoi prior and a 2.5 px micro-feather -- and the broad
+   differences by wide feathers (`REFERENCE.md` §3.4.3). The anchor's lock
+   holds exposure as a manual exposure and focus at the distance the lens
+   was at, so every tile is shot at one focus and one exposure.
 
 **Post-capture assembly:**
 
@@ -683,7 +722,7 @@ described is not yet built. This is what those numbers mean.
 | 1 | Foundation & Hardware Truth | **Delivered.** Design tokens, haptic vocabulary, decoupled viewfinder HUD, `LensProfile` discovery, non-invasive DCG noise profiling, gallery and review surface. |
 | 2 | Lens Corrections & Develop Quality | Geometric distortion correction from `LensProfile`, lateral chromatic aberration correction, dual-illuminant colour matrix, HEIF output. |
 | 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel alignment refinement (equiangular, after the parabola was measured biased); sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native tiled strips, parity-verified); coverage prediction from the alignment; the linear develop of the canvas to a JPEG from native memory; the `2X` control, readout and gallery badge; IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. See §5.2. |
-| 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after five field tests (§5.4–§5.8).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas; the bilateral-grid local tone operator in both develops, behind a LOCAL TONE control that is off by default. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
+| 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after five field tests (§5.4–§5.8).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas, the detail band by seam cut since the seventh field test; the bilateral-grid local tone operator in both develops, on by default since the seventh field test behind a LOCAL TONE control. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
 | 5 | Responsive UI & GPU Develop | Responsive layout, accessibility pass; Vulkan compute develop if the CPU budget is ever exceeded. |
 | 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
 
@@ -724,7 +763,9 @@ device that differs is recognised.
 - Haptic micro-dither — 30 ms onset against a 25 ms window. §2.3.6 above.
 
 **The integration, since built.** The canvas reaches the gallery. The path a
-shutter press takes with `2X` on:
+shutter press takes with the `1-SHOT` engine selected in Super Res (it was a
+`2X` set-once toggle on every ordinary shot until the seventh field test;
+the burst is sixteen frames now, on whatever lens is up):
 
 1. The ordinary merge runs as it always has — proxies, alignment, accumulation
    — and its alignment fields are kept.
@@ -1060,6 +1101,35 @@ buckets, and a fifth confirmed.
 
 5. **Colour, confirmed.** The luminance-keyed desaturation of §5.8 renders
    saturated reds, pinks and yellows as themselves in the field. Kept.
+
+### 5.10 What the seventh field test found
+
+Two things about the pictures and one about the mode.
+
+1. **The blown JPEGs.** Twelve to fourteen stops in the raw and skies gone
+   white in the JPEG. Three causes, three fixes (§2.2.5): the guard acted
+   only on clipping it could already see, and now carries a standing stop
+   of highlight bias; the tone curve's shoulder was an exponential white two
+   stops over the knee, and is a logarithm to a white point five times
+   nominal; the bilateral-grid local tone operator was a setting nobody
+   turned on, and is on by default.
+
+2. **The seams.** The detail band's soft hand-off still averaged the two
+   tiles in a zone about the equidistant line, and a registration error
+   there was a double image -- the soft blur along every seam. The blend
+   now cuts a seam: a minimum cut over the tile's footprint where the two
+   tiles disagree least, with the deeper tile preferred and a 2.5 px
+   micro-feather, so every pixel of the fine detail comes from one tile
+   (`REFERENCE.md` §3.4.3). The noise floor of §5.9 is retired with it:
+   there is no longer a zone where two tiles' grain is summed. The anchor's
+   lock now holds focus and pins a manual exposure, so every tile is shot at
+   one focus and one exposure.
+
+3. **Two engines.** The 2x sub-pixel canvas of §5.2 was a set-once toggle on
+   every ordinary shot; it is now the first preset of Super Res, `1-SHOT`, a
+   sixteen-frame burst on any lens for any distance, beside the telephoto
+   grids that want a scene beyond a few metres -- and the HUD says which is
+   for what (§2.3.2).
 
 **Still open from Phase 3.** The chroma channels of an eight-frame handheld burst leave
 about a fifth of their cells to the fill; a longer burst closes them and the

@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 
 namespace multiframe {
 
@@ -51,6 +52,47 @@ struct Mask {
             w *= std::max(std::pow(std::clamp(edge / halfTile, 0.0f, 1.0f), power), 1.0f / 65536.0f);
         }
         return w;
+    }
+};
+
+/**
+ * Where the new tile takes over from what the canvas holds, in the detail
+ * band: a coarse grid of ownership over the tile's footprint, cut where the
+ * two disagree least, read back with a micro-feather. See the note on the
+ * seam in Mosaic.cpp.
+ */
+struct Seam {
+    /** Canvas pixels per grid node. */
+    static constexpr int kScale = 8;
+    /** The hand-off's width on the canvas, in pixels. */
+    static constexpr float kFeatherPx = 2.5f;
+
+    bool present = false;
+    int x0 = 0, y0 = 0;
+    int cols = 0, rows = 0;
+    /** 1 where the new tile owns the pixel, 0 where the canvas keeps it. */
+    std::vector<float> own;
+
+    /**
+     * The new tile's share of the canvas pixel at (x, y), 0 to 1: the grid
+     * read bilinearly, then steepened so the transition spans kFeatherPx
+     * rather than a whole node.
+     */
+    float shareAt(float x, float y) const {
+        const float gx = (x - static_cast<float>(x0)) / kScale - 0.5f;
+        const float gy = (y - static_cast<float>(y0)) / kScale - 0.5f;
+        const int ix = std::clamp(static_cast<int>(std::floor(gx)), 0, cols - 1);
+        const int iy = std::clamp(static_cast<int>(std::floor(gy)), 0, rows - 1);
+        const int ix1 = std::min(ix + 1, cols - 1);
+        const int iy1 = std::min(iy + 1, rows - 1);
+        const float fx = std::clamp(gx - static_cast<float>(ix), 0.0f, 1.0f);
+        const float fy = std::clamp(gy - static_cast<float>(iy), 0.0f, 1.0f);
+        const float top = own[static_cast<size_t>(iy) * cols + ix] * (1.0f - fx) +
+                          own[static_cast<size_t>(iy) * cols + ix1] * fx;
+        const float bottom = own[static_cast<size_t>(iy1) * cols + ix] * (1.0f - fx) +
+                             own[static_cast<size_t>(iy1) * cols + ix1] * fx;
+        const float m = top * (1.0f - fy) + bottom * fy;
+        return std::clamp(0.5f + (m - 0.5f) * (static_cast<float>(kScale) / kFeatherPx), 0.0f, 1.0f);
     }
 };
 
@@ -106,14 +148,6 @@ public:
                       const double* h, const float* feathers);
 
     int bands() const { return bands_; }
-
-    /**
-     * How much of the detail band to give up where tiles overlap in the
-     * shadows, 0 to 1. Zero, the default, changes nothing; see the note on
-     * the noise floor in Mosaic.cpp for what a positive value does and why.
-     */
-    void SetNoiseFloor(float detailAttenuation);
-    float noiseFloor() const { return detailAttenuation_; }
 
     /** Fraction of the canvas that any tile has covered. */
     float Coverage() const;
@@ -197,10 +231,14 @@ private:
     bool Compose(int x, int y, float* rgb) const;
 
     long accumulateFull(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
-                        const double* h, const Mask& mask);
+                        const double* h, const Mask& mask, const Seam* seam = nullptr);
     void accumulateLevel(Level& level, int tileWidth, int tileHeight,
                          const double* inverse, const Mask& mask,
-                         const float* pyramid, int pyramidWidth, int pyramidHeight);
+                         const float* pyramid, int pyramidWidth, int pyramidHeight,
+                         const Seam* seam = nullptr);
+    /** Cuts the seam between the new tile and the canvas; false where the tile overlaps nothing. */
+    bool cutSeam(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
+                 const double* h, const double* inverse, const Mask& detail, Seam& out) const;
 
     uint16_t* data_ = nullptr;
     size_t bytes_ = 0;
@@ -208,7 +246,6 @@ private:
     int width_ = 0;
     int height_ = 0;
     int bands_ = 1;
-    float detailAttenuation_ = 0.0f;
     // wide_[k] and narrow_[k] for coarser level k+1, k = 0 .. bands_-2.
     Level wide_[2];
     Level narrow_[2];

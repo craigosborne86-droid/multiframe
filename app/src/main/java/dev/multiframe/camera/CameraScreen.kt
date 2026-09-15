@@ -273,7 +273,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var highlightGuard by remember { mutableStateOf(restored.highlightGuard) }
     var guardPull by remember { mutableFloatStateOf(0f) }
     var dngEnabled by remember { mutableStateOf(restored.dngEnabled) }
-    var superRes by remember { mutableStateOf(restored.superRes) }
     var localTone by remember { mutableStateOf(restored.localTone) }
     var outputFormat by remember { mutableStateOf(restored.outputFormat) }
 
@@ -464,6 +463,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         writeDng = pending.writeDng,
                     )
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // The screen is leaving; the shot in hand was finished under
+                // NonCancellable, and what remains queued is closed below.
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "develop failed", e)
                 null
@@ -1076,9 +1079,28 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // The lens follows the engine while Super Res is armed: a grid is shot
+    // on the telephoto, the one-shot on the lens the user came from -- or
+    // any lens they pick meanwhile, since the strip stays offered for it.
+    LaunchedEffect(mosaicPreset, superResPhase) {
+        if (superResPhase != SuperResMachine.Phase.ARMED) return@LaunchedEffect
+        val capture = mosaicCaptureLens
+        if (mosaicPreset.isMosaic) {
+            if (capture != null && lens?.cameraId != capture.cameraId) {
+                lens = capture
+                status = "switching to ${capture.label}…"
+            }
+        } else if (lens?.cameraId == capture?.cameraId && mosaicReturnLens != null &&
+            mosaicReturnLens?.cameraId != capture?.cameraId
+        ) {
+            lens = mosaicReturnLens
+        }
+    }
+
     // The plan for the armed mosaic: the preset's grid on the capture lens,
     // with the lens the user came from as the framing where that is wider.
-    // Null until the stream is up on the capture lens.
+    // Null until the stream is up on the capture lens, and null for the
+    // one-shot, which is not a mosaic.
     val mosaicPlan = remember(superResPhase, mosaicPreset, zslStream, lens, mosaicReturnLens) {
         if (!superResPhase.selected) null else {
             val stream = zslStream
@@ -1099,9 +1121,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         val capture = mosaicCaptureLens ?: return@remember emptyMap<MosaicPreset, Double>()
         val w = zslStream?.config?.width ?: return@remember emptyMap<MosaicPreset, Double>()
         val h = zslStream?.config?.height ?: return@remember emptyMap<MosaicPreset, Double>()
-        listOf(MosaicPreset.DETAIL_BOOST, MosaicPreset.LARGE_FORMAT).mapNotNull { preset ->
-            MosaicPlanner.planPreset(preset, null, capture, w, h)?.let { preset to it.megapixels }
-        }.toMap()
+        buildMap {
+            // The one-shot's canvas is twice the frame each way, on whatever
+            // lens is up: this sensor's frame at 2x.
+            put(MosaicPreset.ONE_SHOT, MosaicPreset.oneShotMegapixels(w, h))
+            for (preset in listOf(MosaicPreset.DETAIL_BOOST, MosaicPreset.LARGE_FORMAT)) {
+                MosaicPlanner.planPreset(preset, null, capture, w, h)?.let { put(preset, it.megapixels) }
+            }
+        }
     }
 
     // Armed and not yet running: the outline and the nodes as the anchor would
@@ -1111,6 +1138,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             mosaicView = mosaicPlan?.let { MosaicCapture.armedView(it, it.captureLens.label) }
             if (System.currentTimeMillis() >= superResSummaryUntil) {
                 status = when {
+                    !mosaicPreset.isMosaic -> "1-SHOT · %.0f MP · hold still, then press the shutter".format(
+                        presetMegapixels[MosaicPreset.ONE_SHOT] ?: 0.0,
+                    )
                     mosaicPlan == null -> "switching to the telephoto…"
                     else -> "%s · %d tiles · aim, then press the shutter".format(
                         mosaicPlan.captureLens.label, mosaicPlan.tileCount,
@@ -1135,7 +1165,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 mosaicReturnLens = lens
                 // The ring is the engine; if it was released, this is the moment to have it back.
                 zslWanted = true
-                if (capture != null && lens?.cameraId != capture.cameraId) {
+                // The grids shoot on the telephoto; the one-shot shoots on
+                // whatever lens the user is on, since it is for any distance.
+                if (mosaicPreset.isMosaic && capture != null && lens?.cameraId != capture.cameraId) {
                     lens = capture
                     status = "switching to ${capture.label}…"
                 }
@@ -1290,7 +1322,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // short strings, and only on an actual change rather than per frame.
     LaunchedEffect(
         settings, burstFrames, lens, highlightGuard, captureMode, dngEnabled,
-        timerSeconds, guides, superRes, mosaicPreset, localTone, outputFormat, showHistogram,
+        timerSeconds, guides, mosaicPreset, localTone, outputFormat, showHistogram,
         mosaicReturnLens,
     ) {
         AppSettings.save(
@@ -1307,7 +1339,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 captureMode = if (captureMode == CaptureMode.SUPER_RES) CaptureMode.AUTO else captureMode,
                 timerSeconds = timerSeconds,
                 guides = guides.name,
-                superRes = superRes,
                 mosaicPreset = mosaicPreset,
                 localTone = localTone,
                 outputFormat = outputFormat,
@@ -1660,8 +1691,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // there for anyone who thinks in phone terms.
             // Not with Super Res selected: the telephoto is doing the taking,
             // and the strip would offer a choice the mode has already made.
+            // The one-shot is the exception: it shoots on any lens, so the
+            // strip stays while it is armed.
             val rearLenses = remember(lenses) { LensCatalog.rear(lenses) }
-            if (rearLenses.size > 1 && !superResPhase.selected) {
+            val lensChoice = !superResPhase.selected ||
+                (superResPhase == SuperResMachine.Phase.ARMED && !mosaicPreset.isMosaic)
+            if (rearLenses.size > 1 && lensChoice) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1722,9 +1757,21 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 // carries what the canvas would be, in megapixels. Not while
                 // running: the nodes are laid out and some are taken.
                 if (superResPhase == SuperResMachine.Phase.ARMED) {
+                    // What each engine is for, in a word, over the pill: the
+                    // grids assume a scene far enough that the tiles share a
+                    // plane; the one-shot assumes nothing but a still hand.
+                    Text(
+                        text = if (mosaicPreset.isMosaic) "BEST FOR SCENES > 3 M" else "ANY DISTANCE · HOLD STILL",
+                        style = Type.Label,
+                        color = Ink.Muted,
+                        modifier = Modifier
+                            .padding(bottom = 4.dp)
+                            .semantics { contentDescription = "super res hint" },
+                    )
                     MosaicPresetPill(
                         preset = mosaicPreset,
                         customOffered = false,
+                        oneShotOffered = caps?.supportsSuperRes == true,
                         megapixels = presetMegapixels,
                         onPreset = {
                             Haptics.segment(view)
@@ -1732,6 +1779,59 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         },
                         modifier = Modifier.padding(bottom = 6.dp),
                     )
+                }
+
+                // The ZSL shutter, for the ordinary modes and the one-shot
+                // alike. The frames are locked in microseconds on this thread
+                // -- they were exposed before the press, so there is nothing
+                // to wait for -- then the haptic, with the frames a haptic
+                // could blur already in the ring's hand, and the shot goes to
+                // the develop queue. The settings are read at the press. With
+                // a timer the countdown runs first, busy for the countdown
+                // only: it is what a second press cancels.
+                fun takeZsl(stream: ZslRawStream, frames: Int, label: String, canvas2x: Boolean) {
+                    val rot = caps?.let { orientation.captureRotation(it.sensorOrientation) } ?: 0
+                    val lensProfile = lensProfiles[stream.lensId]
+                    val params = DevelopParams(
+                        localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
+                    )
+                    val dng = dngEnabled
+                    val format = outputFormat
+
+                    fun lockAndQueue() {
+                        val shot = ZslCapture.take(stream, frames)
+                        if (shot.count == 0) {
+                            shot.close()
+                            Haptics.reject(view)
+                            status = "ring empty: no frames buffered yet"
+                            return
+                        }
+                        Haptics.shutter(view)
+                        developing++
+                        status = "%s: %d frames".format(label, shot.count)
+                        developQueue.trySend(
+                            PendingShot(shot, stream, rot, lensProfile, format, canvas2x, params, dng),
+                        )
+                    }
+
+                    if (timerSeconds <= 0) {
+                        lockAndQueue()
+                        return
+                    }
+                    busy = true
+                    captureJob = scope.launch {
+                        for (remaining in timerSeconds downTo 1) {
+                            countdown = remaining
+                            // A metronome you can feel without watching the
+                            // screen, which is the point of a self-timer.
+                            Haptics.tick(view)
+                            status = "$remaining… tap the shutter to cancel"
+                            kotlinx.coroutines.delay(1000)
+                        }
+                        countdown = 0
+                        busy = false
+                        lockAndQueue()
+                    }
                 }
 
                 // Thumbnail, shutter and the space opposite share one row, so
@@ -1779,81 +1879,35 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             }
                             if (busy) return@ShutterButton
 
-                            // Super Res: the shutter anchors it where the
-                            // reticle points and the guidance takes over. The
-                            // stream has to be on the capture lens already.
-                            if (superResPhase.selected) {
-                                startSuperRes()
-                                return@ShutterButton
-                            }
-
                             // Zero shutter lag: the frames already exist, so this press
                             // locks them rather than starting a capture -- and
                             // returns. The merge, the render and the write are
                             // the develop queue's, behind the viewfinder; the
                             // next press is taken whenever it comes.
                             val stream = zslStream
+
+                            // Super Res. A grid: the shutter anchors it where the
+                            // reticle points and the guidance takes over; the
+                            // stream has to be on the capture lens already. The
+                            // one-shot: a sixteen-frame burst from the ring on
+                            // this lens onto the 2x canvas, through the same
+                            // queue as any shot.
+                            if (superResPhase.selected) {
+                                if (mosaicPreset.isMosaic) {
+                                    startSuperRes()
+                                } else if (superResPhase == SuperResMachine.Phase.ARMED && stream != null &&
+                                    caps?.supportsSuperRes == true
+                                ) {
+                                    takeZsl(stream, MosaicPreset.ONE_SHOT_FRAMES, "1-SHOT", canvas2x = true)
+                                } else {
+                                    Haptics.reject(view)
+                                }
+                                return@ShutterButton
+                            }
+
                             if (stream != null) {
                                 val plan = capturePlan
-                                val frames = plan?.frames ?: burstFrames
-                                val label = plan?.resolved?.label ?: "ZSL"
-                                val rot = caps?.let {
-                                    orientation.captureRotation(it.sensorOrientation)
-                                } ?: 0
-                                val lensProfile = lensProfiles[stream.lensId]
-                                val canvas2x = superRes && caps?.supportsSuperRes == true
-                                val params = DevelopParams(
-                                    localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
-                                )
-                                val dng = dngEnabled
-                                val format = outputFormat
-
-                                // The shutter itself: the frames locked, in
-                                // microseconds, on this thread -- the frames were
-                                // exposed before the press, so there is nothing
-                                // to wait for. Then the haptic: the frames a
-                                // haptic could blur are in the ring's hand.
-                                fun lockAndQueue() {
-                                    val shot = ZslCapture.take(stream, frames)
-                                    if (shot.count == 0) {
-                                        shot.close()
-                                        Haptics.reject(view)
-                                        status = "ring empty: no frames buffered yet"
-                                        return
-                                    }
-                                    Haptics.shutter(view)
-                                    developing++
-                                    status = "%s: %d frames".format(label, shot.count)
-                                    developQueue.trySend(
-                                        PendingShot(shot, stream, rot, lensProfile, format, canvas2x, params, dng),
-                                    )
-                                }
-
-                                if (timerSeconds <= 0) {
-                                    lockAndQueue()
-                                    return@ShutterButton
-                                }
-
-                                // The timer runs before anything is locked, so the
-                                // frames captured are the ones from the moment the
-                                // countdown ends rather than when it began. Busy
-                                // for the countdown only: it is what the second
-                                // press cancels.
-                                busy = true
-                                captureJob = scope.launch {
-                                    for (remaining in timerSeconds downTo 1) {
-                                        countdown = remaining
-                                        // A metronome you can feel without
-                                        // watching the screen, which is the
-                                        // point of a self-timer.
-                                        Haptics.tick(view)
-                                        status = "$remaining… tap the shutter to cancel"
-                                        kotlinx.coroutines.delay(1000)
-                                    }
-                                    countdown = 0
-                                    busy = false
-                                    lockAndQueue()
-                                }
+                                takeZsl(stream, plan?.frames ?: burstFrames, plan?.resolved?.label ?: "ZSL", canvas2x = false)
                                 return@ShutterButton
                             }
 
@@ -2114,8 +2168,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     onHighlightGuard = { if (!busy) highlightGuard = it },
                     // Only with a stream to accumulate from: the 2x path is
                     // a property of the ZSL burst.
-                    superRes = if (caps?.supportsSuperRes == true && zslStream != null) superRes else null,
-                    onSuperRes = { if (!busy) superRes = it },
                     localTone = localTone,
                     onLocalTone = { if (!busy) localTone = it },
                     outputFormat = if (HeifEncoder.isAvailable) outputFormat else null,
@@ -2132,7 +2184,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         if (superResPhase.controlsEnabled) selectMode(fresh.captureMode)
                         timerSeconds = fresh.timerSeconds
                         guides = GuideMode.OFF
-                        superRes = fresh.superRes
                         mosaicPreset = fresh.mosaicPreset
                         localTone = fresh.localTone
                         outputFormat = fresh.outputFormat

@@ -170,6 +170,345 @@ MosaicCanvas::~MosaicCanvas() {
     }
 }
 
+namespace {
+
+/**
+ * Dinic's maximum flow on a small graph, for the seam cut.
+ *
+ * Integer capacities; arcs stored in pairs so the reverse arc of `e` is
+ * `e ^ 1`. The grid this is run on is a few hundred nodes a side, so the
+ * level graph's depth -- and the DFS's recursion -- is bounded by the grid's
+ * diameter, and the whole cut is tens of milliseconds on the placement thread.
+ */
+class MaxFlow {
+public:
+    explicit MaxFlow(int nodes) : head_(static_cast<size_t>(nodes), -1), level_(static_cast<size_t>(nodes)),
+                                  it_(static_cast<size_t>(nodes)) {}
+
+    void addEdge(int u, int v, int64_t cap, int64_t reverseCap) {
+        to_.push_back(v); cap_.push_back(cap); next_.push_back(head_[static_cast<size_t>(u)]);
+        head_[static_cast<size_t>(u)] = static_cast<int>(to_.size()) - 1;
+        to_.push_back(u); cap_.push_back(reverseCap); next_.push_back(head_[static_cast<size_t>(v)]);
+        head_[static_cast<size_t>(v)] = static_cast<int>(to_.size()) - 1;
+    }
+
+    int64_t run(int s, int t) {
+        int64_t flow = 0;
+        while (bfs(s, t)) {
+            for (size_t i = 0; i < it_.size(); ++i) it_[i] = head_[i];
+            for (;;) {
+                const int64_t pushed = dfs(s, t, INT64_MAX);
+                if (pushed <= 0) break;
+                flow += pushed;
+            }
+        }
+        return flow;
+    }
+
+    /** After run: which nodes the source still reaches -- the source's side of the cut. */
+    void sourceSide(int s, std::vector<uint8_t>& side) const {
+        side.assign(head_.size(), 0);
+        std::vector<int> queue;
+        queue.reserve(head_.size());
+        queue.push_back(s);
+        side[static_cast<size_t>(s)] = 1;
+        for (size_t q = 0; q < queue.size(); ++q) {
+            const int u = queue[q];
+            for (int e = head_[static_cast<size_t>(u)]; e != -1; e = next_[static_cast<size_t>(e)]) {
+                const int v = to_[static_cast<size_t>(e)];
+                if (cap_[static_cast<size_t>(e)] > 0 && !side[static_cast<size_t>(v)]) {
+                    side[static_cast<size_t>(v)] = 1;
+                    queue.push_back(v);
+                }
+            }
+        }
+    }
+
+private:
+    bool bfs(int s, int t) {
+        std::fill(level_.begin(), level_.end(), -1);
+        std::vector<int> queue;
+        queue.reserve(head_.size());
+        queue.push_back(s);
+        level_[static_cast<size_t>(s)] = 0;
+        for (size_t q = 0; q < queue.size(); ++q) {
+            const int u = queue[q];
+            for (int e = head_[static_cast<size_t>(u)]; e != -1; e = next_[static_cast<size_t>(e)]) {
+                const int v = to_[static_cast<size_t>(e)];
+                if (cap_[static_cast<size_t>(e)] > 0 && level_[static_cast<size_t>(v)] < 0) {
+                    level_[static_cast<size_t>(v)] = level_[static_cast<size_t>(u)] + 1;
+                    queue.push_back(v);
+                }
+            }
+        }
+        return level_[static_cast<size_t>(t)] >= 0;
+    }
+
+    int64_t dfs(int u, int t, int64_t f) {
+        if (u == t) return f;
+        for (int& e = it_[static_cast<size_t>(u)]; e != -1; e = next_[static_cast<size_t>(e)]) {
+            const int v = to_[static_cast<size_t>(e)];
+            if (cap_[static_cast<size_t>(e)] > 0 && level_[static_cast<size_t>(v)] == level_[static_cast<size_t>(u)] + 1) {
+                const int64_t d = dfs(v, t, std::min(f, cap_[static_cast<size_t>(e)]));
+                if (d > 0) {
+                    cap_[static_cast<size_t>(e)] -= d;
+                    cap_[static_cast<size_t>(e ^ 1)] += d;
+                    return d;
+                }
+            }
+        }
+        return 0;
+    }
+
+    std::vector<int> head_, next_, to_;
+    std::vector<int64_t> cap_;
+    std::vector<int> level_, it_;
+};
+
+/** Luminance of a tile pixel, bilinear, on the 8-bit scale. */
+inline float tileLuma(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride, double sx, double sy) {
+    const double cx = std::clamp(sx, 0.0, tileWidth - 1.0);
+    const double cy = std::clamp(sy, 0.0, tileHeight - 1.0);
+    const int ix = static_cast<int>(cx);
+    const int iy = static_cast<int>(cy);
+    const float fx = static_cast<float>(cx) - ix;
+    const float fy = static_cast<float>(cy) - iy;
+    const int ix1 = std::min(ix + 1, tileWidth - 1);
+    const int iy1 = std::min(iy + 1, tileHeight - 1);
+    auto luma = [&](int x, int y) {
+        const uint8_t* p = rgba + static_cast<size_t>(y) * tileStride + x * 4;
+        return 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
+    };
+    const float top = luma(ix, iy) * (1.0f - fx) + luma(ix1, iy) * fx;
+    const float bottom = luma(ix, iy1) * (1.0f - fx) + luma(ix1, iy1) * fx;
+    return top * (1.0f - fy) + bottom * fy;
+}
+
+/** The cut's costs, in units of an eighth of a luma code. */
+constexpr int64_t kSeamDiffScale = 8;
+/** Every arc costs at least this, so a cut is never free and the shortest wins among equals. */
+constexpr int64_t kSeamMinArc = 4;
+/**
+ * The Voronoi prior's weight: the cost per node of owning a pixel the other
+ * tile is deeper at, per tile pixel of the depth difference. Four codes a
+ * pixel: a seam displaced from the equidistant line by five nodes -- some
+ * sixty tile pixels -- to skirt a texture the tiles place a pixel apart pays
+ * about what cutting through the texture would, so it moves that far for a
+ * real disagreement and no further for noise. Priced in pixels rather than
+ * as a share of the tile, so a small tile is cut by the same rule as a
+ * large one.
+ */
+constexpr float kSeamPriorPerPixel = 4.0f;
+/** A tile's own outermost pixels, inside its ramp, are given away where anything else covers them. */
+constexpr float kSeamEdgePenalty = 4000.0f;
+/** Luma differences past this are all the same disagreement. */
+constexpr float kSeamDiffCap = 64.0f;
+constexpr int64_t kSeamInfinity = INT64_C(1) << 40;
+
+}  // namespace
+
+/**
+ * The seam: which tile owns each pixel where the new one overlaps the canvas.
+ *
+ * ### What the hand-off was, and what it was not
+ *
+ * The detail band's mask already made the deeper tile win an overlap by a
+ * twelfth power of the two depths -- a soft Voronoi, swapping over in a zone
+ * about a fifteenth of the overlap wide. Inside that zone the two tiles were
+ * still averaged, and two textures a pixel apart averaged are a double image:
+ * a soft band along every seam, exactly where the sixth field test's eye
+ * went. And the equidistant line is only where the seam should fall if the
+ * two tiles agree there; where a registration is a pixel off, a seam through
+ * a wall's brickwork shows and a seam through the sky does not, and the
+ * depths know nothing about which is which.
+ *
+ * ### The cut
+ *
+ * Over the tile's footprint on the canvas, at one node per eight pixels, a
+ * binary labelling -- new tile or canvas -- is chosen by a minimum cut. A
+ * node the canvas does not yet cover can only be the new tile's; a node
+ * outside the new tile can only be the canvas's; between them every node is
+ * free. Cutting between two neighbours costs how much the two tiles disagree
+ * there (`kSeamDiffScale` times the mean luma difference at both, over
+ * sixteen of each node's pixels, capped, plus
+ * `kSeamMinArc` so the shortest seam wins among equals), so the seam runs
+ * where the tiles agree -- along a sky, an edge that registered, a shadow --
+ * and not across a texture they place a pixel apart. Giving a node to the
+ * shallower tile costs the depth difference times `kSeamPriorPerPixel`: the
+ * Voronoi line is where the seam falls when nothing in the picture argues,
+ * and the deeper tile is the sharper one, being nearer its lens's centre. A
+ * node inside the new tile's own ramp -- its outermost pixels, where the
+ * registration is least trusted -- is given away wherever anything else
+ * covers it.
+ *
+ * The canvas's own depth at a node is read back from the weight it stores:
+ * the detail mask's hand-off wrote `(depth / halfTile)^12`, so the twelfth
+ * root of the weight is the depth of whichever tile owns the pixel now.
+ *
+ * ### What the seam does to the blend
+ *
+ * The detail band and the coarse level beneath it are then accumulated by
+ * ownership rather than by weight: where the new tile owns a pixel its value
+ * replaces the canvas's and its own weight is stored; where the canvas owns
+ * it the new tile contributes nothing; across `Seam::kFeatherPx` at the
+ * boundary the two are mixed, which is the micro-feather. Every pixel of the
+ * fine band comes from one tile. The coarser bands keep their wide feathers,
+ * which is what spreads a step in exposure across the overlap; a seam is a
+ * decision about texture, not about level. With one tile there is no overlap,
+ * no free node and no seam, and the blend is exactly what it was, to the byte
+ * -- `MosaicBlendDeviceTest` holds it there.
+ */
+bool MosaicCanvas::cutSeam(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
+                           const double* h, const double* inverse, const Mask& detail, Seam& out) const {
+    out.present = false;
+    if (data_ == nullptr || rgba == nullptr || detail.power <= 0.0f) return false;
+
+    double minX = 1e18, minY = 1e18, maxX = -1e18, maxY = -1e18;
+    const double cornersX[4] = {0.0, static_cast<double>(tileWidth), 0.0, static_cast<double>(tileWidth)};
+    const double cornersY[4] = {0.0, 0.0, static_cast<double>(tileHeight), static_cast<double>(tileHeight)};
+    for (int i = 0; i < 4; ++i) {
+        double px, py;
+        if (!project(h, cornersX[i], cornersY[i], px, py)) return false;
+        minX = std::min(minX, px); maxX = std::max(maxX, px);
+        minY = std::min(minY, py); maxY = std::max(maxY, py);
+    }
+    const int x0 = std::max(0, static_cast<int>(std::floor(minX)));
+    const int y0 = std::max(0, static_cast<int>(std::floor(minY)));
+    const int x1 = std::min(width_ - 1, static_cast<int>(std::ceil(maxX)));
+    const int y1 = std::min(height_ - 1, static_cast<int>(std::ceil(maxY)));
+    if (x1 < x0 || y1 < y0) return false;
+
+    const int S = Seam::kScale;
+    const int cols = (x1 - x0) / S + 1;
+    const int rows = (y1 - y0) / S + 1;
+    const size_t count = static_cast<size_t>(cols) * rows;
+
+    enum : uint8_t { kOutside = 0, kMustNew = 1, kFree = 2 };
+    std::vector<uint8_t> kind(count, kOutside);
+    std::vector<float> costNew(count, 0.0f);   // the cost of the new tile owning the node
+    std::vector<float> costOld(count, 0.0f);   // the cost of the canvas keeping it
+    std::vector<float> diff(count, 0.0f);
+    size_t freeNodes = 0;
+
+    const float halfTile = std::max(detail.halfTile, 1.0f);
+    const float invPower = 1.0f / detail.power;
+    for (int gy = 0; gy < rows; ++gy) {
+        for (int gx = 0; gx < cols; ++gx) {
+            const size_t n = static_cast<size_t>(gy) * cols + gx;
+            const double cx = x0 + gx * S + S * 0.5;
+            const double cy = y0 + gy * S + S * 0.5;
+            double sx, sy;
+            if (!project(inverse, cx, cy, sx, sy)) continue;
+            sx -= 0.5;
+            sy -= 0.5;
+            if (sx < 0.0 || sy < 0.0 || sx > tileWidth - 1.0 || sy > tileHeight - 1.0) continue;
+            const int px = std::clamp(static_cast<int>(cx), 0, width_ - 1);
+            const int py = std::clamp(static_cast<int>(cy), 0, height_ - 1);
+            const uint16_t* cell = data_ + (static_cast<size_t>(py) * width_ + px) * kChannels;
+            if (cell[3] == 0) {
+                kind[n] = kMustNew;
+                continue;
+            }
+            kind[n] = kFree;
+            ++freeNodes;
+
+            // The prior: how much deeper one tile is than the other, in tile
+            // pixels, priced per node.
+            const float depthNew = static_cast<float>(std::min(std::min(sx, sy), std::min(tileWidth - 1.0 - sx, tileHeight - 1.0 - sy)));
+            const float depthOld = halfTile * std::pow(std::max(decodeWeight(cell[3]), 1e-6f), invPower);
+            const float deeper = std::clamp(depthOld - depthNew, -halfTile, halfTile);
+            if (deeper > 0.0f) costNew[n] += kSeamPriorPerPixel * deeper;
+            else costOld[n] += kSeamPriorPerPixel * -deeper;
+            // The new tile's own ramp: its edge is nobody's texture.
+            if (depthNew < detail.feather) {
+                costNew[n] += kSeamEdgePenalty * (1.0f - depthNew / std::max(detail.feather, 1.0f));
+            }
+
+            // How much the two disagree here: the tile's luma against the
+            // canvas's at sixteen of the node's pixels -- every other pixel
+            // each way, read at the pixel's centre exactly as accumulateFull
+            // reads it, so a texture at the pixel scale is measured and not
+            // blurred away between two pixels -- so a pixel of
+            // misregistration reads as disagreement rather than as chance.
+            float sum = 0.0f;
+            int taps = 0;
+            for (int ky = 1; ky < S; ky += 2) {
+                for (int kx = 1; kx < S; kx += 2) {
+                    const int qx = x0 + gx * S + kx;
+                    const int qy = y0 + gy * S + ky;
+                    if (qx < 0 || qy < 0 || qx >= width_ || qy >= height_) continue;
+                    double tx, ty;
+                    if (!project(inverse, qx + 0.5, qy + 0.5, tx, ty)) continue;
+                    tx -= 0.5;
+                    ty -= 0.5;
+                    if (tx < 0.0 || ty < 0.0 || tx > tileWidth - 1.0 || ty > tileHeight - 1.0) continue;
+                    const uint16_t* q = data_ + (static_cast<size_t>(qy) * width_ + qx) * kChannels;
+                    if (q[3] == 0) continue;
+                    const float canvasLuma = (0.2126f * q[0] + 0.7152f * q[1] + 0.0722f * q[2]) / 257.0f;
+                    sum += std::min(std::fabs(tileLuma(rgba, tileWidth, tileHeight, tileStride, tx, ty) - canvasLuma), kSeamDiffCap);
+                    ++taps;
+                }
+            }
+            diff[n] = taps > 0 ? sum / taps : 0.0f;
+        }
+    }
+    if (freeNodes == 0) return false;
+
+    // The graph: the source is the new tile, the sink the canvas. An arc from
+    // the source is cut when the node goes to the canvas, so it carries the
+    // cost of the canvas keeping the node; an arc to the sink is cut when
+    // the node goes to the new tile, and carries that cost.
+    const int source = static_cast<int>(count);
+    const int sink = static_cast<int>(count) + 1;
+    MaxFlow flow(static_cast<int>(count) + 2);
+    for (size_t n = 0; n < count; ++n) {
+        switch (kind[n]) {
+            case kMustNew:
+                flow.addEdge(source, static_cast<int>(n), kSeamInfinity, 0);
+                break;
+            case kFree:
+                if (costOld[n] > 0.0f) flow.addEdge(source, static_cast<int>(n), static_cast<int64_t>(costOld[n]), 0);
+                if (costNew[n] > 0.0f) flow.addEdge(static_cast<int>(n), sink, static_cast<int64_t>(costNew[n]), 0);
+                break;
+            default:
+                flow.addEdge(static_cast<int>(n), sink, kSeamInfinity, 0);
+                break;
+        }
+    }
+    for (int gy = 0; gy < rows; ++gy) {
+        for (int gx = 0; gx < cols; ++gx) {
+            const size_t n = static_cast<size_t>(gy) * cols + gx;
+            if (kind[n] == kOutside) continue;
+            auto link = [&](size_t m) {
+                if (kind[m] == kOutside) return;
+                if (kind[n] != kFree && kind[m] != kFree) return;
+                const int64_t c = kSeamMinArc + static_cast<int64_t>(kSeamDiffScale * (diff[n] + diff[m]));
+                flow.addEdge(static_cast<int>(n), static_cast<int>(m), c, c);
+            };
+            if (gx + 1 < cols) link(n + 1);
+            if (gy + 1 < rows) link(n + static_cast<size_t>(cols));
+        }
+    }
+    flow.run(source, sink);
+
+    std::vector<uint8_t> side;
+    flow.sourceSide(source, side);
+    out.x0 = x0;
+    out.y0 = y0;
+    out.cols = cols;
+    out.rows = rows;
+    out.own.assign(count, 0.0f);
+    size_t taken = 0;
+    for (size_t n = 0; n < count; ++n) {
+        const bool owns = kind[n] == kMustNew || (kind[n] == kFree && side[n]);
+        out.own[n] = owns ? 1.0f : 0.0f;
+        if (kind[n] == kFree && owns) ++taken;
+    }
+    out.present = true;
+    LOGI("seam: %zu of %zu overlapping nodes to the new tile, grid %dx%d", taken, freeNodes, cols, rows);
+    return true;
+}
+
 long MosaicCanvas::AddTile(const uint8_t* rgba, int tileWidth, int tileHeight,
                            int tileStride, const double* h, float feather) {
     Mask mask;
@@ -178,8 +517,10 @@ long MosaicCanvas::AddTile(const uint8_t* rgba, int tileWidth, int tileHeight,
 }
 
 long MosaicCanvas::accumulateFull(const uint8_t* rgba, int tileWidth, int tileHeight,
-                                  int tileStride, const double* h, const Mask& mask) {
+                                  int tileStride, const double* h, const Mask& mask,
+                                  const Seam* seam) {
     if (data_ == nullptr || flattened_) return 0;
+    if (seam != nullptr && !seam->present) seam = nullptr;
     if (rgba == nullptr || tileWidth <= 0 || tileHeight <= 0) return 0;
 
     double inverse[9];
@@ -272,16 +613,30 @@ long MosaicCanvas::accumulateFull(const uint8_t* rgba, int tileWidth, int tileHe
             const float total = accumulated + weight;
             if (total <= 0.0f) continue;
 
+            // By weight, or by ownership. With no seam -- one band, or a
+            // tile that overlaps nothing -- the running weighted mean. With a
+            // seam, and something already here, the share the cut gave this
+            // tile: all, nothing, or the micro-feather's fraction, and the
+            // stored weight becomes this tile's own where it owns the pixel,
+            // so the next tile's cut reads this tile's depth here.
+            float share = weight / total;
+            float stored = total;
+            if (seam != nullptr && accumulated > 0.0f) {
+                share = seam->shareAt(x + 0.5f, y + 0.5f);
+                if (share <= 0.0f) continue;
+                stored = share >= 0.5f ? weight : accumulated;
+            }
+
             for (int c = 0; c < 3; ++c) {
                 const float sample = acc[c] * (0.25f * 257.0f);
 
                 // Running weighted mean: no separate sum to overflow, and the
                 // canvas stays at eight bytes per pixel instead of sixteen.
                 const float current = static_cast<float>(px[c]);
-                const float updated = current + (sample - current) * (weight / total);
+                const float updated = current + (sample - current) * share;
                 px[c] = static_cast<uint16_t>(std::clamp(updated, 0.0f, 65535.0f));
             }
-            px[3] = encodeWeight(total);
+            px[3] = encodeWeight(stored);
             ++touched;
         }
     }
@@ -355,11 +710,16 @@ long MosaicCanvas::AddTileBands(const uint8_t* rgba, int tileWidth, int tileHeig
     }
     masks[0].power = kHandoffPower;
 
-    const long touched = accumulateFull(rgba, tileWidth, tileHeight, tileStride, h, masks[0]);
-    if (touched == 0) return 0;
-
     double inverse[9];
-    if (!invert3x3(h, inverse)) return touched;
+    if (!invert3x3(h, inverse)) return 0;
+
+    // Where this tile takes over from the canvas in the detail band, decided
+    // before anything is written: the cut reads the canvas as it stands.
+    Seam seam;
+    cutSeam(rgba, tileWidth, tileHeight, tileStride, h, inverse, masks[0], seam);
+
+    const long touched = accumulateFull(rgba, tileWidth, tileHeight, tileStride, h, masks[0], &seam);
+    if (touched == 0) return 0;
 
     // The tile's Gaussian levels: box averages of four by four, then of those.
     // A box rather than a Gaussian because the level is only ever read back
@@ -385,7 +745,10 @@ long MosaicCanvas::AddTileBands(const uint8_t* rgba, int tileWidth, int tileHeig
         }
     }
     accumulateLevel(wide_[0], tileWidth, tileHeight, inverse, masks[1], g1.data(), w1, h1);
-    accumulateLevel(narrow_[0], tileWidth, tileHeight, inverse, masks[0], g1.data(), w1, h1);
+    // The narrow canvas of the first coarser level carries the detail mask,
+    // seam included: it is the level the detail band's correction is made
+    // against, and the two have to agree about who owns a pixel.
+    accumulateLevel(narrow_[0], tileWidth, tileHeight, inverse, masks[0], g1.data(), w1, h1, &seam);
 
     if (bands_ >= 3) {
         const int w2 = w1 / kLevelScale;
@@ -422,8 +785,10 @@ long MosaicCanvas::AddTileBands(const uint8_t* rgba, int tileWidth, int tileHeig
  */
 void MosaicCanvas::accumulateLevel(Level& level, int tileWidth, int tileHeight,
                                    const double* inverse, const Mask& mask,
-                                   const float* pyramid, int pyramidWidth, int pyramidHeight) {
+                                   const float* pyramid, int pyramidWidth, int pyramidHeight,
+                                   const Seam* seam) {
     if (level.data == nullptr) return;
+    if (seam != nullptr && !seam->present) seam = nullptr;
     const double s = level.scale;
 
     // The tile's corners forward through h bound the region, as in AddTile;
@@ -480,15 +845,23 @@ void MosaicCanvas::accumulateLevel(Level& level, int tileWidth, int tileHeight,
             const float accumulated = decodeWeight(cell[3]);
             const float total = accumulated + weight;
             if (total <= 0.0f) continue;
+            // By ownership where the seam decides, as in accumulateFull.
+            float share = weight / total;
+            float stored = total;
+            if (seam != nullptr && accumulated > 0.0f) {
+                share = seam->shareAt(static_cast<float>((x + 0.5) * s), static_cast<float>((y + 0.5) * s));
+                if (share <= 0.0f) continue;
+                stored = share >= 0.5f ? weight : accumulated;
+            }
             for (int c = 0; c < 3; ++c) {
                 const float top = p00[c] * (1.0f - fx) + p10[c] * fx;
                 const float bottom = p01[c] * (1.0f - fx) + p11[c] * fx;
                 const float sample = (top * (1.0f - fy) + bottom * fy) * 257.0f;
                 const float current = static_cast<float>(cell[c]);
-                const float updated = current + (sample - current) * (weight / total);
+                const float updated = current + (sample - current) * share;
                 cell[c] = static_cast<uint16_t>(std::clamp(updated, 0.0f, 65535.0f));
             }
-            cell[3] = encodeWeight(total);
+            cell[3] = encodeWeight(stored);
         }
     }
 }
@@ -543,71 +916,6 @@ bool sampleLevelPair(const uint16_t* a, const uint16_t* b, int width, int height
 
 }  // namespace
 
-/**
- * The noise floor: where two tiles overlap in the shadows at high ISO, part
- * of the finest band is given up for the level beneath it.
- *
- * ### What the cross-hatch is
- *
- * A tile's grain, projected onto the canvas, is not stationary: bilinear
- * resampling carries a pixel's whole variance where a sample lands on a
- * tile pixel and half or a quarter of it between, so the grain's variance
- * beats with the tile's grid against the canvas's. The half-pixel
- * prefilter in accumulateFull takes most of that out, not all. In one tile
- * what remains is a faint mesh; where two tiles overlap, each turned a
- * little against the other by the hand, two meshes at two orientations
- * lie over each other and the eye reads the sum as weave -- the fifth
- * field test's cross-hatching over every dark overlap at ISO 3200. It is
- * an artefact of the detail band alone: the coarser bands are box means of
- * sixteen and two hundred and fifty-six pixels and carry none of it.
- *
- * ### What is done about it
- *
- * The finest band's own contribution -- A_0 less the coarse level beneath
- * it, up(B_1) -- is scaled back by a factor of three things: how high the
- * ISO was (the canvas is told, MosaicCanvas.kt turns it into an
- * attenuation), how much of an overlap the pixel is (the log of the wide
- * level's accumulated weight: one tile at full weight is none, two is
- * one), and how dark the pixel is (the coarse level's luminance, full in
- * the shadows and nothing from the midtones up). Where all three are full
- * half the fine band goes and the shadow is the 4x4 mean plus half its
- * detail, which at ISO 3200 is half its noise. Nowhere else changes: a
- * single tile is composed exactly as before, to the bit, because the
- * overlap factor there is zero and the subtraction is of zero. The blend's
- * A/A null (one tile in one band and three) holds with the floor set, and
- * MosaicBlendDeviceTest holds it there.
- *
- * Not a denoise of the picture: a decision about which of two tiles' noise
- * to keep less of where they meet, keyed on where the eye sees the beat.
- */
-void MosaicCanvas::SetNoiseFloor(float detailAttenuation) {
-    detailAttenuation_ = std::clamp(detailAttenuation, 0.0f, 1.0f);
-}
-
-namespace {
-
-/** How much of an overlap the pixel is, 0 at one tile's full weight and 1 at two, from the weight code. */
-inline float overlapAt(const uint16_t* level, int levelWidth, int levelHeight,
-                       int scale, int x, int y) {
-    if (level == nullptr) return 0.0f;
-    const int ix = std::clamp(static_cast<int>((x + 0.5) / scale), 0, levelWidth - 1);
-    const int iy = std::clamp(static_cast<int>((y + 0.5) / scale), 0, levelHeight - 1);
-    const uint16_t code = level[(static_cast<size_t>(iy) * levelWidth + ix) * 4 + 3];
-    if (code == 0) return 0.0f;
-    // The code is 2048 per octave about one: the log the factor wants.
-    return std::clamp((static_cast<float>(code) - kWeightZeroCode) / kWeightCodesPerOctave, 0.0f, 1.0f);
-}
-
-/** Full in the shadows, nothing from the midtones up; [luma] on the 16-bit scale. */
-inline float shadowAt(float luma) {
-    constexpr float kLow = 48.0f * 257.0f;
-    constexpr float kHigh = 144.0f * 257.0f;
-    const float t = std::clamp((luma - kLow) / (kHigh - kLow), 0.0f, 1.0f);
-    return 1.0f - t * t * (3.0f - 2.0f * t);
-}
-
-}  // namespace
-
 bool MosaicCanvas::Compose(int x, int y, float* rgb) const {
     const uint16_t* px = data_ + (static_cast<size_t>(y) * width_ + x) * kChannels;
     if (px[3] == 0) return false;
@@ -621,19 +929,6 @@ bool MosaicCanvas::Compose(int x, int y, float* rgb) const {
         const Level& w = wide_[k];
         const Level& n = narrow_[k];
         if (!sampleLevelPair(w.data, n.data, w.width, w.height, w.scale, x, y, wide, narrow)) continue;
-        if (k == 0 && detailAttenuation_ > 0.0f) {
-            // The noise floor, see SetNoiseFloor: `narrow` here is up(B_1),
-            // the coarse level beneath the finest band under the finest
-            // mask, so A_0 - narrow is the finest band's own detail.
-            const float overlap = overlapAt(w.data, w.width, w.height, w.scale, x, y);
-            if (overlap > 0.0f) {
-                const float luma = 0.2126f * narrow[0] + 0.7152f * narrow[1] + 0.0722f * narrow[2];
-                const float give = detailAttenuation_ * overlap * shadowAt(luma);
-                if (give > 0.0f) {
-                    for (int c = 0; c < 3; ++c) rgb[c] -= give * (rgb[c] - narrow[c]);
-                }
-            }
-        }
         for (int c = 0; c < 3; ++c) rgb[c] += wide[c] - narrow[c];
     }
     return true;
@@ -876,13 +1171,6 @@ Java_dev_multiframe_camera_pipeline_MosaicCanvas_nAddTile(
         static_cast<int>(info.stride), h, feathers);
     AndroidBitmap_unlockPixels(env, tile);
     return touched;
-}
-
-JNIEXPORT void JNICALL
-Java_dev_multiframe_camera_pipeline_MosaicCanvas_nSetNoiseFloor(
-        JNIEnv*, jobject, jlong handle, jfloat attenuation) {
-    MosaicCanvas* canvas = canvasOf(handle);
-    if (canvas != nullptr) canvas->SetNoiseFloor(attenuation);
 }
 
 JNIEXPORT jfloat JNICALL

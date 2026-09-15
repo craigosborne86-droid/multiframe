@@ -1694,7 +1694,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         jint width, jint height,
         jintArray jcfa, jintArray jblack, jint white,
         jfloatArray jgains, jfloatArray jmatrix,
-        jfloat exposureGain, jfloat knee,
+        jfloat exposureGain, jfloat knee, jfloat shoulderWhite,
         jfloat contrast, jfloat desatStrength, jfloat desatStart, jfloat blackPoint,
         jfloatArray jshading, jint shadingColumns, jint shadingRows,
         jfloat hotPixelThreshold, jfloat localTone) {
@@ -1720,6 +1720,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     ToneParams tone;
     tone.exposureGain = exposureGain;
     tone.knee = knee;
+    tone.white = shoulderWhite;
     tone.contrast = contrast;
     tone.desatStrength = desatStrength;
     tone.desatStart = desatStart;
@@ -2098,7 +2099,7 @@ JNIEXPORT jlongArray JNICALL
 Java_dev_multiframe_camera_pipeline_NativeMerge_nToneBench(
         JNIEnv* env, jobject, jint width, jint height,
         jintArray jcfa, jfloatArray jmatrix,
-        jfloat exposureGain, jfloat knee, jfloat contrast,
+        jfloat exposureGain, jfloat knee, jfloat shoulderWhite, jfloat contrast,
         jfloat desatStrength, jfloat desatStart, jfloat blackPoint,
         jint variantA, jint variantB, jint roundCount) {
     if (width < 8 || height < 8 || roundCount <= 0) return nullptr;
@@ -2112,6 +2113,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nToneBench(
     ToneParams tone;
     tone.exposureGain = exposureGain;
     tone.knee = knee;
+    tone.white = shoulderWhite;
     tone.contrast = contrast;
     tone.desatStrength = desatStrength;
     tone.desatStart = desatStart;

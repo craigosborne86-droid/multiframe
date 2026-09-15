@@ -353,8 +353,6 @@ object MosaicCapture {
         }
         stream.lockForSweep(settings, caps, steady = steadyNow)
         val pinned = stream.sweepExposureOrNull
-        // The ISO every tile will be shot at sets the blend's noise floor.
-        session.lockNoise(pinned?.iso ?: stream.latestExposure()?.first)
 
         // The stability gate's ceiling, from the exposure the lock holds and
         // the lens's focal length in pixels. Logged, because it is the number

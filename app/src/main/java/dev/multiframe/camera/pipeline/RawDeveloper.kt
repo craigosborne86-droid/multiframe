@@ -20,7 +20,13 @@ data class DevelopParams(
      * fixed gain leaves everything crushed.
      */
     val exposureGain: Float = AUTO_EXPOSURE,
+    /** Scene-linear level, in units of nominal white, where the highlight roll-off begins. */
     val shoulderKnee: Float = 0.70f,
+    /**
+     * Scene-linear level rendered as display white: the top of the filmic
+     * shoulder, [SHOULDER_WHITE] by default. See [ToneCurve.shoulder].
+     */
+    val shoulderWhite: Float = SHOULDER_WHITE,
     /** Linear level the bright end of the scene is mapped to. */
     val highlightTarget: Float = 0.62f,
     /** Percentile treated as the bright end, ignoring speculars. */
@@ -98,6 +104,17 @@ data class DevelopParams(
 
     companion object {
         const val AUTO_EXPOSURE = -1f
+
+        /**
+         * Where the shoulder reaches white: five times nominal white, some
+         * two and a half stops over it and three over the knee. The sixth
+         * field test's skies were chalk because the exponential shoulder it
+         * replaced was white two stops over the knee; five leaves a cloud's
+         * tones apart out to the sensor's own clip, which the highlight
+         * bias (`ExposureStrategy.HIGHLIGHT_BIAS_STOPS`) has moved a stop
+         * further up.
+         */
+        const val SHOULDER_WHITE = 5.0f
 
         /** The strength the LOCAL TONE control turns on. */
         const val LOCAL_TONE_ON = 0.5f
@@ -375,7 +392,8 @@ object RawDeveloper {
     }
 
     /** Retained for callers that want the roll-off alone. */
-    fun shoulder(x: Float, knee: Float): Float = ToneCurve.shoulder(x, knee)
+    fun shoulder(x: Float, knee: Float, white: Float = DevelopParams.SHOULDER_WHITE): Float =
+        ToneCurve.shoulder(x, knee, white)
 
     /**
      * Banding, now shared with the optics passes. See [Bands] for why it moved

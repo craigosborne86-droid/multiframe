@@ -99,7 +99,8 @@ to tell the user this in the interface rather than let them discover it.
 | Corner detection and matching | Done | 8 unit tests, recovers known rotation |
 | Match verification | Done | Brown-Lowe criterion; refuses noise and repeated patterns |
 | Capture planning and geometry | Done | 12 unit tests; presets 2x2, 3x3 and a drawn region, 7 more |
-| Native compositing canvas, three-band blending | Done | One tile is identical to the byte in one band and three; two tiles a quarter-stop and a pixel apart keep their texture and lose their step (`MosaicBlendDeviceTest`) |
+| Native compositing canvas, three-band blending, the detail band by seam cut | Done, the seam after the seventh field test | One tile is identical to the byte in one band and three; two tiles a quarter-stop and a pixel apart keep their texture at one tile's contrast and lose their step; a feature one tile has and the other lacks comes through whole, never as a half-moon (`MosaicBlendDeviceTest`) |
+| Two engines on one pill: the one-shot 2x canvas on any lens, and the telephoto grids | Done | `MosaicPreset.ONE_SHOT`; a sixteen-frame burst through the same develop queue as any shot; the pill and its hint tested on the device |
 | Reticle and dot guidance, from the attitude, with a stability gate; the burst exposed after the lock | Done, revised after five field tests | 18 unit tests on the lock rule against scripted pans, including a hand still settling and a gyroscope veto; 8 on the attitude geometry, turning the phone by known angles and reading the dots -- `f · tan` to a twentieth of a pixel, and a node that stays where the world put it; the overlay draws the canvas outline and each node where the attitude puts it, and nothing moves a dot |
 | Angular grid at thirty percent overlap, hole-free write | Done | The planner's `gridGeometry`: 4 unit tests on the step, the canvas reach and the seventy-degree limit; the canvas writes the largest fully covered rectangle, read back with no black pixel (`MosaicCanvasTest`) |
 | Two-tier placement: registration, then the attitude | Done, after the fourth field test | A node is done when its burst is in hand; the tile is placed by its pixels where they fit believably (ten inliers, within a quarter of a tile of the attitude, a tile's size) and by the attitude's transform onto the canvas plane otherwise. The live device test requires a dark run to complete by the attitude |
@@ -120,18 +121,25 @@ right way to test the algorithm.
 ## How the capture works
 
 1. The user selects SUPER RES in the mode carousel under the shutter, on
-   whatever lens they are on. The app switches to the longest raw lens and
-   says so, switches the raw ring on if it was off, draws the outline of the
-   whole picture and its tile nodes on the viewfinder, and puts the grid pill
-   -- `2×2 · 33 MP | 3×3 · 75 MP` -- directly above the shutter. Nothing has
-   been taken: the user is composing. Another mode, or the back gesture, puts
-   the lens and the ring back.
-2. The shutter anchors it. The app waits for the camera's exposure and white
-   balance to converge, **locks exposure, focus and white balance** -- pinning
-   the shutter at 1/250 s with the ISO raised if auto exposure had chosen
-   slower, or, in the dark on a hand still under four degrees a second,
-   stretching that floor toward 1/60 s so the sensor is not starved -- and
-   takes the anchor: wherever the reticle points becomes the
+   whatever lens they are on. The pill above the shutter offers the two
+   engines -- `1-SHOT · 50 MP | 2×2 · 33 MP | 3×3 · 75 MP` -- with a word
+   under the count about what each is for. **1-SHOT** is not a mosaic: a
+   single tap takes a sixteen-frame burst on the lens in hand and
+   accumulates it on the 2x sub-pixel canvas from the hand's own tremor,
+   four times the sensor's pixels at any distance with nothing to stitch;
+   the lens strip stays offered for it. For a **grid** the app switches to
+   the longest raw lens and says so, switches the raw ring on if it was
+   off, and draws the outline of the whole picture and its tile nodes on
+   the viewfinder. Nothing has been taken: the user is composing. Another
+   mode, or the back gesture, puts the lens and the ring back.
+2. The shutter anchors a grid. The app waits for the camera's exposure and
+   white balance to converge, **locks exposure, focus and white balance** as
+   the sensor's own settings -- a manual exposure at the meter's values, or
+   at 1/250 s with the ISO raised if auto exposure had chosen slower, or, in
+   the dark on a hand still under four degrees a second, that floor
+   stretched toward 1/60 s so the sensor is not starved; the focus held at
+   the distance the lens was at, so no tile refocuses -- and takes the
+   anchor: wherever the reticle points becomes the
    centre of the canvas, the develop gain and colour are measured from that
    frame and held, and the nodes are laid out around it as directions in the
    world, from the phone's attitude at that instant.
@@ -169,15 +177,14 @@ right way to test the algorithm.
    directions met with the canvas plane. A dark frame, a blank wall, a patch
    of sky all place by the attitude, a few percent of a tile from exact and
    inside the overlap. Nothing a registration says can refuse a node.
-5. Compositing is in three frequency bands: the fine detail is handed from
-   one tile to the next along the line where they are equally deep, the broad
-   differences between them are spread over six hundred pixels, so the texture
-   is kept and the step is hidden. At high ISO -- from 1600, ramping in from
-   800 -- the blend keeps a *noise floor*: in the shadows where two tiles
-   overlap, up to half the finest band is given up for the level beneath
-   it, because two grainy tiles turned a little against each other lay two
-   resampling meshes over each other and the eye reads the sum as weave.
-   Nowhere else changes; a single tile composes exactly as before.
+5. Compositing is in three frequency bands: the fine detail comes from one
+   tile at every pixel, the boundary between tiles a *seam* cut where the
+   two disagree least -- along a sky, a shadow, an edge that registered,
+   never across a texture they place a pixel apart -- with the deeper tile
+   preferred and a hand-off two and a half pixels wide; the broad
+   differences between them are spread over six hundred pixels. The texture
+   is kept whole and the step is hidden. A single tile composes exactly as
+   it always did.
 6. The count reads "3 of 9 nodes". Every node captured is the mosaic complete;
    stopping early keeps what was taken. The file is the largest rectangle
    with no hole in it -- nine hand-held tiles are nine slightly turned

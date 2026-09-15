@@ -15,6 +15,17 @@ import kotlin.math.tan
  * is fixed so the nodes can be drawn before the first frame is taken.
  */
 enum class MosaicPreset {
+    /**
+     * One framing, one tap: a burst of [ONE_SHOT_FRAMES] frames from the
+     * ring on whatever lens is up, accumulated on the 2x sub-pixel canvas
+     * (REFERENCE §3.6) from the hand's own tremor, and developed without a
+     * demosaic. Four times the sensor's pixels, at any distance, with no
+     * stitching and no parallax; the other engine for what the grids cannot
+     * do -- a face, a table, a room. Not a mosaic at all, but chosen where
+     * the mosaics are, because it answers the same question.
+     */
+    ONE_SHOT,
+
     /** 2x2, four tiles: a handheld gain in detail over a framing near the centre. */
     DETAIL_BOOST,
 
@@ -26,24 +37,42 @@ enum class MosaicPreset {
 
     val label: String
         get() = when (this) {
+            ONE_SHOT -> "1-SHOT"
             DETAIL_BOOST -> "2×2"
             LARGE_FORMAT -> "3×3"
             CUSTOM -> "CUSTOM"
         }
 
-    /** Grid side for the fixed presets; zero for [CUSTOM], whose grid is planned from the region. */
+    /** Grid side for the fixed presets; zero for [ONE_SHOT], which has no grid, and [CUSTOM], whose grid is planned from the region. */
     val gridSide: Int
         get() = when (this) {
+            ONE_SHOT -> 0
             DETAIL_BOOST -> 2
             LARGE_FORMAT -> 3
             CUSTOM -> 0
         }
+
+    /** Whether this preset is a telephoto mosaic, as against the single-framing canvas. */
+    val isMosaic: Boolean get() = this != ONE_SHOT
 
     fun next(): MosaicPreset = entries[(ordinal + 1) % entries.size]
 
     companion object {
         fun named(name: String?): MosaicPreset =
             entries.firstOrNull { it.name == name } ?: DETAIL_BOOST
+
+        /**
+         * Frames in a one-shot burst. Sixteen: the 2x canvas fills its
+         * sub-pixel sites from the hand's tremor, and REFERENCE §3.6.3
+         * measured an eight-frame handheld burst leaving a fifth of the
+         * chroma cells to the fill; sixteen closes most of that, and at
+         * 30 fps is half a second the hand is holding anyway. The ring
+         * decides what it can actually give.
+         */
+        const val ONE_SHOT_FRAMES = 16
+
+        /** The canvas a one-shot makes of a sensor, in megapixels: twice the side each way. */
+        fun oneShotMegapixels(width: Int, height: Int): Double = width.toDouble() * 2 * height * 2 / 1_000_000.0
     }
 }
 
@@ -460,6 +489,8 @@ object MosaicPlanner {
         customRegion: Pair<Float, Float>? = null,
         overlap: Float = DEFAULT_OVERLAP,
     ): MosaicPlan? = when (preset) {
+        // Not a mosaic: nothing to plan.
+        MosaicPreset.ONE_SHOT -> null
         MosaicPreset.CUSTOM -> customRegion?.let { (w, h) ->
             if (target == null) null else planRegion(target, capture, tileWidth, tileHeight, w, h, overlap)
         }

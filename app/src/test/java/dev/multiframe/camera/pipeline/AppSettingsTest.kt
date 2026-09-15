@@ -222,20 +222,18 @@ class AppSettingsTest {
     }
 
     @Test
-    fun `the 2x request survives a round trip and is off out of the box`() {
-        assertThat(AppSettings().superRes).isFalse()
-        assertThat(AppSettings.decode(emptyMap()).superRes).isFalse()
-        assertThat(AppSettings.decode(AppSettings(superRes = true).encode()).superRes).isTrue()
-        assertThat(AppSettings.decode(AppSettings(superRes = false).encode()).superRes).isFalse()
-    }
-
-    @Test
-    fun `the 2x request is dropped where the device cannot hold the canvas`() {
+    fun `the one-shot engine survives a round trip and is dropped where the device cannot hold the canvas`() {
+        val one = AppSettings(mosaicPreset = MosaicPreset.ONE_SHOT)
+        assertThat(AppSettings.decode(one.encode()).mosaicPreset).isEqualTo(MosaicPreset.ONE_SHOT)
         // On the JVM there is no native library and no /proc/meminfo, so the
         // capability is false here whatever the sensor -- which is exactly the
-        // case the gate exists for.
+        // case the gate exists for: the grid is what is remembered instead.
         assertThat(caps.supportsSuperRes).isFalse()
-        assertThat(AppSettings(superRes = true).reconcile(caps, lenses).superRes).isFalse()
+        assertThat(one.reconcile(caps, lenses).mosaicPreset).isEqualTo(MosaicPreset.DETAIL_BOOST)
+        assertThat(AppSettings(mosaicPreset = MosaicPreset.LARGE_FORMAT).reconcile(caps, lenses).mosaicPreset)
+            .isEqualTo(MosaicPreset.LARGE_FORMAT)
+        // The old 2X key is no longer read; a stored one is simply ignored.
+        assertThat(AppSettings.decode(mapOf("superRes" to "true")).mosaicPreset).isEqualTo(MosaicPreset.DETAIL_BOOST)
     }
 
     @Test
@@ -248,9 +246,12 @@ class AppSettingsTest {
     }
 
     @Test
-    fun `local tone is off out of the box, survives a round trip, and sets the develop`() {
-        assertThat(AppSettings().localTone).isFalse()
-        assertThat(AppSettings().developParams.localTone).isEqualTo(0f)
+    fun `local tone is on out of the box, survives a round trip, and sets the develop`() {
+        assertThat(AppSettings().localTone).isTrue()
+        assertThat(AppSettings().developParams.localTone).isEqualTo(DevelopParams.LOCAL_TONE_ON)
+        val off = AppSettings(localTone = false)
+        assertThat(AppSettings.decode(off.encode()).localTone).isFalse()
+        assertThat(off.developParams.localTone).isEqualTo(0f)
         val on = AppSettings(localTone = true)
         assertThat(AppSettings.decode(on.encode()).localTone).isTrue()
         assertThat(on.developParams.localTone).isEqualTo(DevelopParams.LOCAL_TONE_ON)

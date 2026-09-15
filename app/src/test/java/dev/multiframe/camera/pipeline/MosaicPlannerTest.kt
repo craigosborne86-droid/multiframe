@@ -266,6 +266,7 @@ class MosaicPlannerTest {
         assertThat(large.megapixels).isGreaterThan(boost.megapixels)
         // Custom with no region drawn yet is not a plan.
         assertThat(MosaicPlanner.planPreset(MosaicPreset.CUSTOM, main, tele, tileW, tileH)).isNull()
+        assertThat(MosaicPlanner.planPreset(MosaicPreset.ONE_SHOT, main, tele, tileW, tileH)).isNull()
     }
 
     @Test
@@ -340,7 +341,15 @@ class MosaicPlannerTest {
     @Test
     fun `the preset cycles and reads back by name`() {
         assertThat(MosaicPreset.DETAIL_BOOST.next()).isEqualTo(MosaicPreset.LARGE_FORMAT)
-        assertThat(MosaicPreset.CUSTOM.next()).isEqualTo(MosaicPreset.DETAIL_BOOST)
+        assertThat(MosaicPreset.CUSTOM.next()).isEqualTo(MosaicPreset.ONE_SHOT)
+        assertThat(MosaicPreset.ONE_SHOT.next()).isEqualTo(MosaicPreset.DETAIL_BOOST)
+        // The single-framing engine: no grid, no plan, and its own frame count.
+        assertThat(MosaicPreset.ONE_SHOT.gridSide).isEqualTo(0)
+        assertThat(MosaicPreset.ONE_SHOT.isMosaic).isFalse()
+        assertThat(MosaicPreset.DETAIL_BOOST.isMosaic).isTrue()
+        assertThat(MosaicPreset.ONE_SHOT.label).isEqualTo("1-SHOT")
+        assertThat(MosaicPreset.ONE_SHOT_FRAMES).isEqualTo(16)
+        assertThat(MosaicPreset.oneShotMegapixels(4080, 3064)).isWithin(0.01).of(50.0)
         assertThat(MosaicPreset.named("LARGE_FORMAT")).isEqualTo(MosaicPreset.LARGE_FORMAT)
         assertThat(MosaicPreset.named("nonsense")).isEqualTo(MosaicPreset.DETAIL_BOOST)
         assertThat(MosaicPreset.named(null)).isEqualTo(MosaicPreset.DETAIL_BOOST)

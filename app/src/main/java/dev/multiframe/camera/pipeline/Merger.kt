@@ -3,7 +3,6 @@ package dev.multiframe.camera.pipeline
 import android.graphics.Bitmap
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -359,12 +358,8 @@ object Merger {
         }
     }
 
-    /** Gentle highlight roll-off. Linear below the knee, exponential above it. */
-    private fun shoulder(x: Float, knee: Float): Float {
-        if (x <= knee) return x
-        val headroom = 1f - knee
-        return knee + headroom * (1f - exp(-(x - knee) / headroom))
-    }
+    /** The same filmic roll-off as the raw develop's; see [ToneCurve.shoulder]. */
+    private fun shoulder(x: Float, knee: Float): Float = ToneCurve.shoulder(x, knee)
 
     private fun bilerp(v00: Float, v01: Float, v10: Float, v11: Float, wx: Float, wy: Float): Float {
         val top = v00 + (v01 - v00) * wx

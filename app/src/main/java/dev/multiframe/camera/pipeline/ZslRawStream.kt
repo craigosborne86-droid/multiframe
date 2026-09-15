@@ -220,6 +220,16 @@ class ZslRawStream private constructor(
     // dual conversion gain off to be turned back on.
     private var sweepExposure: StabilityGate.SweepExposure? = null
     private var dcgSuspended = false
+
+    /**
+     * The focus distance, in diopters, the lens was at when the mosaic
+     * locked, and null where the lens does not report it or cannot be told.
+     * Every tile is shot at this distance: a continuous autofocus left
+     * running would refocus tile by tile as the reticle moved across the
+     * scene, and tiles focused at different distances stitch at different
+     * scales. Sent as a manual focus for the lock's duration.
+     */
+    private var lockedFocusDiopters: Float? = null
     private val histogramBins = IntArray(64)
     private var lastSettings: ManualSettings? = null
     private var lastCaps: CameraCapabilities? = null
@@ -498,6 +508,12 @@ class ZslRawStream private constructor(
         if (closed || locked) return
         locked = true
         sweepExposure = sweepExposureFor(settings, caps, steady)
+        // The focus the lens is at, held as a manual focus where the lens
+        // can be told one; where it cannot, the autofocus is left in its
+        // single-shot mode, which holds without a trigger.
+        lockedFocusDiopters = if (caps.hasManualFocus && !(settings.manualFocus && caps.hasManualFocus)) {
+            latestResult()?.get(CaptureResult.LENS_FOCUS_DISTANCE)?.takeIf { it >= 0f }
+        } else null
         if (dcg) {
             dcgSuspended = true
             dcg = false
@@ -507,9 +523,15 @@ class ZslRawStream private constructor(
             "locking exposure, white balance and focus for a mosaic" +
                 (sweepExposure?.let {
                     "; shutter %s at 1/%d s, ISO %d".format(
-                        if (it.stretched) "stretched for the light" else "floored", (1e9 / it.exposureNs).toInt(), it.iso,
+                        when {
+                            it.stretched -> "stretched for the light"
+                            it.floored -> "floored"
+                            else -> "held where the meter had it"
+                        },
+                        (1e9 / it.exposureNs).toInt(), it.iso,
                     )
-                } ?: ""),
+                } ?: "; exposure by AE lock") +
+                (lockedFocusDiopters?.let { "; focus held at %.2f dpt".format(it) } ?: "; focus by single-shot AF"),
         )
         applySettings(settings, caps)
     }
@@ -518,6 +540,7 @@ class ZslRawStream private constructor(
         if (closed || !locked) return
         locked = false
         sweepExposure = null
+        lockedFocusDiopters = null
         // The cap's hold, if it had one, is from before the mosaic; the
         // meter has the exposure again and the cap follows it afresh.
         shutterCap?.release()
@@ -545,7 +568,12 @@ class ZslRawStream private constructor(
         val isoMin = caps.isoMin ?: return null
         val isoMax = caps.isoMax ?: return null
         val (iso, exposureNs) = latestExposure() ?: return null
+        // The floor where the meter chose slower than it; otherwise the
+        // meter's own values, pinned as a manual exposure all the same. An
+        // AE lock holds the exposure too, but as the meter's promise rather
+        // than the sensor's setting: every tile is shot at these numbers.
         return StabilityGate.sweepExposure(iso, exposureNs, lens.equivalent35mm, isoMin, isoMax, caps.exposureMinNs ?: 0L, steady)
+            ?: StabilityGate.SweepExposure(iso.coerceIn(isoMin, isoMax), exposureNs, stretched = false, floored = false)
     }
 
     val isLocked: Boolean get() = locked
@@ -863,6 +891,7 @@ class ZslRawStream private constructor(
             }
         }
 
+        val heldFocus = if (locked) lockedFocusDiopters else null
         if (settings.manualFocus && caps.hasManualFocus) {
             builder.set(
                 CaptureRequest.CONTROL_AF_MODE,
@@ -871,6 +900,21 @@ class ZslRawStream private constructor(
             builder.set(
                 CaptureRequest.LENS_FOCUS_DISTANCE,
                 settings.effectiveFocusDiopters(caps),
+            )
+        } else if (heldFocus != null) {
+            // The mosaic's lock: the distance the lens was at, as a manual
+            // focus, so no tile refocuses.
+            builder.set(
+                CaptureRequest.CONTROL_AF_MODE,
+                android.hardware.camera2.CameraMetadata.CONTROL_AF_MODE_OFF,
+            )
+            builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, heldFocus)
+        } else if (locked && caps.afModes.contains(android.hardware.camera2.CameraMetadata.CONTROL_AF_MODE_AUTO)) {
+            // No distance to hold at: single-shot autofocus, never triggered,
+            // holds where the continuous mode left it.
+            builder.set(
+                CaptureRequest.CONTROL_AF_MODE,
+                android.hardware.camera2.CameraMetadata.CONTROL_AF_MODE_AUTO,
             )
         } else {
             caps.autoAfMode()?.let { builder.set(CaptureRequest.CONTROL_AF_MODE, it) }

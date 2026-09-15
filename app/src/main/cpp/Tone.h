@@ -123,22 +123,48 @@ inline uint8_t toByte(float v) {
  * fast approximation could hope to recover. The false instantiation renders a
  * wrong picture on purpose and is never reachable from a capture.
  */
+/**
+ * The `a` of the filmic shoulder for a white point `uMax` headrooms past the
+ * knee: the root of `a = ln(1 + a·uMax)`, which makes the slope at the knee
+ * exactly one. The same fixed-point iteration as ToneCurve.shoulderSteepness.
+ */
+inline float shoulderSteepness(float uMax) {
+    if (uMax <= 1.0f) return 1.0f;
+    float a = 2.0f;
+    for (int i = 0; i < 40; ++i) {
+        const float next = std::log(1.0f + a * uMax);
+        if (std::fabs(next - a) < 1e-6f) return next;
+        a = next;
+    }
+    return a;
+}
+
+/**
+ * The filmic shoulder of ToneCurve.shoulder: linear below the knee, a
+ * logarithm above it reaching 1 at `white`, spending the headroom evenly in
+ * stops. `RealExp` false is the ablation's stand-in -- a reciprocal in place
+ * of the logarithm -- and renders a wrong picture on purpose.
+ */
 template <bool RealExp>
-inline float shoulderCurveParts(float x, float knee) {
+inline float shoulderCurveParts(float x, float knee, float white) {
     if (x <= 0.0f) return 0.0f;
     if (x <= knee) return x;
     float headroom = 1.0f - knee;
     if (headroom <= 0.0f) return knee;
+    if (x >= white) return 1.0f;
+    const float uMax = (white - knee) / headroom;
+    if (uMax <= 0.0f) return 1.0f;
     const float z = (x - knee) / headroom;
     if constexpr (RealExp) {
-        return knee + headroom * (1.0f - std::exp(-z));
+        const float a = shoulderSteepness(uMax);
+        return knee + headroom * (std::log(1.0f + a * z) / std::log(1.0f + a * uMax));
     } else {
         return knee + headroom * (1.0f - 1.0f / (1.0f + z));
     }
 }
 
-inline float shoulderCurve(float x, float knee) {
-    return shoulderCurveParts<true>(x, knee);
+inline float shoulderCurve(float x, float knee, float white) {
+    return shoulderCurveParts<true>(x, knee, white);
 }
 
 /**
@@ -153,6 +179,8 @@ struct Rgb {
 struct ToneParams {
     float exposureGain = 1.0f;
     float knee = 0.70f;
+    /** Scene-linear level rendered as display white: the top of the shoulder. */
+    float white = 5.0f;
     float contrast = 0.30f;
     float desatStrength = 1.0f;
     float desatStart = 1.0f;
@@ -215,11 +243,15 @@ struct ShoulderLut {
     static constexpr int kSize = 2048;
     float scale[kSize];
     float knee = 0.0f;
+    float white = 1.0f;
     float pMax = 1.0f;
     float indexScale = 0.0f;
 
     float operator()(float p) const {
-        if (p >= pMax) return shoulderCurve(p, knee) / p;
+        // At and past the white point the curve is 1 and the scale is its
+        // reciprocal: computed, since it is unbounded above, and a specular
+        // highlight is rare enough that the branch predicts.
+        if (p >= pMax) return 1.0f / p;
         const float x = std::max((p - knee) * indexScale, 0.0f);
         const int i = static_cast<int>(x);
         // p < pMax puts x below kSize - 1, so i + 1 is always in bounds.
@@ -228,18 +260,18 @@ struct ShoulderLut {
 };
 
 inline void buildShoulderLut(ShoulderLut& lut, const ToneParams& t) {
-    const float headroom = 1.0f - t.knee;
-    // Sixteen headrooms past the knee, where exp(-16) is 1.1e-7 and the curve
-    // has reached its limit to within the last place of a float. Floored at 1
-    // so that a degenerate knee cannot produce an empty or inverted table; the
-    // reciprocal branch stays exact whatever the parameters are, so the only
-    // cost of getting this wrong would be speed.
+    // The table spans the knee to the white point, where the logarithm
+    // reaches 1 exactly and the curve becomes a plain reciprocal. Floored a
+    // headroom past the knee so that a degenerate white cannot produce an
+    // empty or inverted table; the reciprocal branch is exact whatever the
+    // parameters are, so the only cost of getting this wrong would be speed.
     lut.knee = t.knee;
-    lut.pMax = std::max(t.knee + 16.0f * std::max(headroom, 0.0f), t.knee + 1.0f);
+    lut.white = t.white;
+    lut.pMax = std::max(t.white, t.knee + std::max(1.0f - t.knee, 0.01f));
     lut.indexScale = static_cast<float>(ShoulderLut::kSize - 1) / (lut.pMax - t.knee);
     for (int i = 0; i < ShoulderLut::kSize; ++i) {
         const float p = t.knee + static_cast<float>(i) / lut.indexScale;
-        lut.scale[i] = (p > t.knee && p > 0.0f) ? shoulderCurve(p, t.knee) / p : 1.0f;
+        lut.scale[i] = (p > t.knee && p > 0.0f) ? shoulderCurve(p, t.knee, t.white) / p : 1.0f;
     }
 }
 
@@ -284,7 +316,7 @@ inline void renderLinearParts(float& r, float& g, float& b, const ToneParams& t,
             const float scale = !RealScale
                 ? 0.9f
                 : (Tabulated ? shoulder(scenePeak)
-                             : shoulderCurveParts<RealExp>(scenePeak, t.knee) / scenePeak);
+                             : shoulderCurveParts<RealExp>(scenePeak, t.knee, t.white) / scenePeak);
             r *= scale; g *= scale; b *= scale;
         }
     }

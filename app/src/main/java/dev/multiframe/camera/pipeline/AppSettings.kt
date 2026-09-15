@@ -35,17 +35,11 @@ data class AppSettings(
     /** Which composition guides are drawn, by [dev.multiframe.camera.ui.GuideMode] name. */
     val guides: String = "OFF",
     /**
-     * Whether a shutter press asks for the 2x sub-pixel canvas.
-     *
-     * Asks: the burst has to have earned it, and the readout says whether it
-     * did. Off by default because it doubles the develop and writes a file
-     * four times the size, which is a trade to choose rather than inherit.
-     */
-    val superRes: Boolean = false,
-    /**
-     * How much of the framing a telephoto mosaic covers. See [MosaicPreset].
-     * Remembered because the grid is a decision about the kind of picture,
-     * not about the shot.
+     * Which Super Res engine the mode uses: the single-framing 2x canvas or
+     * a telephoto grid, and which grid. See [MosaicPreset]. Remembered
+     * because it is a decision about the kind of picture, not about the
+     * shot. The 2X set-once toggle this mode absorbed is gone: a 2x canvas
+     * is `ONE_SHOT`, chosen above the shutter in Super Res.
      */
     val mosaicPreset: MosaicPreset = MosaicPreset.DETAIL_BOOST,
     /**
@@ -58,12 +52,14 @@ data class AppSettings(
     /**
      * Whether the bilateral-grid local tone operator runs in the develop.
      *
-     * Off by default. The PRD's rendering is a global scale and a roll-off,
-     * which is what keeps a photograph looking photographed rather than
-     * processed; the operator is there for the scene that needs it -- a room
-     * and its window -- and is a choice to make, not a default to inherit.
+     * On by default since the sixth field test. The operator at
+     * [DevelopParams.LOCAL_TONE_ON] takes in half of each neighbourhood's
+     * range about its mean and carries the detail through untouched: the
+     * room and its window both land on the page, and the micro-contrast the
+     * PRD's photographic rendering is protective of is exactly what the
+     * detail layer keeps. Off is still a choice, in the settings.
      */
-    val localTone: Boolean = false,
+    val localTone: Boolean = true,
     /**
      * What the developed image is written as. The DNG is unaffected.
      *
@@ -96,7 +92,6 @@ data class AppSettings(
         KEY_BURST to burstFrames.toString(),
         KEY_GUARD to highlightGuard.toString(),
         KEY_DNG to dngEnabled.toString(),
-        KEY_SUPER_RES to superRes.toString(),
         KEY_MOSAIC_PRESET to mosaicPreset.name,
         KEY_LOCAL_TONE to localTone.toString(),
         KEY_MODE to captureMode.name,
@@ -122,7 +117,6 @@ data class AppSettings(
         const val KEY_MODE = "mode"
         const val KEY_TIMER = "timer"
         const val KEY_GUIDES = "guides"
-        const val KEY_SUPER_RES = "superRes"
         const val KEY_MOSAIC_PRESET = "mosaicPreset"
         const val KEY_LOCAL_TONE = "localTone"
         const val KEY_FORMAT = "outputFormat"
@@ -179,7 +173,6 @@ data class AppSettings(
                 timerSeconds = int(KEY_TIMER, defaults.timerSeconds)
                     .takeIf { it in TIMER_DELAYS } ?: defaults.timerSeconds,
                 guides = stored[KEY_GUIDES]?.takeIf { it.isNotBlank() } ?: defaults.guides,
-                superRes = bool(KEY_SUPER_RES, defaults.superRes),
                 // The key was "sweepPreset" for one release; a phone that
                 // stored it under that name keeps its choice.
                 mosaicPreset = MosaicPreset.named(stored[KEY_MOSAIC_PRESET] ?: stored["sweepPreset"]),
@@ -208,7 +201,11 @@ data class AppSettings(
                     else CameraMetadata.CONTROL_AWB_MODE_AUTO,
                     evIndex = manual.effectiveEvIndex(caps),
                 ),
-                superRes = superRes && caps.supportsSuperRes,
+                // The single-framing canvas needs a device that can hold one;
+                // where it cannot, the mode's grid is what is remembered.
+                mosaicPreset = if (mosaicPreset == MosaicPreset.ONE_SHOT && !caps.supportsSuperRes) {
+                    MosaicPreset.DETAIL_BOOST
+                } else mosaicPreset,
             )
         }
 

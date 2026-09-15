@@ -110,20 +110,6 @@ class MosaicSession private constructor(
     fun gainFor(isoTimesExposureNs: Double): Float =
         normalisedGain(developGain, anchorExposureProduct, isoTimesExposureNs)
 
-    /**
-     * Tells the canvas the ISO the mosaic's lock pinned, so the blend can
-     * set its noise floor for it: see [MosaicCanvas.detailAttenuationFor].
-     * Once, with the lock; every tile is shot at the same ISO.
-     */
-    fun lockNoise(iso: Int?) {
-        if (closed) return
-        val attenuation = MosaicCanvas.detailAttenuationFor(iso)
-        canvas.setNoiseFloor(attenuation)
-        if (attenuation > 0f) {
-            Log.i(TAG, "noise floor: ISO $iso, %.0f%% of the detail band in shadowed overlaps".format(attenuation * 100))
-        }
-    }
-
     // --- the guided mosaic --------------------------------------------------
 
     /** Makes [proxy] the origin. See [MosaicAssembler.anchor]. */
