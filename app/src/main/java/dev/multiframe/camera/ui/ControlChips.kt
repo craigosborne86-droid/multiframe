@@ -162,6 +162,7 @@ fun ChromeOpeners(
                     .semantics { contentDescription = spec.label },
                 contentAlignment = Alignment.Center,
             ) {
+                UprightInHand {
                 when (spec.id) {
                     ControlBar.SETTINGS -> Icon(
                         imageVector = Icons.Outlined.Tune,
@@ -174,6 +175,7 @@ fun ChromeOpeners(
                         style = Type.Control,
                         color = if (spec.active) Ink.OnBone else Ink.Bone,
                     )
+                }
                 }
             }
         }
@@ -220,18 +222,22 @@ fun ModeCarousel(
                         selected = spec.active
                     },
             ) {
-                Text(
-                    text = spec.label,
-                    style = if (spec.active) Type.ModeSelected else Type.Mode,
-                    color = if (spec.active) Ink.Bone else Ink.Muted,
-                )
-                spec.value?.let { value ->
-                    Text(
-                        text = value,
-                        style = Type.Gauge,
-                        color = Ink.Amber,
-                        modifier = Modifier.padding(start = 6.dp),
-                    )
+                UprightInHand {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = spec.label,
+                            style = if (spec.active) Type.ModeSelected else Type.Mode,
+                            color = if (spec.active) Ink.Bone else Ink.Muted,
+                        )
+                        spec.value?.let { value ->
+                            Text(
+                                text = value,
+                                style = Type.Gauge,
+                                color = Ink.Amber,
+                                modifier = Modifier.padding(start = 6.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -289,22 +295,26 @@ internal fun ControlChip(spec: ControlSpec, onClick: () -> Unit) {
                 contentDescription = spec.value?.let { "${spec.label} $it" } ?: spec.label
             },
     ) {
-        Text(
-            text = spec.label,
-            style = if (spec.kind == ControlKind.Action) Type.Action else Type.Control,
-            color = if (filled) Ink.OnBone else Ink.Bone,
-        )
-        spec.value?.let { value ->
-            Text(
-                text = value,
-                style = Type.Gauge,
-                color = when {
-                    filled -> Ink.OnBone
-                    spec.valueIsReading -> Ink.Amber
-                    else -> Ink.Muted
-                },
-                modifier = Modifier.padding(start = 7.dp),
-            )
+        UprightInHand {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = spec.label,
+                    style = if (spec.kind == ControlKind.Action) Type.Action else Type.Control,
+                    color = if (filled) Ink.OnBone else Ink.Bone,
+                )
+                spec.value?.let { value ->
+                    Text(
+                        text = value,
+                        style = Type.Gauge,
+                        color = when {
+                            filled -> Ink.OnBone
+                            spec.valueIsReading -> Ink.Amber
+                            else -> Ink.Muted
+                        },
+                        modifier = Modifier.padding(start = 7.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -347,11 +357,13 @@ fun ResolutionPill(
                     .padding(horizontal = 14.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = label,
-                    style = Type.Control,
-                    color = if (selected) Ink.OnBone else Ink.Bone,
-                )
+                UprightInHand {
+                    Text(
+                        text = label,
+                        style = Type.Control,
+                        color = if (selected) Ink.OnBone else Ink.Bone,
+                    )
+                }
             }
         }
     }

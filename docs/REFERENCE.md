@@ -223,37 +223,64 @@ object Haptics {
 
 #### 1.4.2 Implementation
 
-Use Jetpack Compose `WindowSizeClass` from `material3-window-size-class`:
+**As built** (`ui/WindowLayout.kt`): one pure decision,
+`CameraLayouts.decide(widthDp, heightDp, deviceDegrees, fold)`, gives a
+`CameraLayout` -- a `Posture`, a `WindowClass` at the breakpoints above
+(computed from the configuration's dp; no `material3-window-size-class`
+dependency, since the table is three numbers), the hand's turn, the rail's
+width, the hinge's split -- and `rememberCameraLayout` keeps it current
+from `LocalConfiguration`, `WindowInfoTracker.windowLayoutInfo` (the fold)
+and `OrientationTracker.onQuarterTurn` (the hand). `CameraScreen` asks it
+in four places and nowhere else: the viewfinder's region
+(`previewRegion` + `fitAspect`, the largest box of the stream's shape that
+fits the region, never stretched, never spilling), the HUD's region, the
+controls' region, and the ground behind the controls. `CameraLayoutsTest`
+holds the decision for every window and hand; `HandLayoutTest` the turn
+and the fit.
 
-```kotlin
-val windowSizeClass = calculateWindowSizeClass(activity)
-when (windowSizeClass.widthSizeClass) {
-    WindowWidthSizeClass.Compact -> PhoneLayout(...)
-    WindowWidthSizeClass.Medium  -> ExpandedLayout(...)
-    WindowWidthSizeClass.Expanded -> WideLayout(...)
-}
-```
+| Posture | When | Viewfinder | Controls |
+|---|---|---|---|
+| `PORTRAIT` | Tall window, phone upright | Fitted to the window's width, centred | The strip along the bottom |
+| `HAND_LANDSCAPE` | Tall window, phone on its side (device 90°/270°) | As portrait | The same strip -- from where the user stands its rows are a rail down their hand -- with every chip's words turned to read upright, box and all (`UprightInHand`, `Modifier.rotateLayout`) |
+| `SIDEBAR` | Window wider than tall (tablet, foldable open in landscape) | Fitted into the first two thirds | A rail down the last third on `Ink.Panel`, vertically centred |
+| `TABLETOP` | `FoldingFeature` half-opened with a horizontal hinge | The pane above the hinge | The pane below it |
 
 #### 1.4.3 Foldable Support
 
 When `WindowInfoTracker.windowLayoutInfo` reports a `FoldingFeature` with
-`state == HALF_OPENED`:
-
-- Split at the fold boundary.
-- Viewfinder on the display half closer to the rear cameras.
-- Controls on the other half.
-- This is "flex mode" / "tabletop mode."
+`state == HALF_OPENED` and a horizontal hinge, the layout is `TABLETOP`:
+split at the hinge's bounds, the viewfinder above (the half nearer the
+rear cameras in the postures a foldable is used in), the controls below.
+A vertical hinge (book posture) is decided by the window's shape like any
+other window. A phone reports no folding feature and is the flat case.
 
 #### 1.4.4 Orientation
 
 - **Portrait** is the primary layout. All current dimensions are designed for
   portrait.
-- **Landscape** on phones: equivalent to the `Expanded` layout (sidebar
-  controls).
-- The app does **not** force a specific orientation. It responds to the system
-  orientation and adjusts layout.
+- **On a phone the activity stays in portrait and the controls turn.** The
+  reference asked for a sidebar in landscape; what is built is the same
+  strip with its words turned (`HAND_LANDSCAPE`), and the reason is the
+  camera underneath it. The raw stream's preview surface, the tap-to-focus
+  mapping (`TouchFocus.regionAt`), the mosaic guidance's dots and the
+  peaking overlay all speak in the sensor's portrait frame; rotating the
+  window under them would rebuild the camera session on every turn of the
+  wrist (the surface is replaced) and re-derive every one of those
+  mappings for the display's rotation. Held sideways, the bottom strip *is*
+  a rail along the user's hand -- its rows are columns from where they
+  stand -- and all that was wrong was the words on their side. So each
+  chip's content turns by minus the hand's rotation and takes the shape
+  the turned words need (a chip is then taller than it is wide, the shape a
+  rail's button wants), and nothing else moves: the shutter stays under the
+  thumb it was under. The gauges, the status line, the lens chips' labels
+  and the thumbnail turn the same way. The manual drawer (PRO) does not
+  turn; its sliders are horizontal in either hand.
+- **A window that is itself landscape** -- a tablet, a foldable open flat --
+  gets the sidebar proper (`SIDEBAR`), viewfinder two thirds and controls
+  one third, as §1.4.1's `Expanded` row says.
 - `OrientationTracker` handles EXIF rotation and capture orientation
-  independently of UI orientation.
+  independently of UI orientation, as before; the same quarter turn now
+  also drives the layout.
 
 ---
 

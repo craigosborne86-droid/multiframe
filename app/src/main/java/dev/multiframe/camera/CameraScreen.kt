@@ -60,6 +60,10 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.layout.layout
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -159,6 +163,13 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import dev.multiframe.camera.ui.ActionStrip
 import dev.multiframe.camera.ui.BackNavigation
+import dev.multiframe.camera.ui.CameraLayout
+import dev.multiframe.camera.ui.LocalHandRotation
+import dev.multiframe.camera.ui.Posture
+import dev.multiframe.camera.ui.fitAspect
+import dev.multiframe.camera.ui.rotateLayout
+import dev.multiframe.camera.ui.UprightInHand
+import dev.multiframe.camera.ui.rememberCameraLayout
 import dev.multiframe.camera.ui.ChromeOpeners
 import dev.multiframe.camera.ui.ResolutionPill
 import dev.multiframe.camera.ui.ControlBar
@@ -420,10 +431,18 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         MemoryBudget.recommendedAnalysisSize(Runtime.getRuntime().maxMemory())
     }
     val orientation = remember { OrientationTracker(context) }
+    // The phone's quarter turn, as state, for the layout that turns the
+    // controls' contents with the hand (ui/WindowLayout.kt).
+    var deviceDegrees by remember { mutableIntStateOf(0) }
+    val layout = rememberCameraLayout(deviceDegrees)
 
     DisposableEffect(Unit) {
+        orientation.onQuarterTurn = { deviceDegrees = it }
         orientation.enable()
-        onDispose { orientation.disable() }
+        onDispose {
+            orientation.onQuarterTurn = null
+            orientation.disable()
+        }
     }
 
     // The last capture, refreshed whenever one completes -- and whenever the
@@ -1498,8 +1517,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
+                    // Inside the region the layout leaves the viewfinder --
+                    // beside a rail, above a hinge -- and the largest box
+                    // of the stream's shape that fits it.
+                    .previewRegion(layout)
                     .then(
-                        previewSize?.let { Modifier.fillMaxWidth().aspectRatio(it.portraitAspect()) }
+                        previewSize?.let { Modifier.fitAspect(it.portraitAspect()) }
                             ?: Modifier.fillMaxSize()
                     )
                     .onGloballyPositioned { previewBounds = it.boundsInParent() },
@@ -1527,8 +1550,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .fillMaxWidth()
-                        .aspectRatio(request.resolution.portraitAspect())
+                        .previewRegion(layout)
+                        .fitAspect(request.resolution.portraitAspect())
                         .onGloballyPositioned { previewBounds = it.boundsInParent() },
                 ) {
                     CameraXViewfinder(
@@ -1579,15 +1602,26 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     Brush.verticalGradient(listOf(Ink.ScrimTop, Color.Transparent)),
                 ),
         )
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .height(232.dp)
-                .background(
-                    Brush.verticalGradient(listOf(Color.Transparent, Ink.ScrimBottom)),
-                ),
-        )
+        if (layout.posture == Posture.SIDEBAR) {
+            // The rail's ground, down the end of the window.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .width(layout.railWidth)
+                    .background(Ink.Panel),
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(232.dp)
+                    .background(
+                        Brush.verticalGradient(listOf(Color.Transparent, Ink.ScrimBottom)),
+                    ),
+            )
+        }
 
         // The lens the mosaic shoots with: the longest that delivers raw. On
         // any lens, including that one -- the first version offered the mode
@@ -1654,9 +1688,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             }
         }
 
+        CompositionLocalProvider(LocalHandRotation provides layout.handRotation) {
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
+                // Over the viewfinder's region only: not over a rail.
+                .hudRegion(layout)
                 // Ignoring visibility, not `statusBarsPadding()`.
                 //
                 // MainActivity hides the status bar deliberately -- a clock and
@@ -1752,6 +1789,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     style = Type.Status,
                     modifier = Modifier
                         .padding(top = 8.dp)
+                        .rotateLayout(-layout.handRotation)
                         .background(Ink.Readout, RoundedCornerShape(6.dp))
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                 )
@@ -1759,8 +1797,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
 
         Column(
-            modifier = Modifier.align(Alignment.BottomCenter),
+            // The bottom strip, or the rail down the end of a wide window,
+            // or the pane under the hinge: `controlsRegion`. Held sideways,
+            // the strip's rows are the user's columns and each chip's words
+            // turn to read upright (LocalHandRotation, UprightInHand).
+            modifier = Modifier
+                .align(if (layout.posture == Posture.SIDEBAR) Alignment.CenterEnd else Alignment.BottomCenter)
+                .controlsRegion(layout),
             horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = if (layout.posture == Posture.SIDEBAR) Arrangement.Center else Arrangement.Bottom,
         ) {
             // Lens strip. Labelled in millimetres, because that is what tells a
             // photographer what the frame will look like; the zoom factor is
@@ -1842,6 +1887,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         color = Ink.Muted,
                         modifier = Modifier
                             .padding(bottom = 4.dp)
+                            .rotateLayout(-layout.handRotation)
                             .semantics { contentDescription = "super res hint" },
                     )
                     MosaicPresetPill(
@@ -2149,6 +2195,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 )
             }
         }
+        } // LocalHandRotation
 
         focusPoint?.let { point ->
             var visible by remember(focusAtMillis) { mutableStateOf(true) }
@@ -2399,13 +2446,58 @@ private fun LastShotThumb(
             .clickable(enabled = enabled, onClick = onOpen)
             .semantics { contentDescription = "Last shot" },
     ) {
-        androidx.compose.foundation.Image(
-            bitmap = image.asImageBitmap(),
-            contentDescription = null,
-            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-        )
+        UprightInHand(Modifier.fillMaxSize()) {
+            androidx.compose.foundation.Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
     }
+}
+
+/**
+ * The region the layout leaves the viewfinder: the window less a rail, or
+ * the pane above a hinge; the whole window otherwise. Composed with
+ * `Modifier.align(Center)` on the preview box, which then centres the
+ * fitted stream inside this region.
+ */
+private fun Modifier.previewRegion(layout: CameraLayout): Modifier = when (layout.posture) {
+    Posture.SIDEBAR -> this.fillMaxSize().padding(end = layout.railWidth)
+        .wrapContentSize(Alignment.Center)
+    Posture.TABLETOP -> this.fillMaxSize()
+        .layout { measurable, constraints ->
+            // The pane above the hinge, in the window's own pixels.
+            val paneHeight = layout.paneSplitTopPx.coerceIn(0, constraints.maxHeight)
+            val placeable = measurable.measure(constraints.copy(minHeight = 0, maxHeight = paneHeight))
+            layout(constraints.maxWidth, constraints.maxHeight) {
+                placeable.place((constraints.maxWidth - placeable.width) / 2, (paneHeight - placeable.height) / 2)
+            }
+        }
+    else -> this
+}
+
+/** The HUD stays over the viewfinder: inset from a rail, never over it. */
+private fun Modifier.hudRegion(layout: CameraLayout): Modifier = when (layout.posture) {
+    Posture.SIDEBAR -> this.padding(end = layout.railWidth)
+    else -> this
+}
+
+/**
+ * Where the controls stand: the strip along the bottom, the rail down the
+ * end of a wide window, or the pane under a foldable's hinge.
+ */
+private fun Modifier.controlsRegion(layout: CameraLayout): Modifier = when (layout.posture) {
+    Posture.SIDEBAR -> this.fillMaxHeight().width(layout.railWidth)
+    Posture.TABLETOP -> this.layout { measurable, constraints ->
+        val top = layout.paneSplitBottomPx.coerceIn(0, constraints.maxHeight)
+        val placeable = measurable.measure(constraints.copy(minHeight = 0, maxHeight = constraints.maxHeight - top))
+        layout(constraints.maxWidth, constraints.maxHeight) {
+            placeable.place((constraints.maxWidth - placeable.width) / 2, constraints.maxHeight - placeable.height)
+        }
+    }
+    else -> this
 }
 
 /**
@@ -2459,19 +2551,24 @@ private fun LensChip(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text(
-            text = lens.label,
-            style = Type.LensFocal,
-            color = if (selected) Ink.OnBone else Ink.Bone,
-        )
-        Text(
-            text = lens.zoomLabel,
-            // Was 9sp at 60% white, which over a lit road was not so much
-            // low-contrast as absent. The zoom factor is the half of this
-            // chip most people actually read.
-            style = Type.LensZoom,
-            color = if (selected) Ink.OnBoneMuted else Ink.Muted,
-        )
+        // A circle is the one shape a turn does not change; only the words in it turn.
+        UprightInHand {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = lens.label,
+                    style = Type.LensFocal,
+                    color = if (selected) Ink.OnBone else Ink.Bone,
+                )
+                Text(
+                    text = lens.zoomLabel,
+                    // Was 9sp at 60% white, which over a lit road was not so much
+                    // low-contrast as absent. The zoom factor is the half of this
+                    // chip most people actually read.
+                    style = Type.LensZoom,
+                    color = if (selected) Ink.OnBoneMuted else Ink.Muted,
+                )
+            }
+        }
     }
 }
 

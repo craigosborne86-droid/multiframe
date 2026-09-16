@@ -531,22 +531,26 @@ fun MosaicPresetPill(
                     .padding(horizontal = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = option.label,
-                    style = Type.Control,
-                    color = if (selected) Ink.Ground else Ink.Bone,
-                )
-                badge?.let {
-                    Text(
-                        text = " · ",
-                        style = Type.Dot,
-                        color = if (selected) Ink.OnBoneMuted else Ink.Muted,
-                    )
-                    Text(
-                        text = it,
-                        style = Type.Badge,
-                        color = if (selected) Ink.OnBone else Ink.Amber,
-                    )
+                UprightInHand {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = option.label,
+                            style = Type.Control,
+                            color = if (selected) Ink.Ground else Ink.Bone,
+                        )
+                        badge?.let {
+                            Text(
+                                text = " · ",
+                                style = Type.Dot,
+                                color = if (selected) Ink.OnBoneMuted else Ink.Muted,
+                            )
+                            Text(
+                                text = it,
+                                style = Type.Badge,
+                                color = if (selected) Ink.OnBone else Ink.Amber,
+                            )
+                        }
+                    }
                 }
             }
         }

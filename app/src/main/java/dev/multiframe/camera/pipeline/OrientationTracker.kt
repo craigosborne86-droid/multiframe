@@ -19,11 +19,22 @@ class OrientationTracker(context: Context) {
     var deviceDegrees: Int = 0
         private set
 
+    /**
+     * Told each quarter turn the phone settles into, on the main thread, for
+     * a layout that turns its controls with the hand. Null by default; the
+     * capture rotation reads [deviceDegrees] directly.
+     */
+    var onQuarterTurn: ((Int) -> Unit)? = null
+
     private val listener = object : OrientationEventListener(context) {
         override fun onOrientationChanged(orientation: Int) {
             if (orientation == ORIENTATION_UNKNOWN) return
             // Snap to the nearest quarter turn.
-            deviceDegrees = (orientation + 45) / 90 * 90 % 360
+            val snapped = (orientation + 45) / 90 * 90 % 360
+            if (snapped != deviceDegrees) {
+                deviceDegrees = snapped
+                onQuarterTurn?.invoke(snapped)
+            }
         }
     }
 

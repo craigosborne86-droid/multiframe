@@ -155,6 +155,9 @@ fun ExposureGauge(
 
     Row(
         modifier = modifier
+            // Upright in the hand, box and all: along the edge of the
+            // picture when the phone is on its side.
+            .rotateLayout(-LocalHandRotation.current)
             .background(Ink.Readout, RoundedCornerShape(8.dp))
             .padding(horizontal = 12.dp, vertical = 6.dp)
             .semantics {
@@ -257,6 +260,7 @@ fun FocusGauge(
         text = "FOCUS %.0f".format(score * 1000),
         style = Type.Gauge,
         modifier = modifier
+            .rotateLayout(-LocalHandRotation.current)
             .background(Ink.Readout, RoundedCornerShape(6.dp))
             .padding(horizontal = 8.dp, vertical = 5.dp)
             .semantics { contentDescription = "Focus score %.0f".format(score * 1000) },
@@ -275,6 +279,7 @@ fun ZoomGauge(
         text = "%.1fx".format(zoom),
         style = Type.GaugeBone,
         modifier = modifier
+            .rotateLayout(-LocalHandRotation.current)
             .background(Ink.Readout, RoundedCornerShape(6.dp))
             .padding(horizontal = 10.dp, vertical = 6.dp)
             .semantics { contentDescription = "Zoom %.1f times".format(zoom) },
