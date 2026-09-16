@@ -62,8 +62,16 @@ object DcgProfiler {
      */
     private const val SETTLE_ATTEMPTS = 4
 
-    /** At 30fps, one frame. Used to pace the settle. */
+    /** At 30fps, one frame. Used to pace the settle; a long rung's exposure paces it instead. */
     private const val FRAME_MS = 34L
+
+    /**
+     * The longest exposure a rung may ask for, which is what bounds how far
+     * below the metered point the ladder reaches. A quarter of a second is
+     * four frames a second, which the ring still fills; a second would be
+     * one, and the first version's note about the ring running dry.
+     */
+    const val MAX_LADDER_EXPOSURE_NS = 250_000_000L
 
     /**
      * The crop measured, per side.
@@ -126,16 +134,41 @@ object DcgProfiler {
         // point and may not offer enough rungs. That is reported and retried on
         // a later launch rather than worked around -- a measurement taken in
         // the dark would be the kind that produces a confident wrong answer.
-        val floor = maxOf(isoMin, aeIso)
-        val ladder = DcgCalibration.isoLadder(floor, isoMax, STEPS)
+        // Below the metered point as far as a quarter-second exposure will
+        // reach, which is about three stops on an indoor scene. The first
+        // version started the ladder at the metered ISO, and indoors that is
+        // the top of the analog range on every one of this phone's sensors:
+        // the whole ladder lay in digital gain, where the curve bends for
+        // reasons that have nothing to do with a conversion gain switch, and
+        // the fit found a "switch" on three lenses out of five.
+        val longestRungIso = Math.ceil(reference.toDouble() / MAX_LADDER_EXPOSURE_NS).toInt()
+        val floor = maxOf(isoMin, minOf(aeIso, longestRungIso))
+        // And no higher than the analog range where the sensor says where
+        // that ends: a conversion gain switch is an analog-gain event, and
+        // digital gain past it multiplies the read noise in a way the
+        // broken-line fit reads as a break.
+        val analogCeiling = caps.maxAnalogIso?.takeIf { it > isoMin }
+        val ceiling = analogCeiling?.coerceAtMost(isoMax) ?: isoMax
+        if (analogCeiling != null && floor >= analogCeiling) {
+            Log.i(
+                TAG,
+                "$cameraId: the ladder would start at ISO $floor, at or above the analog ceiling " +
+                    "of $analogCeiling; a gain switch, if there is one, is below what this light " +
+                    "lets us reach in a quarter second. Not concluded; will try in brighter light.",
+            )
+            return null
+        }
+        val ladder = DcgCalibration.isoLadder(floor, ceiling, STEPS)
         if (ladder.size < DcgCalibration.MIN_SAMPLES) {
             Log.i(
                 TAG,
-                "only ${ladder.size} rungs available above ISO $floor " +
+                "only ${ladder.size} rungs available between ISO $floor and $ceiling " +
                     "(range $isoMin-$isoMax); too dark to profile here",
             )
             return null
         }
+        Log.i(TAG, "$cameraId: ladder ISO $floor..$ceiling in ${ladder.size} rungs, metered at ISO $aeIso 1/${1e9 / aeExposureNs} s" +
+            (analogCeiling?.let { ", analog ceiling $it" } ?: ""))
 
         val samples = ArrayList<DcgCalibration.Sample>(ladder.size)
         try {
@@ -160,9 +193,13 @@ object DcgProfiler {
                 // the metadata what the frame was actually shot at costs
                 // nothing and cannot be fooled by a slow pipeline -- and
                 // waiting again is cheaper than losing the rung.
+                // Paced by the frame, which at the bottom of the ladder is the
+                // exposure: a quarter-second rung delivers four frames a
+                // second, and three of them are a settle of most of a second.
+                val frameMs = maxOf(FRAME_MS, exposureNs / 1_000_000L + 1L)
                 var variance: Double? = null
                 for (attempt in 0 until SETTLE_ATTEMPTS) {
-                    delay(FRAME_MS * SETTLE_FRAMES)
+                    delay(frameMs * SETTLE_FRAMES)
                     variance = measurePair(stream, iso)
                     if (variance != null) break
                 }

@@ -326,4 +326,15 @@ class DcgCalibrationTest {
         val u2 = rnd.nextDouble()
         return kotlin.math.sqrt(-2.0 * ln(u1)) * kotlin.math.cos(2.0 * Math.PI * u2)
     }
+
+    /** The Pixel 9 Pro XL's 220mm crop, as measured: a staircase of ones and twos. */
+    @Test
+    fun aCurveAtTheQuantisationFloorIsNotASwitch() {
+        val isos = listOf(37, 42, 48, 55, 63, 72, 83, 94, 108, 123, 141, 161, 184, 210, 241, 275)
+        val variances = listOf(0.4, 0.4, 0.5, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0)
+        val samples = isos.zip(variances) { iso, v -> DcgCalibration.Sample(iso, v) }
+        val result = DcgCalibration.fit(samples)
+        assertThat(result.foundThreshold).isFalse()
+        assertThat(result.sampleCount).isEqualTo(16)
+    }
 }

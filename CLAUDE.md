@@ -32,7 +32,9 @@ picture, the sensor saw it in the scene."
   that decides from each frame alone oscillates with a period of two
   decisions and the merge turns the swing into green pictures. The cap's
   follower pairs a frame with the result of the same sensor timestamp,
-  never a neighbour's. `ShutterCap.retarget` is told stops *darker*.
+  never a neighbour's. `ShutterCap.retarget` is told stops *darker*. A
+  manual exposure -- PRO's or the read-noise profiler's -- releases the
+  cap's hold; the hold never outranks a manual setting in the request.
 - **The merge scales light, not the pedestal.** A frame at another gain is
   normalised as `black + (raw − black) / g` (`bayer_merge.cpp`,
   `BayerMerger.kt`); dividing the raw code drags the merge under black and

@@ -108,6 +108,8 @@ import dev.multiframe.camera.pipeline.LensProfiles
 import dev.multiframe.camera.pipeline.MemoryPressure
 import dev.multiframe.camera.pipeline.NativeMerge
 import dev.multiframe.camera.pipeline.PressureResponse
+import dev.multiframe.camera.pipeline.DcgCalibrationStore
+import dev.multiframe.camera.pipeline.DcgProfiler
 import dev.multiframe.camera.pipeline.DevelopParams
 import dev.multiframe.camera.pipeline.MosaicGuide
 import dev.multiframe.camera.pipeline.MotionSensor
@@ -235,6 +237,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var busy by remember { mutableStateOf(false) }
     // Shots taken and not yet written: the number the develop queue holds.
     var developing by remember { mutableIntStateOf(0) }
+    /** The read-noise profile in progress, for the shutter to cancel; null otherwise. */
+    var profileJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     /** A press waiting for the ring to refill before it locks its frames. One at a time. */
     var lockPending by remember { mutableStateOf(false) }
     // Bumped as each shot is written, for the thumbnail to reload on.
@@ -1032,6 +1036,34 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // Slower than the frame rate on purpose: auto-exposure needs time
             // to settle after a change, and chasing it faster oscillates.
             kotlinx.coroutines.delay(700)
+        }
+    }
+
+    // The read-noise profile of REFERENCE.md §2.3, once per camera, in the
+    // first seconds of a fresh stream: what is on record is applied at once
+    // (the DCG bracket straddles a measured gain switch), and a camera with
+    // no record is measured -- a ladder of sensitivities at constant
+    // brightness, a second or two, the viewfinder live throughout -- unless
+    // the photographer is already shooting. A press during the ladder
+    // cancels it; the camera goes back to its settings and the measurement
+    // waits for another launch. The store keeps a verdict, and a run the
+    // light did not allow keeps nothing and is tried again.
+    LaunchedEffect(zslStream, caps) {
+        val stream = zslStream ?: return@LaunchedEffect
+        val c = caps ?: return@LaunchedEffect
+        val id = stream.lensId
+        stream.setGainThreshold(DcgCalibrationStore.thresholdFor(context, id), settings, c)
+        if (DcgCalibrationStore.hasProfiled(context, id)) return@LaunchedEffect
+        kotlinx.coroutines.delay(1500)
+        if (developing > 0 || busy || superResPhase.selected || settings.manualExposureActive(c)) return@LaunchedEffect
+        profileJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+        try {
+            val result = withContext(Dispatchers.IO) {
+                DcgProfiler.profile(context, stream, c, settings, id)
+            }
+            if (result != null) stream.setGainThreshold(result.thresholdIso, settings, c)
+        } finally {
+            profileJob = null
         }
     }
 
@@ -1930,6 +1962,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 return@ShutterButton
                             }
                             if (busy) return@ShutterButton
+
+                            // A press is a photograph; a profile in progress
+                            // gives the camera back and waits for another launch.
+                            profileJob?.cancel()
 
                             // Zero shutter lag: the frames already exist, so this press
                             // locks them rather than starting a capture -- and

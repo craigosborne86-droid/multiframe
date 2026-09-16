@@ -40,6 +40,14 @@ data class CameraCapabilities(
      */
     val rawWidth: Int = 0,
     val rawHeight: Int = 0,
+    /**
+     * The highest sensitivity the sensor reaches with analog gain alone
+     * (`SENSOR_MAX_ANALOG_SENSITIVITY`), or null where the camera did not
+     * say. Above it the gain is digital, and a read-noise curve measured
+     * there says nothing about a conversion gain switch -- see
+     * [DcgProfiler].
+     */
+    val maxAnalogIso: Int? = null,
 ) {
 
     /**
@@ -198,6 +206,9 @@ data class CameraCapabilities(
                 }.getOrDefault(emptySet()),
                 rawWidth = activeArray?.width() ?: 0,
                 rawHeight = activeArray?.height() ?: 0,
+                maxAnalogIso = c2.getCameraCharacteristic(
+                    CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY
+                ),
             )
         }
     }

@@ -381,6 +381,27 @@ device class that needs them.
 is no dialog, no progress bar, no "calibrating..." message. If the calibration
 fails (e.g., user is panning rapidly), it silently retries on next launch.
 
+**As built** (`DcgProfiler`, `DcgCalibration`, `DcgCalibrationStore`; the
+trigger in `CameraScreen`, one `LaunchedEffect` per stream): the ladder
+hangs from the metered point *downward* as far as a quarter-second exposure
+reaches (`MAX_LADDER_EXPOSURE_NS`), at constant brightness -- ISO and time
+trade exactly, so the viewfinder does not change and only the gain does --
+and no higher than `SENSOR_MAX_ANALOG_SENSITIVITY` where the sensor
+publishes it. Indoors the metered point on every one of the Pixel 9 Pro
+XL's sensors *is* the analog ceiling, and a ladder that started there lay
+entirely in digital gain, where the curve bends for reasons that are not a
+conversion gain switch: the first run found a "switch" on three lenses of
+five. A ladder that cannot get under the ceiling in a quarter second is
+not concluded (nothing recorded; tried again in brighter light). A curve
+whose variance never rises by `MIN_VARIANCE_SPAN` = 4 codes² is at the
+quantisation floor -- 0, 0, 1, 1, 2 -- and reports no switch rather than
+fitting the staircase. Settle is paced by the rung's exposure, since a
+quarter-second rung delivers four frames a second. A shutter press cancels
+a profile in progress; the camera goes back to its settings. A manual
+exposure -- the profiler's or PRO's -- releases the shutter cap's hold,
+which used to outrank it in the request (§3.7).
+`DcgProfileDeviceTest` runs the ladder on every raw lens for the record.
+
 #### 2.3.2 Interpreting Results
 
 - **Threshold detected:** `dcgRatio = thresholdIso / baseIso`, clamped to [2, 8].
@@ -392,6 +413,40 @@ fails (e.g., user is panning rapidly), it silently retries on next launch.
   hardware gain switch to exploit.
 - **Insufficient data:** Calibration retries on next launch. `dcgThresholdIso`
   remains null, and the default `DCG_RATIO = 4` is used.
+
+### 2.4 Hardware Record: the Development Devices
+
+What the cameras said when asked (`HardwareProbeDeviceTest`, report written
+to the app's external files as `hardware-probe-<device>.txt`).
+
+**Pixel 9 Pro XL (komodo), Android 17, 16 GB.** Camera ids `0` (rear
+logical) and `1`; the rear lenses are physical members of `0` and open
+through it. No lens advertises `ULTRA_HIGH_RESOLUTION_SENSOR`; the 50 MP
+main and 48 MP telephoto are exposed at 12 MP, and their un-binned centres
+are exposed as *further physical cameras* -- the "49mm" and "220mm" below,
+each the same active array as its parent at half the sensor size.
+
+| Lens | Camera | Active array | Pitch | ISO | Analog ceiling | Shortest exposure | Raw sizes (default mode) | Distortion k1, k2, k3, p1, p2 | Intrinsics fx, cx, cy |
+|---|---|---|---|---|---|---|---|---|---|
+| 12mm f/1.7 | 3 via 0 | 4032×3024 (5.64×4.23 mm) | 1.40 µm | 53–2388 | 1194 | 69 µs | 4032×3024 @30, 4032×2272 @60, 2016×1512, 1920×1080 | 0.00015, −0.00100, 0.00057, 0.00070, 0.00093 | 1406.8, 2028.2, 1518.3 |
+| 24mm f/1.68 | 0 | 4080×3072 (9.79×7.37 mm) | 2.40 µm | 22–11277 | 704 | 26 µs | 4080×3072 @30, 4080×2288 @60, 2032×1536, 2016×1136 | 0.09004, −0.15054, 0.10187, 0, 0 | 2852.8, 2044.9, 1537.7 |
+| 49mm (main's centre) | 5 via 0 | 4080×3072 (4.90×3.69 mm) | 1.20 µm | 22–11277 | 704 | 27 µs | 4080×3072 @30 | as 24mm | as 24mm |
+| 110mm f/2.8 | 4 via 0 | 4032×3024 (5.64×4.23 mm) | 1.40 µm | 49–17655 | 1103 | 69 µs | 4032×3024 @30, 4032×2272 @60, 2016×1512, 1920×1080 | 0.41214, 2.55331, −70.5304, 0, 0 | 12378.1, 2008.5, 1504.9 |
+| 220mm (tele's centre) | 6 via 0 | 4032×3024 (2.82×2.12 mm) | 0.70 µm | 34–4413 | 275 | 123 µs | 4032×3024 @30 | as 110mm | as 110mm |
+
+All: white level 1023, black 64 on every site, orientation 90, raw and
+manual sensor and manual focus on every lens, OIS on all but the 12mm.
+CFA: the 12mm reports pattern 0 (RGGB), the rest 2 (GBRG).
+
+**Read noise (§2.3), indoor light, the ladder under the analog ceiling:**
+24mm 2–3 codes² flat from ISO 190 to 704 (no switch); 49mm 2–7 rising
+(none, F 5.5); 12mm 1–15 (none, F 10.5); 110mm 1–13 (none, F 7.4); 220mm
+0–2, the quantisation floor (none). No conversion gain switch is visible
+in any lens's raw; DCG brackets at the software ratio of four.
+
+**Pixel 11 Pro (grizzly).** Main raw 4080×3064, GBRG on the main and BGGR
+on one lens; ring of 32 slots at 763 MB. The probe report is to be taken
+when the phone is next attached.
 
 ---
 

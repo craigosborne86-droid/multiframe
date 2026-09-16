@@ -767,6 +767,12 @@ class ZslRawStream private constructor(
         if (closed) return
         lastSettings = settings
         lastCaps = caps
+        // A manual exposure is the photographer's (or the profiler's), and the
+        // cap lets go of any hold it had: the hold was the meter's exposure
+        // re-split, and there is no meter's exposure under manual settings.
+        // Left held, the hold's values outranked the manual ones in the
+        // request and PRO's shutter and ISO did nothing on a dark scene.
+        if (settings.manualExposureActive(caps)) shutterCap?.release()
         submitRepeating(settings, caps)
     }
 
@@ -1043,7 +1049,7 @@ class ZslRawStream private constructor(
         // the cap's held shutter is one the capture mode chose. The mosaic's
         // lock comes first: it has the whole exposure.
         val pinned = if (locked) sweepExposure else null
-        val held = if (!locked) shutterCap?.held else null
+        val held = if (!locked && !settings.manualExposureActive(caps)) shutterCap?.held else null
         val chosenIso = pinned?.iso ?: held?.iso
         val chosenExposure = pinned?.exposureNs ?: held?.exposureNs
         if (settings.manualExposureActive(caps) || chosenIso != null) {

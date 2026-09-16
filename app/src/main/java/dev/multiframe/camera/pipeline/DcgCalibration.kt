@@ -118,6 +118,13 @@ object DcgCalibration {
     const val F_THRESHOLD = 12.0
 
     /**
+     * The least the variance has to rise across the ladder, in codes squared,
+     * for a break to be worth looking for: a standard deviation growing by
+     * two codes. Under that the curve is quantisation.
+     */
+    const val MIN_VARIANCE_SPAN = 4.0
+
+    /**
      * The ISO values to sample, logarithmically spaced across the range.
      *
      * Logarithmic because the noise model is linear in log ISO, so evenly
@@ -196,6 +203,18 @@ object DcgCalibration {
             .distinctBy { it.iso }
 
         if (usable.size < MIN_SAMPLES) {
+            return Result(null, 0.0, 0.0, 0.0, usable.size)
+        }
+
+        // A curve that never rises above a few codes squared is a variance at
+        // the quantisation floor -- 0, 0, 1, 1, 2 -- and a broken line fits
+        // the steps of a staircase as well as it fits a sensor. The 220mm
+        // crop of the Pixel 9 Pro XL's telephoto produced exactly that, and
+        // an F of 15 for a "switch" that was the difference between one and
+        // two. Below [MIN_VARIANCE_SPAN] of range there is nothing to fit a
+        // break to, and the honest answer is no switch.
+        val span = usable.maxOf { it.variance } - usable.minOf { it.variance }
+        if (span < MIN_VARIANCE_SPAN) {
             return Result(null, 0.0, 0.0, 0.0, usable.size)
         }
 
