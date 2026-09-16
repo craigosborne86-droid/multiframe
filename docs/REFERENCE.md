@@ -2066,5 +2066,27 @@ untouched; only the rendering intent is corrected.
 | Kotlin | 2.4.10 |
 | AGP | 9.3.2 |
 | Compose BOM | 2026.08.00 |
+| androidx.window | 1.5.0 (folding features, §1.4) |
+
+**The release build.** `assembleRelease` shrinks with R8 (`isMinifyEnabled`,
+`isShrinkResources`, `proguard-android-optimize.txt` plus
+`app/proguard-rules.pro`) and signs from `keystore.properties` where that
+file exists; without it the APK is unsigned and `apksigner` with any key
+makes it installable for a device run. The rules keep, by member, the nine
+classes that carry `external fun`s -- `RawRing`, `NativeMerge`, `Aligner`,
+`NativeSubPixel`, `MosaicCanvas`, `NativeOptics`, `NativeRotate`,
+`NativeJpeg`, `GpuCrossing` -- so JNI's link by fully qualified name holds;
+the native side makes no upcalls, so nothing else is named. The shrinker is
+allowed to *remove* a native method it can prove unreachable (a bench, a
+test-only accessor, the defringe that no setting turns on), which cannot
+break the link because the Kotlin call is gone with it; what it must not do
+is *rename* one, and `tools/verify-native-bridge.sh` reads the release DEX's
+native methods and the `.so`'s exported `Java_` symbols and fails on any
+method without its symbol. On 16 September 2026 the release build carried 45
+native methods in 8 classes against 58 exported symbols, every one matched,
+13 removed as unreachable; installed on the Pixel 9 Pro XL it opened the
+ring, took a burst, merged, developed, corrected and wrote JPEG and DNG
+through every native stage. The release APK is 4.1 MB against the debug's
+71 MB (the debug carries unstripped native symbols).
 | CameraX | 1.6.1 |
 | libjpeg-turbo | vendored (ARM64 NEON SIMD only) |

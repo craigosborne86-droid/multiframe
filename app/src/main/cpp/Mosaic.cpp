@@ -1012,7 +1012,7 @@ inline float parabolaPeak(float before, float at, float after) {
  * canvas is sampled at a stride inside the cell, since a cell of thirty-two
  * pixels does not need all thousand of them to know its mean.
  */
-void buildGrids(const uint16_t* data, int canvasWidth, int canvasHeight, int channels,
+void buildGrids(const uint16_t* data, int canvasWidth, int channels,
                 int x0, int y0, int x1, int y1, int scale,
                 const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
                 const double* inverse, LumaGrid& canvasGrid, LumaGrid& tileGrid) {
@@ -1142,7 +1142,7 @@ int MosaicCanvas::RefineTile(const uint8_t* rgba, int tileWidth, int tileHeight,
 
     // Coarse: the whole tile's translation.
     LumaGrid canvasCoarse, tileCoarse;
-    buildGrids(data_, width_, height_, kChannels, x0, y0, x1, y1, kRefineCoarseScale,
+    buildGrids(data_, width_, kChannels, x0, y0, x1, y1, kRefineCoarseScale,
                rgba, tileWidth, tileHeight, tileStride, inverse, canvasCoarse, tileCoarse);
     int overlap = 0;
     nccAt(canvasCoarse, tileCoarse, 0, 0, 0, 0, tileCoarse.cols, tileCoarse.rows, 1, &overlap);
@@ -1179,7 +1179,7 @@ int MosaicCanvas::RefineTile(const uint8_t* rgba, int tileWidth, int tileHeight,
 
     // Fine: blocks of the overlap, each around the coarse answer.
     LumaGrid canvasFine, tileFine;
-    buildGrids(data_, width_, height_, kChannels, x0, y0, x1, y1, kRefineFineScale,
+    buildGrids(data_, width_, kChannels, x0, y0, x1, y1, kRefineFineScale,
                rgba, tileWidth, tileHeight, tileStride, inverse, canvasFine, tileFine);
     const int fdx = coarseDx / kRefineFineScale;
     const int fdy = coarseDy / kRefineFineScale;

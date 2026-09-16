@@ -2437,7 +2437,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nSharpen(
     // at all until it turned out to be a third of the native develop.
     const int64_t tEnd = nowMicros();
     LOGI("sharpen: luma %lldms, sharpen %lldms, total %lldms",
-         (tSharpen - tLuma) / 1000, (tEnd - tSharpen) / 1000, (tEnd - tLuma) / 1000);
+         static_cast<long long>((tSharpen - tLuma) / 1000), static_cast<long long>((tEnd - tSharpen) / 1000),
+         static_cast<long long>((tEnd - tLuma) / 1000));
 
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
