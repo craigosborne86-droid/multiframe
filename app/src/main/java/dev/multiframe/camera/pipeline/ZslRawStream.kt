@@ -527,6 +527,9 @@ class ZslRawStream private constructor(
         runCatching {
             val trigger = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(previewSurface)
+                if (config.fullResolution) {
+                    set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+                }
                 focusRegion?.let {
                     val rect = arrayOf(TouchFocus.meteringRectangle(it))
                     set(CaptureRequest.CONTROL_AF_REGIONS, rect)
@@ -942,6 +945,11 @@ class ZslRawStream private constructor(
         builder.addTarget(previewSurface)
         builder.addTarget(reader.surface)
 
+        // The un-binned readout, where the session was configured for it.
+        if (config.fullResolution) {
+            builder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+        }
+
         // Pin the frame rate. Left to itself, auto-exposure lengthens the frame
         // duration in dim light, which is precisely where a tight burst window
         // matters most; the extra noise that costs is what the merge is for.
@@ -1305,6 +1313,7 @@ class ZslRawStream private constructor(
                 createSession(
                     device, listOf(previewSurface, reader.surface), executor,
                     physicalCameraId = lens.logicalId?.let { lens.cameraId },
+                    fullResolution = config.fullResolution,
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "ZSL declined: session configuration failed", e)
@@ -1453,6 +1462,7 @@ class ZslRawStream private constructor(
             surfaces: List<Surface>,
             executor: Executor,
             physicalCameraId: String? = null,
+            fullResolution: Boolean = false,
         ): CameraCaptureSession? = suspendCancellableCoroutine { cont ->
             val outputs = surfaces.map { surface ->
                 OutputConfiguration(surface).apply {
@@ -1461,6 +1471,12 @@ class ZslRawStream private constructor(
                     // decides, and a raw frame could arrive from a different
                     // lens than the DNG metadata describes.
                     if (physicalCameraId != null) setPhysicalCameraId(physicalCameraId)
+                    // The un-binned mode is declared per output as well as
+                    // per request; a session whose outputs do not name it
+                    // refuses a request that does.
+                    if (fullResolution) {
+                        addSensorPixelModeUsed(CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+                    }
                 }
             }
             device.createCaptureSession(
@@ -1491,7 +1507,7 @@ class ZslRawStream private constructor(
                 CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
             ) ?: return emptyList()
             val sizes = map.getOutputSizes(ImageFormat.RAW_SENSOR) ?: return emptyList()
-            return sizes.map { size ->
+            val binned = sizes.map { size ->
                 RawStreamConfig(
                     width = size.width,
                     height = size.height,
@@ -1499,6 +1515,33 @@ class ZslRawStream private constructor(
                         ImageFormat.RAW_SENSOR, size
                     ),
                     stallDurationNs = map.getOutputStallDuration(ImageFormat.RAW_SENSOR, size),
+                )
+            }
+            return binned + fullResolutionConfigs(characteristics)
+        }
+
+        /**
+         * The un-binned raw outputs, flagged, where the sensor has a
+         * maximum-resolution mode; empty otherwise. The key is read in a
+         * try: a HAL without the mode may throw for it rather than answer
+         * null, and a throw here would take the default mode down with it.
+         */
+        fun fullResolutionConfigs(characteristics: CameraCharacteristics): List<RawStreamConfig> {
+            val caps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+            if (!caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR)) {
+                return emptyList()
+            }
+            val map = runCatching {
+                characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+            }.getOrNull() ?: return emptyList()
+            val sizes = map.getOutputSizes(ImageFormat.RAW_SENSOR) ?: return emptyList()
+            return sizes.map { size ->
+                RawStreamConfig(
+                    width = size.width,
+                    height = size.height,
+                    minFrameDurationNs = map.getOutputMinFrameDuration(ImageFormat.RAW_SENSOR, size),
+                    stallDurationNs = map.getOutputStallDuration(ImageFormat.RAW_SENSOR, size),
+                    fullResolution = true,
                 )
             }
         }
@@ -1512,7 +1555,11 @@ class ZslRawStream private constructor(
             raw: RawStreamConfig,
             maxWidth: Int = 1920,
         ): Size {
-            val map = characteristics.get(
+            // A full-resolution session's every output has to be a size the
+            // maximum-resolution map lists, the preview included.
+            val map = (if (raw.fullResolution) runCatching {
+                characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+            }.getOrNull() else null) ?: characteristics.get(
                 CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
             ) ?: return Size(1440, 1080)
             val sizes = map.getOutputSizes(SurfaceHolderClass) ?: return Size(1440, 1080)

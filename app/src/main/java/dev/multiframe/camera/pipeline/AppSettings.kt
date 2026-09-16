@@ -66,6 +66,14 @@ data class AppSettings(
      * JPEG by default, for the compatibility reason in [OutputFormat].
      */
     val outputFormat: OutputFormat = OutputFormat.JPEG,
+    /**
+     * The sensor's un-binned maximum-resolution mode, where it has one
+     * ([CameraCapabilities.supportsFullResolution]): a 50 MP raw at a few
+     * frames a second on a ring of five, against the 12 MP binned readout at
+     * thirty on a ring of thirty-two. Off by default; the `12 MP | 50 MP`
+     * chip is the switch, and is absent on a sensor without the mode.
+     */
+    val fullResolution: Boolean = false,
 ) {
 
     /** The develop's parameters as these settings ask for them. */
@@ -99,6 +107,7 @@ data class AppSettings(
         KEY_GUIDES to guides,
         KEY_FORMAT to outputFormat.name,
         KEY_HISTOGRAM to histogram.toString(),
+        KEY_FULL_RESOLUTION to fullResolution.toString(),
     ) + (lensId?.let { mapOf(KEY_LENS to it) } ?: emptyMap())
 
     companion object {
@@ -121,6 +130,7 @@ data class AppSettings(
         const val KEY_LOCAL_TONE = "localTone"
         const val KEY_FORMAT = "outputFormat"
         const val KEY_HISTOGRAM = "histogram"
+        const val KEY_FULL_RESOLUTION = "fullResolution"
 
         private const val PREFERENCES = "multiframe.settings"
 
@@ -179,6 +189,7 @@ data class AppSettings(
                 localTone = bool(KEY_LOCAL_TONE, defaults.localTone),
                 outputFormat = OutputFormat.named(stored[KEY_FORMAT]),
                 histogram = bool(KEY_HISTOGRAM, defaults.histogram),
+                fullResolution = bool(KEY_FULL_RESOLUTION, defaults.fullResolution),
             )
         }
 
@@ -206,6 +217,8 @@ data class AppSettings(
                 mosaicPreset = if (mosaicPreset == MosaicPreset.ONE_SHOT && !caps.supportsSuperRes) {
                     MosaicPreset.DETAIL_BOOST
                 } else mosaicPreset,
+                // A sensor without the un-binned mode has no 50 MP to ask for.
+                fullResolution = fullResolution && caps.supportsFullResolution,
             )
         }
 

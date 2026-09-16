@@ -136,6 +136,10 @@ check. Every feature is gated:
 - Multiple lenses: `LensCatalog.rear(lenses).size > 1`
 - Telephoto RAW: `LensProfile.supportsRaw` for the specific physical camera
 - Distortion data: `LensProfile.distortionCoefficients != null`
+- Un-binned sensor mode (the `12 MP | 50 MP` chip):
+  `CameraCapabilities.supportsFullResolution` -- the capability, a raw size
+  in the maximum-resolution map, and the memory for a five-slot ring and
+  its merge. Neither development device has it; the chip is absent there.
 
 If a feature is unavailable, the corresponding UI control is **hidden** (not
 disabled, not greyed out — absent). The user never sees a control they cannot

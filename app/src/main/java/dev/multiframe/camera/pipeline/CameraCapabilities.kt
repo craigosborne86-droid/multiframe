@@ -48,7 +48,33 @@ data class CameraCapabilities(
      * [DcgProfiler].
      */
     val maxAnalogIso: Int? = null,
+    /**
+     * Whether the sensor advertises `ULTRA_HIGH_RESOLUTION_SENSOR`: a binned
+     * default mode and an un-binned maximum-resolution mode, switched per
+     * session with `SENSOR_PIXEL_MODE`. Neither development device does --
+     * their 50 MP sensors are 12 MP to Camera2, with the un-binned centre
+     * exposed as a further physical camera -- so every use of this is gated,
+     * and the control for it is absent where it is false (CLAUDE.md,
+     * "Verify, never assume").
+     */
+    val ultraHighResolution: Boolean = false,
+    /** The largest RAW_SENSOR size in the maximum-resolution stream map, or zero where there is no such mode. */
+    val fullResolutionRawWidth: Int = 0,
+    val fullResolutionRawHeight: Int = 0,
 ) {
+
+    /**
+     * Whether a full-resolution raw stream can be asked for at all: the mode,
+     * a raw size in it, and the memory to ring and merge it
+     * ([MemoryBudget.canHoldFullResolution]).
+     */
+    val supportsFullResolution: Boolean
+        get() = ultraHighResolution && fullResolutionRawWidth > 0 && fullResolutionRawHeight > 0 &&
+            MemoryBudget.canHoldFullResolution(fullResolutionRawWidth, fullResolutionRawHeight)
+
+    /** Megapixels of the default (binned) raw and of the full-resolution raw, for the chip. */
+    val rawMegapixels: Float get() = rawWidth.toFloat() * rawHeight / 1_000_000f
+    val fullResolutionMegapixels: Float get() = fullResolutionRawWidth.toFloat() * fullResolutionRawHeight / 1_000_000f
 
     /**
      * DNG needs both a RAW-capable sensor and CameraX support for the combined
@@ -143,6 +169,22 @@ data class CameraCapabilities(
     }
 
     companion object {
+        /**
+         * The largest RAW_SENSOR size of the maximum-resolution stream map,
+         * where the camera has one. Read in a try, because a HAL that does
+         * not implement the mode may throw rather than return null for the
+         * key.
+         */
+        @OptIn(ExperimentalCamera2Interop::class)
+        @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
+        private fun fullResolutionRaw(c2: Camera2CameraInfo): android.util.Size? = runCatching {
+            val map = c2.getCameraCharacteristic(
+                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION
+            ) ?: return null
+            map.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)
+                ?.maxByOrNull { it.width.toLong() * it.height }
+        }.getOrNull()
+
         // See the note in ManualSettings: the compiler reads one of these and
         // AndroidX lint reads the other.
         @OptIn(ExperimentalCamera2Interop::class)
@@ -209,6 +251,11 @@ data class CameraCapabilities(
                 maxAnalogIso = c2.getCameraCharacteristic(
                     CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY
                 ),
+                ultraHighResolution = caps.contains(
+                    CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR
+                ),
+                fullResolutionRawWidth = fullResolutionRaw(c2)?.width ?: 0,
+                fullResolutionRawHeight = fullResolutionRaw(c2)?.height ?: 0,
             )
         }
     }

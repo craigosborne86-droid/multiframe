@@ -119,4 +119,13 @@ class MemoryBudgetTest {
         assertThat(MemoryBudget.canHoldCanvas(0, 0, physicalBytes = 12L shl 30)).isFalse()
         assertThat(MemoryBudget.canHoldCanvas(4080, 3072, physicalBytes = 0L)).isFalse()
     }
+
+    @Test
+    fun `a full-resolution ring and its merge need a gigabyte, which sixteen has and six does not`() {
+        // 50 MP: 500 MB of ring, 500 MB of merge working set.
+        assertThat(MemoryBudget.canHoldFullResolution(8160, 6144, 16L shl 30)).isTrue()
+        assertThat(MemoryBudget.canHoldFullResolution(8160, 6144, 6L shl 30)).isTrue()
+        assertThat(MemoryBudget.canHoldFullResolution(8160, 6144, 1L shl 30)).isFalse()
+        assertThat(MemoryBudget.canHoldFullResolution(0, 6144, 16L shl 30)).isFalse()
+    }
 }

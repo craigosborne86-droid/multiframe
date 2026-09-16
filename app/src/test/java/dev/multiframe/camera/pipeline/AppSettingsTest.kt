@@ -272,4 +272,17 @@ class AppSettingsTest {
 
         assertThat(fine.reconcile(caps, lenses)).isEqualTo(fine)
     }
+
+    @Test
+    fun `the full-resolution mode is remembered, and forgotten on a sensor without it`() {
+        val on = AppSettings(fullResolution = true)
+        assertThat(AppSettings.decode(on.encode()).fullResolution).isTrue()
+        assertThat(AppSettings().fullResolution).isFalse()
+        // The test capabilities have no un-binned mode: reconciled off.
+        assertThat(on.reconcile(caps, lenses).fullResolution).isFalse()
+        assertThat(caps.supportsFullResolution).isFalse()
+        // A sensor that has one, with a raw size in it and the memory, keeps it.
+        val ultra = caps.copy(ultraHighResolution = true, fullResolutionRawWidth = 8160, fullResolutionRawHeight = 6144)
+        if (ultra.supportsFullResolution) assertThat(on.reconcile(ultra, lenses).fullResolution).isTrue()
+    }
 }

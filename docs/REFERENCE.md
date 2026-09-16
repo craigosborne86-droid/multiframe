@@ -335,6 +335,38 @@ updates (e.g., DCG toggle appears once `supportsBracketing` is confirmed).
 | No OIS on telephoto | `LensProfile.hasOis == false` | Allow Super Res; the stability gate and the shutter floor are what hold the tile sharp. |
 | No distortion data | `LENS_DISTORTION` not reported | Skip distortion correction. Log. Mosaic stitching proceeds without. |
 | Low heap (< 256 MB) | `Runtime.maxMemory()` | Cap burst frames at 4, mosaic canvas at 20 MP. |
+| No un-binned sensor mode | `REQUEST_AVAILABLE_CAPABILITIES` lacks `ULTRA_HIGH_RESOLUTION_SENSOR`, or the maximum-resolution stream map has no `RAW_SENSOR` size, or the device cannot hold the ring and merge (`MemoryBudget.canHoldFullResolution`) | The `12 MP \| 50 MP` chip is absent; the binned ring is the camera. Both development devices are here: their 50 MP sensors are 12 MP to Camera2, the un-binned centre a further physical camera (§2.4). |
+
+#### 2.2.2 The Un-binned Sensor Mode
+
+**As built** (`CameraCapabilities.ultraHighResolution`, `supportsFullResolution`;
+`ZslRawStream.fullResolutionConfigs`, `RawStreamConfig.fullResolution`;
+`ZslPolicy.evaluateFullResolution`; `RawRingBudget.FULL_RESOLUTION_CAPACITY`;
+`AppSettings.fullResolution`; `ResolutionPill`). Where a sensor advertises
+`ULTRA_HIGH_RESOLUTION_SENSOR`, its `RAW_SENSOR` sizes from
+`SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION` are enumerated beside
+the default map's and flagged; the chip on the top HUD switches
+`AppSettings.fullResolution`, and the stream reopens on the flagged size --
+every `OutputConfiguration` of the session declares
+`SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION` (`addSensorPixelModeUsed`), every
+request sets `SENSOR_PIXEL_MODE` to it (the repeating request, the DCG high
+request, the AF trigger), and the preview size comes from the
+maximum-resolution map, since every output of such a session has to be a
+size that map lists. The policy admits an un-binned stream down to five
+frames a second (`MAX_FULL_RESOLUTION_FRAME_DURATION_NS`) against the
+default mode's twenty: a 50 MP readout is not a 30 fps stream anywhere, and
+a burst at five a second held still is a burst. The ring is sized to five
+slots -- a three-frame burst and the camera's headroom -- 500 MB at 50 MP
+against the 765 MB the binned ring of thirty-two reserves; the merge's
+working set at that size is another 500 MB (`MERGE_BYTES_PER_PIXEL`), so
+the chip is offered only where ring and merge fit in half of physical
+memory. A stream the sensor refuses un-binned falls back to the binned
+ring, not to no ring. The chip's labels are the two raw sizes as the camera
+reports them. Neither development device has the mode, so the path is
+exercised by `ZslPolicyTest`, `MemoryBudgetTest`, `AppSettingsTest` and
+`ResolutionPillTest` and gated live by `HardwareProbeDeviceTest`'s record;
+the first phone that advertises it is where its session configuration is
+proven.
 
 #### 2.2.1 Camera2 Vendor Quirk Handling
 

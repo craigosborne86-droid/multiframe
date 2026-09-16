@@ -249,6 +249,25 @@ normal preview startup, using the existing ZSL ring. The user never sees them.
 
 ---
 
+#### 2.2.6 The Sensor's Own Resolution
+
+On a sensor with an un-binned maximum-resolution mode, a `12 MP | 50 MP`
+chip on the top HUD chooses the readout: the binned default at thirty
+frames a second on a ring of thirty-two, or the sensor's full pixel count
+at a few frames a second on a ring of five. The labels are the sizes the
+camera reports. The chip is absent on a sensor without the mode -- which,
+at the time of writing, is both development devices (`REFERENCE.md` §2.2.2,
+§2.4): their 50 MP sensors are exposed to Camera2 at 12 MP, with the
+un-binned centre as a further physical camera, which is the "49mm" and the
+"220mm" in the lens strip.
+
+**Acceptance.** The chip appears only where `CameraCapabilities.
+supportsFullResolution` holds and switches the stream's pixel mode; the
+ring in the mode is five slots; a sensor that refuses the mode falls back
+to the binned ring; the merged raw and the DNG are the un-binned size.
+
+---
+
 ### 2.3 Guided Telephoto Super-Resolution (The Brenizer Engine)
 
 #### 2.3.1 Concept

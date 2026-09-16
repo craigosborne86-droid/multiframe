@@ -186,4 +186,55 @@ class RawRingBudgetTest {
     fun `frame bytes match a 16 bit CFA`() {
         assertThat(RawRingBudget.frameBytes(4080, 3072)).isEqualTo(4080L * 3072L * 2L)
     }
+
+    // --- The sensor's un-binned mode ---
+
+    private val fullResolution = RawStreamConfig(
+        width = 8160, height = 6144,
+        minFrameDurationNs = 125_000_000L, // 8 fps
+        stallDurationNs = 0L,
+        fullResolution = true,
+    )
+
+    private val pixel9ProXl = RawStreamConfig(4080, 3072, 33_333_000L, 0L)
+
+    @Test
+    fun `the full-resolution decision takes the un-binned size at a rate the default mode would refuse`() {
+        val configs = listOf(pixel9ProXl, fullResolution)
+        // Eight frames a second is under the default mode's twenty ...
+        assertThat(ZslPolicy.evaluate(true, listOf(fullResolution))).isInstanceOf(ZslDecision.Fallback::class.java)
+        // ... and inside the full-resolution mode's five.
+        val decision = ZslPolicy.evaluateFullResolution(true, configs)
+        assertThat(decision).isInstanceOf(ZslDecision.Stream::class.java)
+        val config = (decision as ZslDecision.Stream).config
+        assertThat(config.fullResolution).isTrue()
+        assertThat(config.width).isEqualTo(8160)
+        assertThat(config.megapixels).isWithin(0.1f).of(50.1f)
+        // The default decision never picks the flagged size.
+        assertThat((ZslPolicy.evaluate(true, configs) as ZslDecision.Stream).config.fullResolution).isFalse()
+    }
+
+    @Test
+    fun `a sensor without the mode has no full-resolution stream, and says so`() {
+        val decision = ZslPolicy.evaluateFullResolution(true, listOf(pixel9ProXl))
+        assertThat(decision).isInstanceOf(ZslDecision.Fallback::class.java)
+        assertThat(decision.describe).contains("maximum-resolution")
+    }
+
+    @Test
+    fun `an un-binned readout slower than five frames a second is not a ring`() {
+        val crawl = fullResolution.copy(minFrameDurationNs = 250_000_000L)
+        assertThat(ZslPolicy.evaluateFullResolution(true, listOf(crawl))).isInstanceOf(ZslDecision.Fallback::class.java)
+    }
+
+    @Test
+    fun `the full-resolution ring is a burst and its headroom`() {
+        // Five slots: a three-frame burst and two for the camera to write into.
+        assertThat(RawRingBudget.FULL_RESOLUTION_CAPACITY).isEqualTo(5)
+        assertThat(RawRingBudget.burstForDepth(RawRingBudget.FULL_RESOLUTION_CAPACITY)).isEqualTo(3)
+        // Sized against memory like any ring: sixteen gigabytes affords it,
+        // and the desired depth caps it.
+        val depth = RawRingBudget.capacityFor(8160, 6144, 8L shl 30, 16L shl 30, RawRingBudget.FULL_RESOLUTION_CAPACITY)
+        assertThat(depth).isEqualTo(RawRingBudget.FULL_RESOLUTION_CAPACITY)
+    }
 }

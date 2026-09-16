@@ -13,14 +13,23 @@ data class RawStreamConfig(
     val height: Int,
     val minFrameDurationNs: Long,
     val stallDurationNs: Long,
+    /**
+     * Whether this size is the sensor's un-binned maximum-resolution mode
+     * (`SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION`), which every output of the
+     * session and every request then has to name. False is the default
+     * (binned) mode, and everything before the mode existed.
+     */
+    val fullResolution: Boolean = false,
 ) {
     val pixels: Long get() = width.toLong() * height.toLong()
 
     val fps: Double
         get() = if (minFrameDurationNs <= 0L) 0.0 else 1_000_000_000.0 / minFrameDurationNs
 
+    val megapixels: Float get() = pixels / 1_000_000f
+
     override fun toString(): String =
-        "${width}x$height %.1ffps stall=%.1fms".format(fps, stallDurationNs / 1e6)
+        "${width}x$height %.1ffps stall=%.1fms%s".format(fps, stallDurationNs / 1e6, if (fullResolution) " full-res" else "")
 }
 
 /**
@@ -51,6 +60,31 @@ object ZslPolicy {
      * the whole reason for streaming rather than capturing sequentially.
      */
     const val MAX_FRAME_DURATION_NS = 50_000_000L // 20 fps
+
+    /**
+     * The slowest full-resolution raw stream still worth a ring. An
+     * un-binned 50 MP readout is not a 30 fps stream on any phone, and a
+     * burst at five frames a second is still a burst -- a second for five
+     * frames, held still -- where the alternative is no 50 MP at all. The
+     * viewfinder runs at the same rate, which is the price of the mode and
+     * is the reason it is a chip and not the default.
+     */
+    const val MAX_FULL_RESOLUTION_FRAME_DURATION_NS = 200_000_000L // 5 fps
+
+    /**
+     * Full-resolution mode: the largest un-binned raw the camera streams
+     * without a stall at [MAX_FULL_RESOLUTION_FRAME_DURATION_NS] or better,
+     * from the configurations flagged [RawStreamConfig.fullResolution]; the
+     * default mode's [evaluate] otherwise.
+     */
+    fun evaluateFullResolution(
+        supportsRaw: Boolean,
+        configs: List<RawStreamConfig>,
+    ): ZslDecision {
+        val full = configs.filter { it.fullResolution }
+        if (full.isEmpty()) return ZslDecision.Fallback("no maximum-resolution RAW_SENSOR output sizes")
+        return evaluate(supportsRaw, full, MAX_FULL_RESOLUTION_FRAME_DURATION_NS)
+    }
 
     /**
      * Chooses the largest zero-stall raw configuration the camera offers, or
@@ -165,6 +199,16 @@ object RawRingBudget {
     }
 
     /** Ring depth needed to serve a burst of [burst] without starving the writer. */
+    /**
+     * The ring for a full-resolution stream: the fewest frames that are a
+     * burst, plus the camera's write headroom. At 50 MP a slot is 100 MB,
+     * so five slots are 500 MB against the 800 the binned ring reserves,
+     * and the merge's working set at that size (10 bytes a pixel, 500 MB)
+     * is what the rest of the device's room has to hold. The burst is
+     * capped by the depth as everywhere ([burstForDepth]).
+     */
+    const val FULL_RESOLUTION_CAPACITY = 5
+
     fun depthForBurst(burst: Int): Int =
         (burst + WRITE_HEADROOM).coerceIn(MIN_CAPACITY, MAX_CAPACITY)
 

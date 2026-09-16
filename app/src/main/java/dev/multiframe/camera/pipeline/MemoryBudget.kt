@@ -64,6 +64,27 @@ object MemoryBudget {
     }
 
     /** Physical memory as the kernel reports it, or zero where it cannot be read. */
+    /**
+     * Whether the device can hold a full-resolution ring and merge a burst
+     * from it: [RawRingBudget.FULL_RESOLUTION_CAPACITY] slots of two bytes a
+     * pixel plus the merge's working set ([RawRingBudget.MERGE_BYTES_PER_PIXEL]),
+     * inside half of physical memory -- the same share the 2x canvas is
+     * held to. At 50 MP that is 500 MB of ring and 500 MB of merge, so a
+     * gigabyte, which a 16 GB phone has and an 8 GB phone may not. The chip
+     * is absent where this is false.
+     */
+    fun canHoldFullResolution(
+        width: Int,
+        height: Int,
+        physicalBytes: Long = physicalMemoryBytes(),
+    ): Boolean {
+        if (width <= 0 || height <= 0 || physicalBytes <= 0) return false
+        val pixels = width.toLong() * height.toLong()
+        val ring = RawRingBudget.frameBytes(width, height) * RawRingBudget.FULL_RESOLUTION_CAPACITY
+        val merge = pixels * RawRingBudget.MERGE_BYTES_PER_PIXEL
+        return ring + merge <= physicalBytes / 2
+    }
+
     fun physicalMemoryBytes(): Long = try {
         java.io.File("/proc/meminfo").useLines { lines ->
             lines.firstOrNull { it.startsWith("MemTotal:") }

@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -304,6 +305,54 @@ internal fun ControlChip(spec: ControlSpec, onClick: () -> Unit) {
                 },
                 modifier = Modifier.padding(start = 7.dp),
             )
+        }
+    }
+}
+
+/**
+ * The sensor's readout: `[ 12 MP | 50 MP ]`, the binned default against the
+ * un-binned maximum-resolution mode. A setting, so a pill, selection by
+ * weight. Composed only where the sensor has the mode
+ * ([dev.multiframe.camera.pipeline.CameraCapabilities.supportsFullResolution]):
+ * a control the hardware cannot honour is absent, not disabled.
+ *
+ * [binnedMegapixels] and [fullMegapixels] are the two raw sizes as the camera
+ * reports them, so the labels are the sensor's numbers and not a brochure's.
+ */
+@Composable
+fun ResolutionPill(
+    full: Boolean,
+    binnedMegapixels: Float,
+    fullMegapixels: Float,
+    enabled: Boolean,
+    onFull: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .alpha(if (enabled) 1f else 0.38f)
+            .background(Ink.Pane, PillShape)
+            .border(1.dp, Ink.Hairline, PillShape)
+            .padding(3.dp),
+    ) {
+        for (option in listOf(false, true)) {
+            val selected = option == full
+            val label = "%.0f MP".format(if (option) fullMegapixels else binnedMegapixels)
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 42.dp)
+                    .background(if (selected) Ink.Bone else Color.Transparent, PillShape)
+                    .clickable(enabled = enabled) { onFull(option) }
+                    .semantics { contentDescription = "sensor readout $label" }
+                    .padding(horizontal = 14.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = label,
+                    style = Type.Control,
+                    color = if (selected) Ink.OnBone else Ink.Bone,
+                )
+            }
         }
     }
 }

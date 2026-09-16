@@ -160,6 +160,7 @@ import androidx.compose.animation.shrinkVertically
 import dev.multiframe.camera.ui.ActionStrip
 import dev.multiframe.camera.ui.BackNavigation
 import dev.multiframe.camera.ui.ChromeOpeners
+import dev.multiframe.camera.ui.ResolutionPill
 import dev.multiframe.camera.ui.ControlBar
 import dev.multiframe.camera.ui.ControlBarState
 import dev.multiframe.camera.ui.ModeCarousel
@@ -281,6 +282,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var dngEnabled by remember { mutableStateOf(restored.dngEnabled) }
     var localTone by remember { mutableStateOf(restored.localTone) }
     var outputFormat by remember { mutableStateOf(restored.outputFormat) }
+    // The sensor's un-binned mode, on a sensor that has one. See the chip.
+    var fullResolution by remember { mutableStateOf(restored.fullResolution) }
 
     // What the user is photographing. The right settings for a night scene and
     // a moving subject are opposites, and only the user knows which it is.
@@ -846,10 +849,14 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // line up -- the user asking, the hardware allowing, and a preview surface
     // to render into -- and the surface arrives asynchronously, so anything
     // going away has to tear the stream down again through the same path.
-    LaunchedEffect(zslWanted, zslSurface, cameraId, caps, lens) {
+    LaunchedEffect(zslWanted, zslSurface, cameraId, caps, lens, fullResolution) {
         val surface = zslSurface
         val chosen = lens
         val c = caps
+        // The un-binned mode only where the sensor has it and the setting
+        // asks; the chip that sets it is absent otherwise, so this is the
+        // reconcile for a setting restored from another device.
+        val wantFull = fullResolution && c?.supportsFullResolution == true
 
         // Stream configuration and sensor profile both have to come from the
         // lens actually being used, not from whichever camera happened to be
@@ -861,7 +868,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             }.getOrNull()
         }
         val decision = ch?.let {
-            ZslPolicy.evaluate(chosen.supportsRaw, ZslRawStream.rawConfigs(it))
+            val configs = ZslRawStream.rawConfigs(it)
+            if (wantFull) ZslPolicy.evaluateFullResolution(chosen.supportsRaw, configs)
+                // A sensor that will not stream un-binned falls back to the
+                // binned ring rather than to no ring: the mode was a wish.
+                .let { full -> if (full is ZslDecision.Stream) full else ZslPolicy.evaluate(chosen.supportsRaw, configs) }
+            else ZslPolicy.evaluate(chosen.supportsRaw, configs)
         }
 
         val canStream = zslWanted && decision is ZslDecision.Stream &&
@@ -884,7 +896,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     return@withLock
                 }
                 if (existing != null && zslOpenSurface === surface &&
-                    existing.lensId == chosen!!.cameraId
+                    existing.lensId == chosen!!.cameraId &&
+                    existing.config.fullResolution == (decision as ZslDecision.Stream).config.fullResolution
                 ) {
                     return@withLock
                 }
@@ -907,10 +920,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 // Sized for the deepest ring the device can afford rather than
                 // for the burst currently selected, so changing the frame count
                 // is a UI choice rather than a camera session rebuild.
+                // A full-resolution ring is sized down to a burst and its
+                // headroom: at 50 MP a slot is 100 MB.
                 val depth = RawRingBudget.capacityFor(
                     config.width, config.height,
                     memory.availMem, memory.totalMem,
-                    RawRingBudget.MAX_CAPACITY,
+                    if (config.fullResolution) RawRingBudget.FULL_RESOLUTION_CAPACITY else RawRingBudget.MAX_CAPACITY,
                 )
                 // Checked before allocating rather than only after failing: an
         // allocation that succeeds and then gets the process killed is worse
@@ -1362,7 +1377,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     LaunchedEffect(
         settings, burstFrames, lens, highlightGuard, captureMode, dngEnabled,
         timerSeconds, guides, mosaicPreset, localTone, outputFormat, showHistogram,
-        mosaicReturnLens,
+        mosaicReturnLens, fullResolution,
     ) {
         AppSettings.save(
             context,
@@ -1382,6 +1397,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 localTone = localTone,
                 outputFormat = outputFormat,
                 histogram = showHistogram,
+                fullResolution = fullResolution,
             ),
         )
     }
@@ -1683,6 +1699,27 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     gauges = gauges,
                     modifier = Modifier.align(Alignment.Center),
                 )
+                // The sensor's readout, opposite the opener, on a sensor
+                // with an un-binned mode and the memory for it. Neither
+                // development device has one; the chip is absent there.
+                caps?.takeIf { it.supportsFullResolution && zslStream != null }?.let { c ->
+                    ResolutionPill(
+                        full = fullResolution,
+                        binnedMegapixels = c.rawMegapixels,
+                        fullMegapixels = c.fullResolutionMegapixels,
+                        enabled = !busy && developing == 0 && !superResPhase.selected,
+                        onFull = { wanted ->
+                            if (wanted != fullResolution) {
+                                Haptics.segment(view)
+                                fullResolution = wanted
+                                status = "switching to %.0f MP…".format(if (wanted) c.fullResolutionMegapixels else c.rawMegapixels)
+                            }
+                        },
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .padding(start = 12.dp),
+                    )
+                }
                 ChromeOpeners(
                     specs = ControlBar.chrome(barState),
                     onControl = handleControl,
@@ -2276,6 +2313,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         localTone = fresh.localTone
                         outputFormat = fresh.outputFormat
                         showHistogram = fresh.histogram
+                        fullResolution = fresh.fullResolution
                         status = "settings reset"
                     },
                 )
