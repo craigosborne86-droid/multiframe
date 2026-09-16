@@ -266,6 +266,25 @@ supportsFullResolution` holds and switches the stream's pixel mode; the
 ring in the mode is five slots; a sensor that refuses the mode falls back
 to the binned ring; the merged raw and the DNG are the un-binned size.
 
+#### 2.2.7 First Run
+
+One screen, once (`ui/Onboarding.kt`): the app's name, the statement --
+*"Multiframe merges a burst of raw frames to reduce noise and extend
+dynamic range. No generative AI. Every pixel is measured."* -- and the two
+facts a person deciding whether to allow the camera should have: what the
+camera is used for, and where the photographs go (the device's own library
+through the media store, which needs no permission of the app's, so none
+is asked for; and no network permission). One button, Continue, asks for
+the camera. Refused once, the screen says without it there is no
+viewfinder and asks again; refused for good, it says that and opens the
+app's page in the system settings, and reads the decision again on every
+resume. Not a tour: nothing to swipe, no illustrations, no account.
+
+**Acceptance.** The statement is shown word for word (`OnboardingScreenTest`);
+the flow's steps follow the table in `OnboardingStateTest`; on the device
+the grant, the single refusal, the permanent refusal and the return from
+settings each land where they should (walked on the Pixel 9 Pro XL).
+
 ---
 
 ### 2.3 Guided Telephoto Super-Resolution (The Brenizer Engine)
@@ -753,7 +772,7 @@ described is not yet built. This is what those numbers mean.
 | 3 | Merge & Alignment Optimisation | **Delivered, with two items hardware-blocked.** Sub-pixel alignment refinement (equiangular, after the parabola was measured biased); sub-pixel kernel accumulation onto a 2x canvas (Kotlin reference + native tiled strips, parity-verified); coverage prediction from the alignment; the linear develop of the canvas to a JPEG from native memory; the `2X` control, readout and gallery badge; IMU tripod detection. OIS seeding: no lens on the Pixel 11 Pro reports OIS data. Haptic micro-dither: the motor's 30 ms onset exceeds the 25 ms window; controller ships and declines. See §5.2. |
 | 4 | Guided Brenizer Engine & Local Tone | **Delivered, and revised after five field tests (§5.4–§5.8).** Mosaic presets (2x2, 3x3, drawn region); reticle-and-dot guidance replacing free panning, with a stability gate, with a burst per node merged, lens-corrected and exposure-normalised; three-band Laplacian blending on the canvas, the detail band by seam cut since the seventh field test; the bilateral-grid local tone operator in both develops, on by default since the seventh field test behind a LOCAL TONE control. The Vulkan compute develop moves to Phase 5: measured at Phase 2, the CPU develop is within the budget and the GPU crossing cost was not worth paying. |
 | 5 | Responsive UI & GPU Develop | **Responsive layout delivered** (`REFERENCE.md` §1.4): the viewfinder fitted to its region on any aspect, the controls' words turned upright when the phone is on its side, a sidebar on a wide window, a split at a foldable's hinge. Accessibility pass and the Vulkan compute develop remain, the latter only if the CPU budget is ever exceeded. |
-| 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, R8 configuration, listing, first-run. |
+| 6 | Play Store Readiness | Crash reporting, OEM compatibility testing, listing. **First-run and the R8 configuration delivered** (§2.2.7; `proguard-rules.pro`). |
 
 ### 5.1 A note on the Phase 3 and 4 contents
 

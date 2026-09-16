@@ -2048,6 +2048,8 @@ untouched; only the rendering intent is corrected.
 | `ControlsPanel.kt` | `ManualPanel` -- exposure, focus, WB, in the PRO drawer over the bottom bar; `SetOncePanel` -- GUARD, LOCAL TONE, HEIF, reset, the capability summary, on the settings screen |
 | `BackNavigation.kt` | What the system back gesture does, given what is open: a pure stack, tested |
 | `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation; its own back handler |
+| `Onboarding.kt` | The first screen, once: the statement, the camera permission with its refusals and the settings deep-link (PRD §2.2.7) |
+| `WindowLayout.kt` | The layout decision for the window and the hand (§1.4): postures, the turn, the fit |
 | `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), `MosaicGuidance` -- the outline, the reticle and the dots -- and `MosaicPresetPill` (`1-SHOT · 50 MP | 2×2 · 33 MP | 3×3 · 75 MP`) |
 | `AboutSheet.kt` | About/info bottom sheet |
 

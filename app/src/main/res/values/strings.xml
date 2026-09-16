@@ -4,6 +4,17 @@
     <string name="shutter">Shutter</string>
     <string name="grant_camera">Grant camera access</string>
     <string name="permission_rationale">Multiframe needs the camera to capture and merge photo bursts.</string>
+    <string name="onboarding_mission">Multiframe merges a burst of raw frames to reduce noise and extend dynamic range. No generative AI. Every pixel is measured.</string>
+    <string name="onboarding_camera_heading">Camera</string>
+    <string name="onboarding_camera_body">The camera is used for the viewfinder and to capture bursts. Frames are held in memory only until they are merged.</string>
+    <string name="onboarding_storage_heading">Your photographs</string>
+    <string name="onboarding_storage_body">Saved to your device\'s own photo library. The app writes only the files it makes and asks for no permission to read your library.</string>
+    <string name="onboarding_network_body">No network permission. Nothing leaves the phone.</string>
+    <string name="onboarding_continue">Continue</string>
+    <string name="onboarding_denied">Without the camera there is no viewfinder and nothing to photograph. Allow it to continue.</string>
+    <string name="onboarding_denied_permanently">Camera access was turned off for Multiframe. Turn it on in the system settings to continue.</string>
+    <string name="onboarding_open_settings">Open settings</string>
+    <string name="onboarding_try_again">Allow camera</string>
     <string name="about">About</string>
     <string name="about_dismiss">Close</string>
     <string name="about_what">Every time you press the shutter this app captures a short burst of photographs instead of one, aligns them to cancel out hand movement, and merges them into a single image. Combining frames this way reduces sensor noise, which is most visible in shadows and low light. Tone mapping is kept deliberately restrained rather than heavily processed.</string>
