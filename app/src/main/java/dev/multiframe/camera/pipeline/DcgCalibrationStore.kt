@@ -37,8 +37,13 @@ object DcgCalibrationStore {
      * this, a device that profiled under an earlier and worse fit would keep
      * that answer forever, because the store cannot tell a good record from a
      * stale one by looking at it.
+     *
+     * 2: the ladder reaches under the analog ceiling and refuses the
+     * quantisation floor (§2.3). The Pixel 11 Pro carried a version-1 record
+     * of a "switch" at ISO 496 on its main lens -- measured above the
+     * ceiling of 376, in digital gain -- which this retires.
      */
-    private const val VERSION = 1
+    private const val VERSION = 2
     private const val KEY_VERSION = "version"
 
     /**

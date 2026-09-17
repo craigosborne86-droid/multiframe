@@ -1087,9 +1087,15 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         val c = caps ?: return@LaunchedEffect
         val id = stream.lensId
         stream.setGainThreshold(DcgCalibrationStore.thresholdFor(context, id), settings, c)
-        if (DcgCalibrationStore.hasProfiled(context, id)) return@LaunchedEffect
+        if (DcgCalibrationStore.hasProfiled(context, id)) {
+            Log.i(TAG, "read-noise profile on record for $id: ${DcgCalibrationStore.thresholdFor(context, id) ?: "no gain switch"}")
+            return@LaunchedEffect
+        }
         kotlinx.coroutines.delay(1500)
-        if (developing > 0 || busy || superResPhase.selected || settings.manualExposureActive(c)) return@LaunchedEffect
+        if (developing > 0 || busy || superResPhase.selected || settings.manualExposureActive(c)) {
+            Log.i(TAG, "read-noise profile deferred to another launch: developing=$developing busy=$busy superRes=${superResPhase.selected} manual=${settings.manualExposureActive(c)}")
+            return@LaunchedEffect
+        }
         profileJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
         try {
             val result = withContext(Dispatchers.IO) {
