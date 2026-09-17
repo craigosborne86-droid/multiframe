@@ -503,9 +503,21 @@ CFA: the 12mm reports pattern 0 (RGGB), the rest 2 (GBRG).
 0–2, the quantisation floor (none). No conversion gain switch is visible
 in any lens's raw; DCG brackets at the software ratio of four.
 
-**Pixel 11 Pro (grizzly).** Main raw 4080×3064, GBRG on the main and BGGR
-on one lens; ring of 32 slots at 763 MB. The probe report is to be taken
-when the phone is next attached.
+**Pixel 11 Pro (grizzly), Android 17, build CD1A.260905.001.B1.** Camera
+ids `0` and `1`; three rear lenses, all physical members of `0`; no crop
+cameras and, again, no lens with `ULTRA_HIGH_RESOLUTION_SENSOR`. Ring of 32
+slots at 763 MB on the main.
+
+| Lens | Camera | Active array | Pitch | ISO | Analog ceiling | Shortest exposure | Raw sizes | Distortion k1, k2, k3, p1, p2 | Intrinsics fx, cx, cy |
+|---|---|---|---|---|---|---|---|---|---|
+| 12mm | 3 via 0 | 4032×3024 (5.64×4.23 mm) | 1.40 µm | 53–2370 | 1185 | 82 µs | 4032×3024 @30, 4032×2272 @60, 2016×1512, 1920×1080 | 0.00266, −0.00201, 0.00043, 0.00063, 0.00001 | 1406.5, 2021.9, 1511.6 |
+| 24mm | 0 | 4080×3064 (9.79×7.35 mm) | 2.40 µm | 24–6023 | 376 | 41 µs | 4080×3064 @30 | 0.09295, −0.15067, 0.09918, 0, 0 | 2833.3, 2048.9, 1538.0 |
+| 105mm | 4 via 0 | 4032×3024 (6.45×4.84 mm) | 1.60 µm | 30–7473 | 1916 | 194 µs | 4032×3024 @30, 4032×2272 @60, 2016×1512, 1920×1080 | 0.09758, 13.658, −187.50, 0, 0 | 12355.0, 1982.3, 1517.1 |
+
+The main's analog ceiling is ISO 376 -- half the 9 Pro XL's -- and its
+shortest exposure 41 µs; the telephoto's is 194 µs. The read-noise ladder
+has not yet run under these ceilings (first launch of the new build does
+it).
 
 ---
 
