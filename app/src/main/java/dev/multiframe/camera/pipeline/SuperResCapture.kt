@@ -113,6 +113,7 @@ object SuperResCapture {
                 context, mergedBuffer.duplicate(), mergedWidth, mergedHeight,
                 characteristics, captureResult, dngName,
                 baselineExposureStops = baselineExposureStops,
+                whiteBalanceGains = color.gains,
             )
         } else {
             null

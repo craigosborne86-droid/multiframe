@@ -22,6 +22,8 @@ class DngMetadataTest {
         matrices: Map<Int, FloatArray>,
         shorts: Map<Int, Int> = emptyMap(),
         order: ByteOrder = ByteOrder.LITTLE_ENDIAN,
+        /** Tags written as unsigned rationals, as DNG writes AsShotNeutral. */
+        unsigned: Set<Int> = emptySet(),
     ): ByteArray {
         val entryCount = matrices.size + shorts.size
         val headerSize = 8
@@ -52,7 +54,7 @@ class DngMetadataTest {
         out.putShort(entryCount.toShort())
         for ((tag, values) in matrices) {
             out.putShort(tag.toShort())
-            out.putShort(DngMetadata.RATIONAL.toShort())
+            out.putShort((if (tag in unsigned) DngMetadata.UNSIGNED_RATIONAL else DngMetadata.RATIONAL).toShort())
             out.putInt(values.size)
             out.putInt(offsets.getValue(tag))
         }
@@ -201,6 +203,29 @@ class DngMetadataTest {
         buffer.putInt(8 + 2 + 4, -9)
 
         assertThat(DngMetadata.readCalibration(bytes)).isNull()
+    }
+
+    @Test
+    fun `the as-shot neutral is found and rewritten as the reciprocal of the gains`() {
+        val neutral = tag("asShotNeutral")
+        val bytes = tiff(
+            mapOf(tag("colorMatrix1") to colour1, neutral to floatArrayOf(0.5f, 1f, 0.66f)),
+            unsigned = setOf(neutral),
+        )
+        val at = DngMetadata.asShotNeutralOffset(bytes)
+        assertThat(at).isNotNull()
+        // The original three rationals sit there.
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        assertThat(buf.getInt(at!!.toInt()).toFloat() / buf.getInt(at.toInt() + 4)).isWithin(1e-3f).of(0.5f)
+
+        // Gains of 2.0 red, 1.0 green, 1.6 blue: a neutral of 0.5, 1, 0.625.
+        val encoded = ByteBuffer.wrap(DngMetadata.encodeAsShotNeutral(bytes, floatArrayOf(2.0f, 1f, 1f, 1.6f))).order(ByteOrder.LITTLE_ENDIAN)
+        val values = FloatArray(3) { i -> encoded.getInt(i * 8).toFloat() / encoded.getInt(i * 8 + 4) }
+        assertThat(values[0]).isWithin(1e-5f).of(0.5f)
+        assertThat(values[1]).isWithin(1e-5f).of(1f)
+        assertThat(values[2]).isWithin(1e-5f).of(0.625f)
+        // Signed-rational tags are not mistaken for it.
+        assertThat(DngMetadata.asShotNeutralOffset(tiff(mapOf(neutral to floatArrayOf(0.5f, 1f, 0.66f))))).isNull()
     }
 
     @Test

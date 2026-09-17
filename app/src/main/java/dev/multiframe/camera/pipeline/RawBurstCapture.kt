@@ -273,6 +273,10 @@ object RawBurstCapture {
         // advances the position it is given and the Kotlin develop fallback
         // rewinds the same buffer, so sharing one would have them fighting over
         // a cursor even though neither changes a pixel.
+        // From the sensor's own characterisation rather than the ISP's
+        // rendering matrix, which is tuned to the manufacturer's look. Read
+        // before the DNG writer starts: the DNG carries the same white balance.
+        val color = ColorProfile.calibrated(characteristics, captureResult)
         var dngUri: android.net.Uri? = null
         var dngMillis = 0L
         val dngWriter = if (writeDng && captureResult != null) {
@@ -282,6 +286,7 @@ object RawBurstCapture {
                     context, mergedBuffer.duplicate(), width, height,
                     characteristics, captureResult, dngName,
                     baselineExposureStops = baselineExposureStops,
+                    whiteBalanceGains = color.gains,
                 )
                 dngMillis = System.currentTimeMillis() - started
             }.apply { name = "dng-write"; start() }
@@ -294,9 +299,6 @@ object RawBurstCapture {
         // sharpening of grain, wider colour smoothing, above ISO 800.
         val iso = captureResult?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
         val develop = develop.adaptedTo(iso)
-        // From the sensor's own characterisation rather than the ISP's
-        // rendering matrix, which is tuned to the manufacturer's look.
-        val color = ColorProfile.calibrated(characteristics, captureResult)
         // Raw is uncorrected by definition, so the falloff the camera measured
         // for this capture has to be applied here or the corners stay dingy.
         val shading = ShadingMap.from(captureResult)
@@ -486,7 +488,14 @@ object RawBurstCapture {
      * is found from the file's first pages; the file is otherwise untouched.
      * A DNG without the tag is left as it is, and says so in the log.
      */
-    private fun setBaselineExposure(resolver: android.content.ContentResolver, uri: android.net.Uri, stops: Float) {
+    /**
+     * Rewrites the tags `DngCreator` gives no way to set, in the bytes it
+     * left for them: BaselineExposure with the guard's pull undone
+     * ([DngMetadata.baselineExposureOffset]) and AsShotNeutral with the
+     * white balance the develop used ([DngMetadata.asShotNeutralOffset]).
+     * The pixels are untouched.
+     */
+    private fun patchTags(resolver: android.content.ContentResolver, uri: android.net.Uri, stops: Float, gains: FloatArray?) {
         try {
             resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
                 // Positioned reads and writes on the descriptor itself: a
@@ -500,18 +509,26 @@ object RawBurstCapture {
                     position += n
                 }
                 val bytes = header.array().copyOf(header.position())
-                val at = DngMetadata.baselineExposureOffset(bytes) ?: run {
-                    Log.w(TAG, "DNG has no BaselineExposure tag to carry the guard's %.2f stops".format(stops))
-                    return
+                fun write(at: Long, encoded: ByteArray) {
+                    val value = java.nio.ByteBuffer.wrap(encoded)
+                    var written = at
+                    while (value.hasRemaining()) {
+                        written += android.system.Os.pwrite(fd, value, written)
+                    }
                 }
-                val value = java.nio.ByteBuffer.wrap(DngMetadata.encodeBaselineExposure(bytes, stops))
-                var written = at
-                while (value.hasRemaining()) {
-                    written += android.system.Os.pwrite(fd, value, written)
+                if (kotlin.math.abs(stops) >= 0.005f) {
+                    val at = DngMetadata.baselineExposureOffset(bytes)
+                    if (at == null) Log.w(TAG, "DNG has no BaselineExposure tag to carry the guard's %.2f stops".format(stops))
+                    else write(at, DngMetadata.encodeBaselineExposure(bytes, stops))
+                }
+                if (gains != null && gains.size >= 4) {
+                    val at = DngMetadata.asShotNeutralOffset(bytes)
+                    if (at == null) Log.w(TAG, "DNG has no AsShotNeutral tag to carry the develop's white balance")
+                    else write(at, DngMetadata.encodeAsShotNeutral(bytes, gains))
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "BaselineExposure not written", e)
+            Log.w(TAG, "DNG tags not written", e)
         }
     }
 
@@ -532,6 +549,12 @@ object RawBurstCapture {
          * See [DngMetadata.baselineExposureOffset].
          */
         baselineExposureStops: Float = 0f,
+        /**
+         * The white balance gains the develop used -- `ColorProfile.gains` --
+         * written as the DNG's AsShotNeutral so the two outputs agree; null
+         * leaves `DngCreator`'s. See [DngMetadata.asShotNeutralOffset].
+         */
+        whiteBalanceGains: FloatArray? = null,
     ): android.net.Uri? = try {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
@@ -552,8 +575,8 @@ object RawBurstCapture {
                 dng.writeByteBuffer(out, Size(width, height), merged, 0)
             } ?: error("openOutputStream returned null")
         }
-        if (kotlin.math.abs(baselineExposureStops) >= 0.005f) {
-            setBaselineExposure(resolver, uri, baselineExposureStops)
+        if (kotlin.math.abs(baselineExposureStops) >= 0.005f || whiteBalanceGains != null) {
+            patchTags(resolver, uri, baselineExposureStops, whiteBalanceGains)
         }
 
         values.clear()

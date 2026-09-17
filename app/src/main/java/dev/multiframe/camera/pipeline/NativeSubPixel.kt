@@ -163,6 +163,7 @@ class NativeSubPixel private constructor(
         p.exposureGain, p.shoulderKnee, p.contrast, p.highlightDesaturation,
         p.desaturationStart, p.blackPoint, p.highlightPercentile, p.highlightTarget,
         p.localTone, p.shoulderWhite, p.meteredGain,
+        p.shadowLift, p.shadowLiftMax, p.purityThreshold, p.purityCeiling,
     )
 
     /** The sharpen, then the chroma smoothing, in the order SubPixel.cpp unpacks them. */

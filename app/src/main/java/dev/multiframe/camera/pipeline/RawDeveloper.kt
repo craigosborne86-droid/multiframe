@@ -113,6 +113,26 @@ data class DevelopParams(
      * See [BilateralGrid].
      */
     val localTone: Float = 0f,
+    /**
+     * The shadow side of the local operator: stops of lift the scene earns
+     * per stop of its range beyond what the display curve carries, up to
+     * [shadowLiftMax]. Zero is the symmetric operator [localTone] alone. A
+     * scene of two or three stops of range earns nothing; a backlit tower
+     * against the sun earns the ceiling, and its facade comes up out of the
+     * silhouette while the sky stays where it was. See
+     * [BilateralGrid.ceiling] and [BilateralGrid.lift].
+     */
+    val shadowLift: Float = 0f,
+    /** The most the local operator lifts any neighbourhood, in stops. */
+    val shadowLiftMax: Float = SHADOW_LIFT_MAX,
+    /**
+     * Purity compression after the colour matrix: the purity above which a
+     * colour is compressed, and the purity it is compressed toward and
+     * never reaches. See [ToneCurve.compressPurity]. A threshold of zero,
+     * or a ceiling at or under it, turns the step off.
+     */
+    val purityThreshold: Float = PURITY_THRESHOLD,
+    val purityCeiling: Float = PURITY_CEILING,
 ) {
     /**
      * The same rendering, adapted to the sensor gain the frame was taken at.
@@ -159,6 +179,17 @@ data class DevelopParams(
          * scene is then a night scene: the meter made it dark, and the
          * develop keeps it within a stop of that.
          */
+        /**
+         * Where the purity compression begins and what it approaches. Seven
+         * tenths is over every ordinary colour -- a clear sky sits at six
+         * to seven tenths after the matrix and is not touched -- and under a
+         * rose in the sun, which the matrix put at nine (`DngAnalysisBench`,
+         * the purity histogram). 0.85 is the purest colour the rendering
+         * shows: the low channels never under fifteen hundredths of the peak.
+         */
+        const val PURITY_THRESHOLD = 0.7f
+        const val PURITY_CEILING = 0.85f
+
         const val METERED_GAIN_BELOW_STOPS = 0.5f
         const val METERED_GAIN_ABOVE_STOPS = 0.75f
 
@@ -200,6 +231,18 @@ data class DevelopParams(
          * to the scene (`DngDevelopBench`, variants `b` against `e`).
          */
         const val LOCAL_TONE_ON = 0.15f
+
+        /**
+         * The shadow lift the LOCAL TONE control turns on with it: a stop of
+         * lift per stop of the scene's range beyond what the display holds,
+         * to a ceiling of three. Chosen on the desk over the tenth field
+         * test's backlit tower (`DngDevelopBench`, `lift10m30`): the
+         * facade's arches and corbels readable, the sky where it was, and
+         * the same scene at a range of two or three stops -- the dog on the
+         * sofa, the rose -- untouched.
+         */
+        const val SHADOW_LIFT_ON = 1.0f
+        const val SHADOW_LIFT_MAX = 3.0f
 
         /** Up to this ISO the rendering is the daylight rendering. */
         const val LOW_ISO = 800
@@ -327,7 +370,7 @@ object RawDeveloper {
         correctDefects(frame, sensor, params)
         val gain = resolveGain(frame, sensor, color, params)
         val resolved = params.withGain(gain)
-        val grid = if (resolved.localTone > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
+        val grid = if (resolved.localTone > 0f || resolved.shadowLift > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
         val band = IntArray(w * bandRows)
         var y = 0
         while (y < h) {
@@ -393,7 +436,7 @@ object RawDeveloper {
         val out = IntArray(w * h)
         correctDefects(frame, sensor, params)
         val resolved = params.withGain(resolveGain(frame, sensor, color, params))
-        val grid = if (resolved.localTone > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
+        val grid = if (resolved.localTone > 0f || resolved.shadowLift > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
         parallelRows(h) { yStart, yEnd ->
             renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading, grid)
         }
@@ -442,16 +485,17 @@ object RawDeveloper {
                 val g0 = rgb[1]
                 val b0 = rgb[2]
 
-                var r = m[0] * r0 + m[1] * g0 + m[2] * b0
-                var g = m[3] * r0 + m[4] * g0 + m[5] * b0
-                var b = m[6] * r0 + m[7] * g0 + m[8] * b0
-
-                rgb[0] = r * params.exposureGain
-                rgb[1] = g * params.exposureGain
-                rgb[2] = b * params.exposureGain
+                rgb[0] = (m[0] * r0 + m[1] * g0 + m[2] * b0) * params.exposureGain
+                rgb[1] = (m[3] * r0 + m[4] * g0 + m[5] * b0) * params.exposureGain
+                rgb[2] = (m[6] * r0 + m[7] * g0 + m[8] * b0) * params.exposureGain
+                // The matrix's overshoot on a spectral colour, brought in: §3.1 step 6a.
+                ToneCurve.compressPurity(rgb, params.purityThreshold, params.purityCeiling)
                 // The local operator, before the global curve: REFERENCE §3.5.
                 if (grid != null) {
-                    val k = grid.gain(x, y, BilateralGrid.luminance(rgb[0], rgb[1], rgb[2]), params.localTone)
+                    val k = grid.gain(
+                        x, y, BilateralGrid.luminance(rgb[0], rgb[1], rgb[2]),
+                        params.localTone, params.shadowLift, params.shadowLiftMax,
+                    )
                     rgb[0] *= k; rgb[1] *= k; rgb[2] *= k
                 }
                 ToneCurve.renderLinear(rgb, params)

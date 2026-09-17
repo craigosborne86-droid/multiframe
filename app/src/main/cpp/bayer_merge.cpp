@@ -1264,7 +1264,9 @@ void demosaicAndTone(const float* plane, int width, int height,
                      const ShoulderLut& shoulder,
                      std::atomic<long>* aboveKnee = nullptr,
                      const BilateralGrid* localTone = nullptr,
-                     float localToneStrength = 0.0f) {
+                     float localToneStrength = 0.0f,
+                     float shadowLift = 0.0f,
+                     float shadowLiftMax = 0.0f) {
     const int w1 = width;
     const int w2 = width * 2;
 
@@ -1324,13 +1326,19 @@ void demosaicAndTone(const float* plane, int width, int height,
             // branches, which is the part that does not want to be a vector.
             auto emitTone = [&](int x, float r, float g, float b) {
                 uint8_t* q = row + static_cast<size_t>(x) * 4;
+                // The matrix's overshoot on a spectral colour, brought in:
+                // REFERENCE.md §3.1 step 6a. Before the local operator, which
+                // reads the pixel's luminance.
+                if constexpr (Ablation != kToneNoMatrix) {
+                    compressPurity(r, g, b, tone);
+                }
                 // The local operator, when asked for: the pixel scaled by how
                 // its neighbourhood's brightness stands to the picture's, with
                 // its own detail carried through. Before the global curve, as
                 // REFERENCE.md §3.5 places it. See BilateralGrid in Tone.h.
                 if (localTone != nullptr) {
                     const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-                    const float k = localTone->gain(x, y, lum, localToneStrength);
+                    const float k = localTone->gain(x, y, lum, localToneStrength, shadowLift, shadowLiftMax);
                     r *= k; g *= k; b *= k;
                 }
                 if constexpr (Ablation == kToneCensus) {
@@ -1725,7 +1733,9 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         jfloat exposureGain, jfloat knee, jfloat shoulderWhite,
         jfloat contrast, jfloat desatStrength, jfloat desatStart, jfloat blackPoint,
         jfloatArray jshading, jint shadingColumns, jint shadingRows,
-        jfloat hotPixelThreshold, jfloat localTone) {
+        jfloat hotPixelThreshold, jfloat localTone,
+        jfloat shadowLift, jfloat shadowLiftMax,
+        jfloat purityThreshold, jfloat purityCeiling) {
     ensureGammaLut();
 
     // Stage clocks, declared here so they outlive the blocks they are taken in.
@@ -1754,6 +1764,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     tone.desatStrength = desatStrength;
     tone.desatStart = desatStart;
     tone.blackPoint = blackPoint;
+    tone.purityThreshold = purityThreshold;
+    tone.purityCeiling = purityCeiling;
 
     auto* src = static_cast<const uint16_t*>(env->GetDirectBufferAddress(merged));
     if (src == nullptr) return JNI_FALSE;
@@ -1826,7 +1838,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     tGrid = nowMicros();
     BilateralGrid grid;
     const BilateralGrid* gridPtr = nullptr;
-    if (localTone > 0.0f && width >= 2 && height >= 2) {
+    if ((localTone > 0.0f || shadowLift > 0.0f) && width >= 2 && height >= 2) {
         grid.init(width, height);
         int siteOf[3] = {0, 1, 3};
         int greens[2] = {1, 2};
@@ -1847,9 +1859,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
                 const float rr = at(siteOf[0]);
                 const float gg = 0.5f * (at(greens[0]) + at(greens[1]));
                 const float bb = at(siteOf[2]);
-                const float r = (m[0] * rr + m[1] * gg + m[2] * bb) * tone.exposureGain;
-                const float g = (m[3] * rr + m[4] * gg + m[5] * bb) * tone.exposureGain;
-                const float b = (m[6] * rr + m[7] * gg + m[8] * bb) * tone.exposureGain;
+                float r = (m[0] * rr + m[1] * gg + m[2] * bb) * tone.exposureGain;
+                float g = (m[3] * rr + m[4] * gg + m[5] * bb) * tone.exposureGain;
+                float b = (m[6] * rr + m[7] * gg + m[8] * bb) * tone.exposureGain;
+                compressPurity(r, g, b, tone);
                 grid.splat(bx, by, 0.2126f * r + 0.7152f * g + 0.0722f * b);
             }
         }
@@ -1859,7 +1872,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
 
     tDemosaic = nowMicros();
     demosaicAndTone<kToneFull>(plane.data(), width, height, dstBase, stride,
-                               cfa, m, tone, display, shoulder, nullptr, gridPtr, localTone);
+                               cfa, m, tone, display, shoulder, nullptr, gridPtr, localTone,
+                               shadowLift, shadowLiftMax);
 
     const int64_t tEnd = nowMicros();
     LOGI("develop: prepass %lldms, local tone grid %lldms, demosaic+tone %lldms, total %lldms",

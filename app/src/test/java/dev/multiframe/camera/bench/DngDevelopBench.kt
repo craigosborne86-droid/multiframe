@@ -1,5 +1,6 @@
 package dev.multiframe.camera.bench
 
+import dev.multiframe.camera.pipeline.BilateralGrid
 import dev.multiframe.camera.pipeline.DevelopParams
 import dev.multiframe.camera.pipeline.Optics
 import dev.multiframe.camera.pipeline.RawDeveloper
@@ -36,21 +37,38 @@ class DngDevelopBench {
         /** The renderings under comparison. `current` is what the app ships. */
         val VARIANTS: Map<String, DevelopParams> = linkedMapOf(
             // What the app ships: DevelopParams' defaults with the LOCAL TONE control on.
-            "current" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON),
+            "current" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON),
+            // The calibration of 17 September before this one: no shadow lift, no purity compression.
+            "cal1" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, purityThreshold = 0f),
             // The rendering of the eighth field test, kept so the change can be seen.
-            "old" to DevelopParams(localTone = 0.5f, highlightTarget = 0.62f, contrast = 0.30f,
+            "old" to DevelopParams(localTone = 0.5f, highlightTarget = 0.62f, contrast = 0.30f, purityThreshold = 0f,
                 sharpen = Sharpen.Params(amount = 0.55f, threshold = 3.5f, maxShift = 28f)),
-            "nolocal" to DevelopParams(localTone = 0f),
+            "nolocal" to DevelopParams(localTone = 0f, shadowLift = 0f),
             // Around the shipped placement: a third of a stop darker, the toe deeper, no sharpen.
-            "darker" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, highlightTarget = 0.36f),
-            "toe" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, blackPoint = 0.02f, contrast = 0.45f),
-            "nosharp" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, sharpen = Sharpen.Params(amount = 0f)),
-            "unbounded" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, meteredGain = -1f),
+            "darker" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON, highlightTarget = 0.36f),
+            "toe" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON, blackPoint = 0.02f, contrast = 0.45f),
+            "nosharp" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON, sharpen = Sharpen.Params(amount = 0f)),
+            "unbounded" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON, meteredGain = -1f),
             // The old rendering without the meter's bound: what a DNG written before
             // BaselineExposure carried the pull would have looked like on the phone.
-            "oldunbounded" to DevelopParams(localTone = 0.5f, highlightTarget = 0.62f, contrast = 0.30f, meteredGain = -1f,
+            "oldunbounded" to DevelopParams(localTone = 0.5f, highlightTarget = 0.62f, contrast = 0.30f, meteredGain = -1f, purityThreshold = 0f,
                 sharpen = Sharpen.Params(amount = 0.55f, threshold = 3.5f, maxShift = 28f)),
-        )
+        ) + tuningVariants()
+
+        /** Around the shipped operator and the purity compression, for the next calibration. */
+        private fun tuningVariants(): Map<String, DevelopParams> {
+            val on = DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON)
+            val out = linkedMapOf<String, DevelopParams>()
+            out["nolift"] = on.copy(shadowLift = 0f)
+            for ((k, m) in listOf(0.8f to 3f, 1f to 3.5f, 1.2f to 3.5f)) {
+                out["lift${(k * 10).toInt()}m${(m * 10).toInt()}"] = on.copy(shadowLift = k, shadowLiftMax = m)
+            }
+            out["nopurity"] = on.copy(purityThreshold = 0f)
+            for ((t, c) in listOf(0.65f to 0.85f, 0.7f to 0.8f, 0.75f to 0.9f)) {
+                out["pu${(t * 100).toInt()}c${(c * 100).toInt()}"] = on.copy(purityThreshold = t, purityCeiling = c)
+            }
+            return out
+        }
     }
 
     @Test

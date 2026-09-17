@@ -385,15 +385,35 @@ class DevelopParityTest {
      * down against the plain develop -- before it says the two agree on it.
      */
     @Test
-    fun nativeAndKotlinLocalToneAgreeAndAct() {
+    fun nativeAndKotlinLocalToneAgreeAndAct() =
+        assertLocalOperatorParity(fixedGain.copy(exposureGain = 1.2f, localTone = 0.5f), brightComesDown = true)
+
+    /**
+     * The shadow lift alone: the scene's range -- the bright quarter is
+     * nearly five stops over the rest -- earns a ceiling, the dim rest comes
+     * up and the bright quarter, the scene's bright end, does not move. The
+     * grid's histogram, its percentiles and the ramp are all exercised, and
+     * the native must agree on every one of them to land within two codes.
+     */
+    @Test
+    fun nativeAndKotlinShadowLiftAgreeAndAct() =
+        assertLocalOperatorParity(
+            fixedGain.copy(exposureGain = 1.2f, localTone = 0f, shadowLift = 1f, shadowLiftMax = 3f),
+            brightComesDown = false,
+            // Deep enough under the bright quarter -- five and a half stops -- that the scene earns a lift.
+            dimLevel = 12, dimTexture = 3,
+        )
+
+    private fun assertLocalOperatorParity(local: DevelopParams, brightComesDown: Boolean, dimLevel: Int = 90, dimTexture: Int = 6) {
         assertThat(NativeMerge.isAvailable()).isTrue()
         val w = 256
         val h = 192
         val data = ShortArray(w * h) { i ->
             val x = i % w
             val y = i / w
-            val texture = ((x * 7 + y * 3) % 11) * 6
-            val level = if (x > w * 3 / 4 && y < h / 2) 720 else 90
+            val bright = x > w * 3 / 4 && y < h / 2
+            val texture = ((x * 7 + y * 3) % 11) * (if (bright) 6 else dimTexture)
+            val level = if (bright) 720 else dimLevel
             (64 + level + texture).toShort()
         }
         val frame = BayerFrame(w, h, data)
@@ -401,9 +421,8 @@ class DevelopParityTest {
             gains = floatArrayOf(1.9f, 1f, 1f, 1.6f),
             matrix = floatArrayOf(1.7f, -0.6f, -0.1f, -0.2f, 1.5f, -0.3f, 0f, -0.4f, 1.4f),
         )
-        val local = fixedGain.copy(exposureGain = 1.2f, localTone = 0.5f)
         val expected = RawDeveloper.develop(frame, profile, color, local)
-        val plain = RawDeveloper.develop(frame, profile, color, local.copy(localTone = 0f))
+        val plain = RawDeveloper.develop(frame, profile, color, local.copy(localTone = 0f, shadowLift = 0f))
 
         val merger = NativeMerge.create(w, h, profile)
         assertThat(merger).isNotNull()
@@ -440,7 +459,8 @@ class DevelopParityTest {
         Log.i(TAG, "local tone: native vs Kotlin worst %d/255, mean %.3f; bright %d -> %d, dim %d -> %d".format(
             worst, mean, brightPlain, brightLocal, dimPlain, dimLocal))
 
-        assertThat(brightLocal).isLessThan(brightPlain)
+        if (brightComesDown) assertThat(brightLocal).isLessThan(brightPlain)
+        else assertThat(brightLocal).isWithin(1).of(brightPlain)
         assertThat(dimLocal).isGreaterThan(dimPlain)
         assertThat(worst).isAtMost(2)
         assertThat(mean).isLessThan(0.25)

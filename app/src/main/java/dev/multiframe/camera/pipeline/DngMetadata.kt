@@ -43,6 +43,7 @@ object DngMetadata {
     private const val TAG_FORWARD_MATRIX_1 = 0xC714
     private const val TAG_FORWARD_MATRIX_2 = 0xC715
     private const val TAG_BASELINE_EXPOSURE = 0xC62A
+    private const val TAG_AS_SHOT_NEUTRAL = 0xC628
 
     private const val TYPE_SHORT = 3
     private const val TYPE_LONG = 4
@@ -184,6 +185,46 @@ object DngMetadata {
     /** Hundredths of a stop, which is finer than any converter shows. */
     const val BASELINE_DENOMINATOR = 100
 
+    /**
+     * Where a DNG's AsShotNeutral value lives -- three unsigned rationals --
+     * or null where the file has no such tag.
+     *
+     * ### Why the DNG carries the develop's white balance
+     *
+     * `DngCreator` writes AsShotNeutral from the HAL's neutral colour point
+     * and the develop balances by the HAL's white balance gains; the two are
+     * the same quantity by different routes, and on the Pixel 11 Pro's
+     * telephoto they disagree by a fifth of a stop in blue. The JPEG's clouds
+     * were white and the DNG's, in every converter and on the bench, were
+     * warm. The DNG is made to say what the JPEG did: the neutral is the
+     * reciprocal of the gains the develop used, so both outputs of one shot
+     * carry one white balance and the desk renders what the phone rendered.
+     */
+    fun asShotNeutralOffset(header: ByteArray): Long? {
+        val entry = readIfd0(header)?.get(TAG_AS_SHOT_NEUTRAL) ?: return null
+        if (entry.type != TYPE_RATIONAL || entry.count != 3) return null
+        if (entry.valueOffset <= 0L) return null
+        return entry.valueOffset
+    }
+
+    /**
+     * The twenty-four bytes of AsShotNeutral for white balance [gains] --
+     * red, the two greens, blue, as `ColorProfile.gains` -- in the file's
+     * byte order: the reciprocal of each gain, with green at one.
+     */
+    fun encodeAsShotNeutral(header: ByteArray, gains: FloatArray): ByteArray {
+        val order = if (header.size >= 2 && header[0] == 'M'.code.toByte()) ByteOrder.BIG_ENDIAN
+        else ByteOrder.LITTLE_ENDIAN
+        val green = ((gains[1] + gains[2]) / 2f).coerceAtLeast(1e-3f)
+        val neutral = floatArrayOf(green / gains[0].coerceAtLeast(1e-3f), 1f, green / gains[3].coerceAtLeast(1e-3f))
+        val out = ByteBuffer.allocate(24).order(order)
+        for (n in neutral) out.putInt(Math.round(n * NEUTRAL_DENOMINATOR)).putInt(NEUTRAL_DENOMINATOR)
+        return out.array()
+    }
+
+    /** A millionth: the gains are floats and a converter reads them to that. */
+    const val NEUTRAL_DENOMINATOR = 1_000_000
+
     /** Exposed so a test can build a TIFF without a camera. */
     internal fun tagFor(name: String): Int = when (name) {
         "colorMatrix1" -> TAG_COLOR_MATRIX_1
@@ -194,9 +235,11 @@ object DngMetadata {
         "forwardMatrix2" -> TAG_FORWARD_MATRIX_2
         "illuminant1" -> TAG_CALIBRATION_ILLUMINANT_1
         "illuminant2" -> TAG_CALIBRATION_ILLUMINANT_2
+        "asShotNeutral" -> TAG_AS_SHOT_NEUTRAL
         else -> throw IllegalArgumentException("unknown tag $name")
     }
 
     internal const val RATIONAL = TYPE_SRATIONAL
+    internal const val UNSIGNED_RATIONAL = TYPE_RATIONAL
     internal const val SHORT = TYPE_SHORT
 }

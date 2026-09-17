@@ -907,10 +907,11 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     // autoPercentile, autoTarget, localTone, shoulderWhite -- the order
     // NativeSubPixel packs them in. The tenth is read where it is given, so
     // a nine-float caller renders with the shoulder placed from the gain.
-    // ... then meteredGain, the eleventh (0 for none): see DevelopParams.
-    float tone[11] = {0, 0.7f, 0.42f, 1.0f, 1.0f, 0.012f, 0.92f, 0.40f, 0.0f, 0.0f, 0.0f};
+    // ... then meteredGain, the eleventh (0 for none): see DevelopParams;
+    // then shadowLift, shadowLiftMax, purityThreshold, purityCeiling.
+    float tone[15] = {0, 0.7f, 0.42f, 1.0f, 1.0f, 0.012f, 0.92f, 0.40f, 0.0f, 0.0f, 0.0f, 0.0f, 3.0f, 0.7f, 0.85f};
     const jsize toneCount = env->GetArrayLength(jtone);
-    env->GetFloatArrayRegion(jtone, 0, std::min<jsize>(toneCount, 11), tone);
+    env->GetFloatArrayRegion(jtone, 0, std::min<jsize>(toneCount, 15), tone);
     p.tone.exposureGain = tone[0];
     p.tone.knee = tone[1];
     p.tone.contrast = tone[2];
@@ -922,6 +923,10 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     p.localTone = tone[8];
     p.tone.white = tone[9];
     p.meteredGain = tone[10];
+    p.shadowLift = tone[11];
+    p.shadowLiftMax = tone[12];
+    p.tone.purityThreshold = tone[13];
+    p.tone.purityCeiling = tone[14];
 
     // amount, threshold, maxShift, then the chroma smoothing's radius, sigma
     // and amount -- the order NativeSubPixel packs them in. An older caller

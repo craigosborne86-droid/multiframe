@@ -128,6 +128,8 @@ class NativeMerge private constructor(
             params.desaturationStart, params.blackPoint,
             shading?.gains, shading?.columns ?: 0, shading?.rows ?: 0,
             params.hotPixelThreshold, params.localTone,
+            params.shadowLift, params.shadowLiftMax,
+            params.purityThreshold, params.purityCeiling,
         )
         if (!ok) {
             Log.w(TAG, "native develop failed, caller should fall back")
@@ -198,6 +200,8 @@ class NativeMerge private constructor(
         contrast: Float, desatStrength: Float, desatStart: Float, blackPoint: Float,
         shading: FloatArray?, shadingColumns: Int, shadingRows: Int,
         hotPixelThreshold: Float, localTone: Float,
+        shadowLift: Float, shadowLiftMax: Float,
+        purityThreshold: Float, purityCeiling: Float,
     ): Boolean
     private external fun nDefringe(
         bitmap: Bitmap, edgeThreshold: Float, tolerance: Float, strength: Float,

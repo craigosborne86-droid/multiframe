@@ -243,10 +243,23 @@ normal preview startup, using the existing ZSL ring. The user never sees them.
   a clipped pixel is display white and everything under it keeps its tone;
   a constant white point over nominal rendered the clip grey and the
   picture hazy (eighth field test).
-- **Local tone on by default.** The bilateral-grid operator (§3.5) runs in
-  every develop at its standing strength -- 0.15 since the desk calibration
-  of 17 September (`REFERENCE.md` §3.8), which found the earlier 0.5
-  flattening the scene's own light; the `LOCAL TONE` control turns it off.
+- **Local tone on by default, and one-sided.** The bilateral-grid operator
+  (§3.5) runs in every develop: a symmetric strength of 0.15 since the desk
+  calibration of 17 September (`REFERENCE.md` §3.8), which found the earlier
+  0.5 flattening the scene's own light, and a shadow lift since the same
+  afternoon's second calibration -- a neighbourhood under the scene's bright
+  end raised by up to three stops, earned by the scene's range, so a
+  backlit facade comes up out of its silhouette and a room or a portrait is
+  left exactly alone. The bright end never moves for it: expose for the sky
+  and recover the shadow, not the other way about. The `LOCAL TONE` control
+  turns both off.
+- **Colour from the sensor's characterisation, brought in where it
+  overshoots.** The colorimetric matrix is a fit to a colour chart and
+  extrapolates a spectral colour -- a rose in the sun -- to a purity no
+  display has; the develop compresses purity above 0.70 toward 0.85 before
+  the tone chain, hue kept exactly (`REFERENCE.md` §3.1 step 6a). Ordinary
+  colours and the sky are under the threshold and untouched. Not saturation
+  taken away: gradation given back.
 - **The rendering is metered, then placed.** The develop's gain puts back
   what the guard took and may nudge the bright end toward its placement by
   at most three quarters of a stop up or half a stop down; a scene the meter
@@ -1229,6 +1242,36 @@ Six photographs, one chain of cause.
    sub-pixel fit declines a textureless tile as "zero"; such tiles borrow
    their neighbours' fraction, and a shot the canvas does decline says so
    in the status line: "saved at 1x", and why.
+
+### 5.12 What the tenth field test found
+
+Two photographs, judged on the desk (`REFERENCE.md` §3.8) and not on a
+walk.
+
+1. **The tower, from haze to silhouette.** The first desk calibration had
+   placed the bright end lower and eased the symmetric operator to 0.15, and
+   a brick tower against the sun -- its facade seven stops under the
+   develop's white -- rendered as a black shape. The operator now has a
+   shadow side: a neighbourhood under the scene's bright end is lifted by
+   up to a ceiling the scene's range earns, the bright end itself does not
+   move, and the grid's cell is a twenty-fourth of the frame so the base is
+   the illumination and the architecture is detail. The arches, corbels and
+   courses read; the sky is where it was; the scenes of ordinary range are
+   byte-identical to before (§2.2.5, `REFERENCE.md` §3.5).
+2. **The rose, coral to scarlet.** The sensor saw the petals' green at three
+   tenths of their red; the colour matrix, extrapolating past its chart,
+   put it at one tenth, and the petals' gradations collapsed onto the
+   gamut's edge as one slab. Purity is now compressed above 0.70 before the
+   tone chain, hue kept, and the flower is the soft coral pink the eye saw
+   with its shading back (`REFERENCE.md` §3.1 step 6a).
+
+Found beside them and left for the next pass: the sun's disc renders pink
+where every channel is clipped and the white balance makes the clip
+magenta (the fix belongs in the balance, faded to one at the clip); the
+telephoto's 10-bit raw, lifted three stops from three codes over black,
+shows its quantisation as coarse colour blotching; and the DNG's
+`AsShotNeutral` disagreed with the develop's white balance on the
+telephoto and is now written from the develop's gains.
 
 **Still open from Phase 3.** The chroma channels of an eight-frame handheld burst leave
 about a fifth of their cells to the fill; a longer burst closes them and the

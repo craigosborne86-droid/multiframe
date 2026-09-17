@@ -49,6 +49,20 @@ picture, the sensor saw it in the scene."
   "HDR soup" -- and a night scene is not a daylight. Judge a tone change on
   the desk first (`DngDevelopBench`, REFERENCE §3.8), never by rebuilding
   and walking outside, and never by the full device suite.
+- **The local operator lifts the shadow from the bright end and earns the
+  lift from the range** (`BilateralGrid.ceiling`/`lift`, §3.5): a
+  neighbourhood under the scene's bright end comes up by at most the
+  ceiling the scene's range beyond 3.3 stops has earned, and the bright end
+  does not move. Do not anchor it on the mean (the backlit tower had to
+  overshoot the mean to read) or make it symmetric (that is the haze of the
+  eighth field test); do not shrink the grid's cell back to 16 px (the base
+  then resolves the subject's own structure and the lift flattens it).
+- **A spectral colour's purity is compressed after the matrix** (`ToneCurve.
+  compressPurity`, §3.1 step 6a, 0.70 toward 0.85): the colorimetric matrix
+  overshoots outside its chart and rendered a coral rose as a slab of
+  scarlet. Do not fix a saturated colour by pulling the matrix toward
+  identity or by desaturating everything; the threshold is over every
+  ordinary colour and the sky.
 - **The shoulder's white is where the sensor stops**: `white = gain`
   (`DevelopParams.withGain`, `Tone.h resolveShoulder`), so a clipped pixel
   is display white. A constant white point over nominal renders the clip
@@ -169,7 +183,8 @@ section 3.1:
 
 ```
 Black subtract -> Hot pixel -> Lens shading -> White balance -> Demosaic
--> Color matrix -> Tone curve -> sRGB gamma -> Chroma smooth -> Defringe -> Sharpen
+-> Color matrix -> Purity compression -> [Local tone] -> Tone curve -> sRGB gamma
+-> Chroma smooth -> Defringe -> Sharpen
 ```
 
 Do not reorder these steps. Each operates on the output of the previous step.

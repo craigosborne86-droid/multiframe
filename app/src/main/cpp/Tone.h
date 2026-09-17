@@ -189,7 +189,39 @@ struct ToneParams {
     float desatStrength = 1.0f;
     float desatStart = 1.0f;
     float blackPoint = 0.012f;
+    /**
+     * The purity compression after the colour matrix (REFERENCE §3.1 step
+     * 6a): compressed above the threshold toward the ceiling, never reaching
+     * it. A threshold of zero, or a ceiling at or under it, is off. Mirrors
+     * DevelopParams.purityThreshold / purityCeiling.
+     */
+    float purityThreshold = 0.7f;
+    float purityCeiling = 0.85f;
 };
+
+/**
+ * Purity compression, in linear light straight after the colour matrix.
+ * Mirrors ToneCurve.compressPurity, which says why: the matrix is a fit to a
+ * colour chart and overshoots on a spectral colour, and the overshoot is a
+ * purity no display has. Above the threshold the purity `(max − min) / max`
+ * is taken hyperbolically toward the ceiling, and every channel's distance
+ * under the peak is scaled by the same factor: the peak keeps its value, the
+ * low channels rise, the hue is exactly kept.
+ */
+inline void compressPurity(float& r, float& g, float& b, const ToneParams& t) {
+    if (t.purityThreshold <= 0.0f || t.purityCeiling <= t.purityThreshold) return;
+    const float mx = std::max(r, std::max(g, b));
+    if (mx <= 0.0f) return;
+    const float mn = std::max(std::min(r, std::min(g, b)), 0.0f);
+    const float purity = (mx - mn) / mx;
+    if (purity <= t.purityThreshold) return;
+    const float u = (purity - t.purityThreshold) / (t.purityCeiling - t.purityThreshold);
+    const float compressed = t.purityThreshold + (t.purityCeiling - t.purityThreshold) * u / (1.0f + u);
+    const float scale = compressed / purity;
+    r = mx - (mx - std::max(r, 0.0f)) * scale;
+    g = mx - (mx - std::max(g, 0.0f)) * scale;
+    b = mx - (mx - std::max(b, 0.0f)) * scale;
+}
 
 
 /**
@@ -457,64 +489,59 @@ inline void buildDisplayLut(DisplayLut& lut, const ToneParams& t) {
 
 /**
  * A bilateral grid over log luminance: the local tone operator of
- * REFERENCE.md §3.5.
+ * REFERENCE.md §3.5. Mirrors BilateralGrid.kt, which is the reference and
+ * says why each part is as it is; constants here and there are the same
+ * numbers.
  *
- * ### What it does
- *
- * A global curve compresses the whole picture's range with one function of
- * brightness, so a bright window and the dim room around it are pulled toward
- * each other everywhere at once, and the room's own contrast goes with it. A
- * local operator asks, for each pixel, how bright its *neighbourhood* is, and
- * compresses that instead -- the base -- while leaving the pixel's difference
- * from its base, the detail, exactly as it was. The window comes down, the
- * room comes up, and the texture in each is untouched.
- *
- * ### Why a grid, and why the third axis
- *
- * "Neighbourhood brightness" as a spatial blur produces halos: at the edge of
- * the window the blur mixes window and wall, the base is wrong on both sides,
- * and a bright fringe appears along the wall. The bilateral grid (Chen, Paris
- * and Durand, 2007) adds luminance as a third axis, so a wall pixel's base is
- * averaged only with pixels near it in space *and in brightness* -- the wall,
- * not the window. The grid is coarse in all three axes, which is what makes
- * it cheap: a cell is sixteen pixels square and three quarters of a stop
- * deep, the whole grid for a twelve-megapixel frame is a few hundred
- * kilobytes, and slicing it is one trilinear read per pixel.
- *
- * ### The arithmetic
- *
- * Splat: each pixel adds its log2 luminance and a count to the cell at
- * (x / 16, y / 16, bin(log2 L)). Blur: a separable [1 4 6 4 1] over all three
- * axes, once. Slice: trilinear at the pixel's own position and luminance gives
- * the base b. The operator scales the pixel by `2 ^ (-strength * (b - pivot))`,
- * where the pivot is the count-weighted mean base of the grid -- so the base
- * layer's range about its mean shrinks by the strength and the detail layer,
- * `log2 L - b`, is carried through unchanged. Everything downstream -- the
- * shoulder, the desaturation, the display curve -- then sees a picture whose
- * range has been brought in locally rather than globally.
- *
- * Mirrors BilateralGrid.kt, which is the reference. Constants here and there
- * are the same numbers.
+ * Splat: each sample adds its log2 luminance and a count to the cell at
+ * (x / cell, y / cell), shared between the two bins nearest its luminance.
+ * Blur: a separable [1 4 6 4 1] over all three axes, once. Slice: trilinear
+ * at the pixel's own position and luminance gives the base b. The pixel is
+ * scaled by 2 ^ lift(b): the symmetric compression about the mean base by
+ * the highlight strength, plus the shadow lift -- a neighbourhood far enough
+ * under the scene's bright end raised by up to the ceiling the scene's range
+ * has earned. The cell is a twenty-fourth of the shorter side, so the base is
+ * the illumination and not the subject's own structure.
  */
 struct BilateralGrid {
     static constexpr int kCell = 16;
+    static constexpr int kCellsAcross = 24;
     static constexpr int kBins = 16;
+    static constexpr int kHistogramBins = 240;
     static constexpr float kLogMin = -10.0f;
     static constexpr float kLogMax = 2.0f;
     static constexpr float kMinLuminance = 1e-6f;
+    static constexpr float kBrightEndPercentile = 0.92f;
+    static constexpr float kDarkEndPercentile = 0.10f;
+    static constexpr float kRangeHeld = 3.3f;
+    static constexpr float kShadowDeadZone = 0.5f;
+    static constexpr float kShadowRampPerStop = 2.0f;
 
     int cellsX = 0;
     int cellsY = 0;
+    int cell = kCell;
     std::vector<float> sum;
     std::vector<float> count;
+    int histogram[kHistogramBins] = {};
+    int splats = 0;
     float pivot = 0.0f;
+    float brightEnd = 0.0f;
+    float range = 0.0f;
     bool ready = false;
 
+    /** The cell for an image: a twenty-fourth of its shorter side, never under kCell. */
+    static int cellFor(int width, int height) {
+        return std::max(kCell, std::min(width, height) / kCellsAcross);
+    }
+
     void init(int width, int height) {
-        cellsX = (width + kCell - 1) / kCell;
-        cellsY = (height + kCell - 1) / kCell;
+        cell = cellFor(width, height);
+        cellsX = (width + cell - 1) / cell;
+        cellsY = (height + cell - 1) / cell;
         sum.assign(static_cast<size_t>(cellsX) * cellsY * kBins, 0.0f);
         count.assign(sum.size(), 0.0f);
+        std::fill(histogram, histogram + kHistogramBins, 0);
+        splats = 0;
         ready = false;
     }
 
@@ -532,16 +559,32 @@ struct BilateralGrid {
 
     /** Adds one luminance at a pixel position. Not thread-safe; splat on one thread or per band with a merge. */
     inline void splat(int x, int y, float luminance) {
-        const int cx = std::min(x / kCell, cellsX - 1);
-        const int cy = std::min(y / kCell, cellsY - 1);
+        const int cx = std::min(x / cell, cellsX - 1);
+        const int cy = std::min(y / cell, cellsY - 1);
         const float logL = logOf(luminance);
-        const int b = static_cast<int>(binOf(logL) + 0.5f);
-        const size_t i = index(cx, cy, std::min(b, kBins - 1));
-        sum[i] += logL;
-        count[i] += 1.0f;
+        const float fb = binOf(logL);
+        const int b0 = std::min(static_cast<int>(fb), kBins - 1);
+        const int b1 = std::min(b0 + 1, kBins - 1);
+        const float t = fb - static_cast<float>(b0);
+        const size_t i0 = index(cx, cy, b0);
+        const size_t i1 = index(cx, cy, b1);
+        sum[i0] += logL * (1.0f - t); count[i0] += 1.0f - t;
+        sum[i1] += logL * t; count[i1] += t;
+        const int h = std::clamp(static_cast<int>((logL - kLogMin) / (kLogMax - kLogMin) * kHistogramBins), 0, kHistogramBins - 1);
+        ++histogram[h];
+        ++splats;
     }
 
-    /** Blurs the grid in all three axes and fixes the pivot. */
+    /** The log2 luminance under which [fraction] of the splats fell. */
+    float percentile(float fraction) const {
+        int seen = 0;
+        int bin = 0;
+        const int wanted = static_cast<int>(splats * fraction);
+        while (bin < kHistogramBins - 1 && seen + histogram[bin] < wanted) { seen += histogram[bin]; ++bin; }
+        return kLogMin + (static_cast<float>(bin) + 0.5f) / kHistogramBins * (kLogMax - kLogMin);
+    }
+
+    /** Blurs the grid in all three axes and fixes the pivot, the bright end and the range. */
     void finish() {
         for (int axis = 0; axis < 3; ++axis) blurAxis(axis);
         double ws = 0.0, wc = 0.0;
@@ -550,6 +593,8 @@ struct BilateralGrid {
             wc += count[i];
         }
         pivot = wc > 0.0 ? static_cast<float>(ws / wc) : 0.0f;
+        brightEnd = percentile(kBrightEndPercentile);
+        range = brightEnd - percentile(kDarkEndPercentile);
         ready = true;
     }
 
@@ -581,8 +626,8 @@ struct BilateralGrid {
 
     /** The base at a pixel: the neighbourhood's mean log luminance near this luminance. */
     inline float slice(int x, int y, float logL) const {
-        const float fx = std::clamp((x + 0.5f) / kCell - 0.5f, 0.0f, static_cast<float>(cellsX - 1));
-        const float fy = std::clamp((y + 0.5f) / kCell - 0.5f, 0.0f, static_cast<float>(cellsY - 1));
+        const float fx = std::clamp((x + 0.5f) / cell - 0.5f, 0.0f, static_cast<float>(cellsX - 1));
+        const float fy = std::clamp((y + 0.5f) / cell - 0.5f, 0.0f, static_cast<float>(cellsY - 1));
         const float fb = binOf(logL);
         const int x0 = static_cast<int>(fx), y0 = static_cast<int>(fy), b0 = static_cast<int>(fb);
         const int x1 = std::min(x0 + 1, cellsX - 1), y1 = std::min(y0 + 1, cellsY - 1), b1 = std::min(b0 + 1, kBins - 1);
@@ -604,12 +649,47 @@ struct BilateralGrid {
         return c > 1e-4f ? s / c : logL;
     }
 
-    /** The scale to apply to a pixel of [luminance] at (x, y). */
+    /**
+     * The stops of lift this scene earns: shadowLift per stop of its range
+     * beyond kRangeHeld, never more than shadowLiftMax. Mirrors
+     * BilateralGrid.ceiling.
+     */
+    inline float ceiling(float shadowLift, float shadowLiftMax) const {
+        if (shadowLift <= 0.0f) return 0.0f;
+        return std::min(shadowLiftMax, shadowLift * std::max(0.0f, range - kRangeHeld));
+    }
+
+    /**
+     * The lift in stops for a base dMean stops from the mean and depth stops
+     * under the bright end: the symmetric compression, plus a smoothstep
+     * over the ramp to the ceiling. Mirrors BilateralGrid.lift.
+     */
+    static inline float lift(float dMean, float depth, float highlight, float ceiling) {
+        float l = -highlight * dMean;
+        if (ceiling > 0.0f) {
+            const float past = depth - kShadowDeadZone;
+            if (past > 0.0f) {
+                const float t = std::min(past / (kShadowRampPerStop * ceiling), 1.0f);
+                l += ceiling * t * t * (3.0f - 2.0f * t);
+            }
+        }
+        return l;
+    }
+
+    /** The scale to apply to a pixel of [luminance] at (x, y) under the symmetric operator alone. */
     inline float gain(int x, int y, float luminance, float strength) const {
         if (!ready || strength <= 0.0f || luminance <= kMinLuminance) return 1.0f;
         const float logL = logOf(luminance);
         const float base = slice(x, y, logL);
         return std::exp2(-strength * (base - pivot));
+    }
+
+    /** The scale under the two-sided operator. Mirrors BilateralGrid.gain(x, y, L, highlight, shadowLift, shadowLiftMax). */
+    inline float gain(int x, int y, float luminance, float highlight, float shadowLift, float shadowLiftMax) const {
+        if (!ready || (highlight <= 0.0f && shadowLift <= 0.0f) || luminance <= kMinLuminance) return 1.0f;
+        const float logL = logOf(luminance);
+        const float base = slice(x, y, logL);
+        return std::exp2(lift(base - pivot, brightEnd - base, highlight, ceiling(shadowLift, shadowLiftMax)));
     }
 };
 

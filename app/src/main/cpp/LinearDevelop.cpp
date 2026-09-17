@@ -155,6 +155,7 @@ void buildGrid(const uint16_t* rgb16, int width, int height, const Params& p, fl
                     r += 0.25f * pr; g += 0.25f * pg; b += 0.25f * pb;
                 }
             }
+            compressPurity(r, g, b, p.tone);
             grid.splat(bx, by, 0.2126f * r + 0.7152f * g + 0.0722f * b);
         }
     }
@@ -170,8 +171,11 @@ void developRow(const uint16_t* src, int width, int y, const Params& p, const fl
         const float* gr = gainRow + static_cast<size_t>(x) * 3;
         float r, g, b;
         linearPixel(s, gr, p, invRange, r, g, b);
+        // The matrix's overshoot on a spectral colour, brought in: REFERENCE §3.1 step 6a.
+        compressPurity(r, g, b, p.tone);
         if (grid != nullptr) {
-            const float k = grid->gain(x, y, 0.2126f * r + 0.7152f * g + 0.0722f * b, p.localTone);
+            const float k = grid->gain(x, y, 0.2126f * r + 0.7152f * g + 0.0722f * b,
+                                       p.localTone, p.shadowLift, p.shadowLiftMax);
             r *= k; g *= k; b *= k;
         }
         renderLinear(r, g, b, p.tone, shoulder);
@@ -368,7 +372,7 @@ bool developToRgb8(uint16_t* rgb16, int width, int height, const Params& params,
     BilateralGrid grid;
     const BilateralGrid* gridPtr = nullptr;
     const int64_t tGrid = nowMicros();
-    if (p.localTone > 0.0f) {
+    if (p.localTone > 0.0f || p.shadowLift > 0.0f) {
         buildGrid(rgb16, width, height, p, invRange, grid);
         gridPtr = &grid;
         LOGI("linear develop: local tone grid %lldms", static_cast<long long>((nowMicros() - tGrid) / 1000));

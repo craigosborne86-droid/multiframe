@@ -231,6 +231,63 @@ class ToneCurveTest {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Purity compression, after the matrix.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `an ordinary colour is not touched by the purity compression`() {
+        // A blue sky after the matrix sits at six or seven tenths of purity;
+        // a leaf, a face, a brick well under. All of them keep their matrix value.
+        for (rgb in listOf(floatArrayOf(0.20f, 0.35f, 0.62f), floatArrayOf(0.30f, 0.45f, 0.16f), floatArrayOf(0.5f, 0.35f, 0.28f), floatArrayOf(0.4f, 0.4f, 0.4f))) {
+            val before = rgb.copyOf()
+            ToneCurve.compressPurity(rgb, DevelopParams.PURITY_THRESHOLD, DevelopParams.PURITY_CEILING)
+            for (i in 0 until 3) assertThat(rgb[i]).isEqualTo(before[i])
+        }
+    }
+
+    @Test
+    fun `a spectral red is brought in with its peak and its hue kept`() {
+        // The rose after the matrix: green and blue at a tenth of red.
+        val rgb = floatArrayOf(0.86f, 0.095f, 0.080f)
+        val purityBefore = (0.86f - 0.080f) / 0.86f
+        val hueBefore = (0.86f - 0.095f) / (0.86f - 0.080f)
+        ToneCurve.compressPurity(rgb, DevelopParams.PURITY_THRESHOLD, DevelopParams.PURITY_CEILING)
+        val purity = (rgb[0] - rgb[2]) / rgb[0]
+        // The peak is where it was; the low channels rose; the purity is
+        // under what it was, over the threshold and under the ceiling.
+        assertThat(rgb[0]).isEqualTo(0.86f)
+        assertThat(rgb[1]).isGreaterThan(0.095f)
+        assertThat(purity).isLessThan(purityBefore)
+        assertThat(purity).isGreaterThan(DevelopParams.PURITY_THRESHOLD)
+        assertThat(purity).isLessThan(DevelopParams.PURITY_CEILING)
+        // The ratio of the two distances under the peak -- the hue -- is exactly kept.
+        assertThat((rgb[0] - rgb[1]) / (rgb[0] - rgb[2])).isWithin(1e-4f).of(hueBefore)
+    }
+
+    @Test
+    fun `the purity compression is continuous at the threshold and never reaches the ceiling`() {
+        val t = DevelopParams.PURITY_THRESHOLD
+        val c = DevelopParams.PURITY_CEILING
+        fun purityAfter(p: Float): Float {
+            val rgb = floatArrayOf(1f, 1f - p, 1f - p)
+            ToneCurve.compressPurity(rgb, t, c)
+            return (rgb[0] - rgb[1]) / rgb[0]
+        }
+        assertThat(purityAfter(t + 1e-4f)).isWithin(1e-3f).of(t)
+        var last = 0f
+        var p = t
+        while (p <= 1f) {
+            val out = purityAfter(p)
+            assertThat(out).isAtLeast(last)
+            assertThat(out).isLessThan(c)
+            last = out
+            p += 0.01f
+        }
+        // A colour with a channel at zero -- as pure as a colour can be -- lands well short of the ceiling.
+        assertThat(purityAfter(1f)).isWithin(0.03f).of(t + (c - t) * 0.5f)
+    }
+
     @Test
     fun `the toe gives the deepest shadows some density`() {
         // Without a black point the darkest parts of the frame render as grey

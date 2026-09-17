@@ -1922,6 +1922,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     val lensProfile = lensProfiles[stream.lensId]
                     val params = DevelopParams(
                         localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
+                        shadowLift = if (localTone) DevelopParams.SHADOW_LIFT_ON else 0f,
                     )
                     val dng = dngEnabled
                     val format = outputFormat
@@ -2123,6 +2124,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                             rotationDegrees = rotation,
                                             develop = DevelopParams(
                                                 localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
+                                                shadowLift = if (localTone) DevelopParams.SHADOW_LIFT_ON else 0f,
                                             ),
                                             writeDng = dngEnabled,
                                             onProgress = { },

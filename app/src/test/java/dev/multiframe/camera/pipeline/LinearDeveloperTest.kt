@@ -101,7 +101,9 @@ class LinearDeveloperTest {
             gains = floatArrayOf(1f, 1f, 1f, 1f),
             matrix = floatArrayOf(0f, 0f, 1f, 0f, 1f, 0f, 1f, 0f, 0f),
         )
-        val out = LinearDeveloper.develop(rgb, 8, 8, profile, swap, plain)
+        // The purity compression off: a colour of purity one is otherwise
+        // brought in toward the ceiling, and this measures the matrix alone.
+        val out = LinearDeveloper.develop(rgb, 8, 8, profile, swap, plain.copy(purityThreshold = 0f))
         assertThat(red(out[0])).isEqualTo(0)
         assertThat(blue(out[0])).isEqualTo(173)
     }

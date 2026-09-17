@@ -139,6 +139,46 @@ object ToneCurve {
     }
 
     /**
+     * Purity compression, in linear light straight after the colour matrix:
+     * REFERENCE.md §3.1 step 6a.
+     *
+     * The matrix is a linear fit to a colour chart, and a spectral colour --
+     * a rose in the sun, a sodium lamp -- lies far outside the chart's
+     * gamut. Extrapolated there, the fit overshoots: a petal the sensor saw
+     * with its green at three tenths of its red comes out of the matrix with
+     * green at one tenth, a purity no display has and no eye saw, and the
+     * petals' gradations, which lived in that green, collapse onto the
+     * gamut's edge as one slab of red. Film compressed such colours by the
+     * nature of its dyes; this does it by rule.
+     *
+     * Purity is `(max − min) / max` of the linear channels: zero for a grey,
+     * one for a colour with a channel at zero. Below [threshold] nothing is
+     * touched -- a blue sky at six or seven tenths, the foliage, the skin,
+     * every ordinary colour keeps exactly its matrix value. Above it the
+     * purity is compressed hyperbolically toward [ceiling], which it never
+     * reaches: `p' = t + (P − t)·u / (1 + u)` with `u = (p − t) / (P − t)`,
+     * C¹ at the threshold. Every channel's distance under the peak is then
+     * scaled by `p' / p`, so the peak channel is unchanged, the low channels
+     * rise, the ratio between them -- the hue -- is exactly kept, and the
+     * pixel grows a little lighter as it grows paler, which is what a sunlit
+     * saturated colour does to the eye.
+     */
+    fun compressPurity(rgb: FloatArray, threshold: Float, ceiling: Float) {
+        if (threshold <= 0f || ceiling <= threshold) return
+        val mx = max(rgb[0], max(rgb[1], rgb[2]))
+        if (mx <= 0f) return
+        val mn = kotlin.math.min(rgb[0], kotlin.math.min(rgb[1], rgb[2])).coerceAtLeast(0f)
+        val purity = (mx - mn) / mx
+        if (purity <= threshold) return
+        val u = (purity - threshold) / (ceiling - threshold)
+        val compressed = threshold + (ceiling - threshold) * u / (1f + u)
+        val scale = compressed / purity
+        rgb[0] = mx - (mx - rgb[0].coerceAtLeast(0f)) * scale
+        rgb[1] = mx - (mx - rgb[1].coerceAtLeast(0f)) * scale
+        rgb[2] = mx - (mx - rgb[2].coerceAtLeast(0f)) * scale
+    }
+
+    /**
      * Applies the linear-light stages to one pixel, writing back into [rgb].
      *
      * Expects white-balanced, colour-corrected, exposure-scaled scene-linear

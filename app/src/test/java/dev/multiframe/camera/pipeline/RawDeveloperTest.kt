@@ -70,10 +70,12 @@ class RawDeveloperTest {
             gains = ColorProfile.NEUTRAL.gains,
             matrix = floatArrayOf(0f, 1f, 0f, 0f, 0f, 0f, 0f, 0f, 0f),
         )
-        // Desaturation off, so this measures the matrix alone. With it on, a
-        // bright pure red correctly bleeds into the other channels on its way
-        // to white, which is the subject of ToneCurveTest rather than of this.
-        val matrixOnly = fixed.copy(highlightDesaturation = 0f)
+        // Desaturation and the purity compression off, so this measures the
+        // matrix alone. With them on, a bright pure red correctly bleeds into
+        // the other channels on its way to white, and a colour of purity one
+        // is brought in toward the ceiling -- the subjects of ToneCurveTest
+        // rather than of this.
+        val matrixOnly = fixed.copy(highlightDesaturation = 0f, purityThreshold = 0f)
         val px = RawDeveloper.develop(flat(500), sensor, swap, matrixOnly)
         for ((r, g, b) in interior(px)) {
             assertThat(r).isGreaterThan(0)

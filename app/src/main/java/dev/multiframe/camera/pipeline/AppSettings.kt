@@ -78,7 +78,10 @@ data class AppSettings(
 
     /** The develop's parameters as these settings ask for them. */
     val developParams: DevelopParams
-        get() = DevelopParams(localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f)
+        get() = DevelopParams(
+            localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
+            shadowLift = if (localTone) DevelopParams.SHADOW_LIFT_ON else 0f,
+        )
 
     /**
      * Reduces to strings, which is the whole persistence format.

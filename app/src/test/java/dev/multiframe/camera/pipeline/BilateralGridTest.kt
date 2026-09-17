@@ -3,6 +3,7 @@ package dev.multiframe.camera.pipeline
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
 import kotlin.math.abs
+import kotlin.math.pow
 
 /**
  * The local tone operator, held to the three things it promises.
@@ -116,6 +117,75 @@ class BilateralGridTest {
         val plainRatio = red(plain[darkPixel]).toFloat() / green(plain[darkPixel])
         val localRatio = red(local[darkPixel]).toFloat() / green(local[darkPixel])
         assertThat(localRatio).isWithin(0.03f).of(plainRatio)
+    }
+
+    // ------------------------------------------------------------------
+    // The shadow lift.
+    // ------------------------------------------------------------------
+
+    /** Two levels, [dark] and [bright], the bright one over [brightShare] of the width. */
+    private fun bimodal(dark: Float, bright: Float, brightShare: Float = 0.6f): BilateralGrid =
+        gridOf(512, 256) { x, _ -> if (x < 512 * (1 - brightShare)) dark else bright }
+
+    @Test
+    fun theCellFollowsTheImage() {
+        assertThat(BilateralGrid.cellFor(256, 128)).isEqualTo(BilateralGrid.CELL)
+        assertThat(BilateralGrid.cellFor(4080, 3064)).isEqualTo(3064 / BilateralGrid.CELLS_ACROSS)
+        // The bench's half-size develop of the same frame reads half the cell, so the same neighbourhood.
+        assertThat(BilateralGrid.cellFor(2040, 1532)).isEqualTo(1532 / BilateralGrid.CELLS_ACROSS)
+    }
+
+    @Test
+    fun aSceneOfOrdinaryRangeEarnsNoLift() {
+        // Two and a half stops between the two levels: the display holds it,
+        // and the operator renders exactly as the symmetric operator would.
+        val g = bimodal(0.1f, 0.1f * 2f.pow(2.5f))
+        assertThat(g.range).isWithin(0.3f).of(2.5f)
+        assertThat(g.ceiling(1f, 3f)).isEqualTo(0f)
+        val plain = g.gain(30, 64, 0.1f, 0.15f)
+        val twoSided = g.gain(30, 64, 0.1f, 0.15f, 1f, 3f)
+        assertThat(twoSided).isWithin(1e-5f).of(plain)
+    }
+
+    @Test
+    fun aBacklitSceneEarnsTheCeilingAndSpendsItOnTheShadow() {
+        // Six stops between the tower and the sky: the range beyond the held
+        // range, a stop per stop, to the ceiling.
+        val dark = 0.5f * 2f.pow(-6f)
+        val g = bimodal(dark, 0.5f)
+        assertThat(g.range).isWithin(0.3f).of(6f)
+        val earned = g.ceiling(1f, 3f)
+        assertThat(earned).isWithin(0.3f).of(minOf(3f, 6f - BilateralGrid.RANGE_HELD))
+        // The sky is the bright end and does not move for the lift; the
+        // tower, six stops under it, comes up by the whole ceiling.
+        val sky = g.gain(400, 64, 0.5f, 0f, 1f, 3f)
+        val tower = g.gain(30, 64, dark, 0f, 1f, 3f)
+        assertThat(sky).isWithin(1e-4f).of(1f)
+        assertThat(BilateralGrid.logOf(tower)).isWithin(0.05f).of(earned)
+    }
+
+    @Test
+    fun theLiftKeepsTheOrderOfTwoNeighbourhoods() {
+        // Along the whole ramp the lifted base is still increasing in the
+        // base: a darker neighbourhood never comes out brighter than a
+        // lighter one, and keeps at least a quarter of their separation.
+        val ceiling = 3f
+        var previous = Float.NEGATIVE_INFINITY
+        var depth = 8f
+        while (depth >= 0f) {
+            val base = -depth
+            val lifted = base + BilateralGrid.lift(0f, depth, 0f, ceiling)
+            assertThat(lifted).isGreaterThan(previous)
+            previous = lifted
+            depth -= 0.05f
+        }
+        // A step of a stop in the base, on the steepest part of the ramp, is at least a quarter of a stop out.
+        val steep = BilateralGrid.SHADOW_DEAD_ZONE + BilateralGrid.SHADOW_RAMP_PER_STOP * ceiling / 2
+        val a = -steep + BilateralGrid.lift(0f, steep, 0f, ceiling)
+        val b = -(steep + 1f) + BilateralGrid.lift(0f, steep + 1f, 0f, ceiling)
+        assertThat(a - b).isAtLeast(0.24f)
+        // And within the dead zone nothing moves.
+        assertThat(BilateralGrid.lift(0f, BilateralGrid.SHADOW_DEAD_ZONE * 0.9f, 0f, ceiling)).isWithin(0f).of(0f)
     }
 
     @Test

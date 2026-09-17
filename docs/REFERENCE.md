@@ -578,6 +578,35 @@ Merged CFA (uint16, Bayer-patterned)
    Currently: single forward matrix per session.
   |
   v
+6a. Purity compression (`ToneCurve.compressPurity`, `Tone.h compressPurity`)
+   purity p = (max − min) / max of the linear channels.
+   p <= 0.70: untouched.
+   p >  0.70: p' = 0.70 + 0.15 · u / (1 + u),  u = (p − 0.70) / 0.15
+              every channel's distance under the peak scaled by p' / p.
+   Position: straight after the matrix and before anything reads the
+   pixel's luminance (the local operator's grid, the exposure gain being a
+   scale it commutes with). The justification: the matrix is a linear fit to
+   a colour chart, and on a spectral colour -- a rose in the sun, a sodium
+   lamp -- it extrapolates far outside the chart and overshoots. The tenth
+   field test's rose: the sensor saw its green at three tenths of its red
+   (camera space, white-balanced); the matrix put it at one tenth, purity
+   0.89, and the S-curve of step 7c took the encoded ratio from 0.28 to 0.20.
+   That is a purity no display has and no eye saw, and the petals'
+   gradations, which lived in the green, collapsed onto the gamut's edge as
+   one slab of red. Compressing the purity before the tone chain -- the peak
+   channel kept, the low channels raised, their ratio (the hue) exactly kept
+   -- puts the gradation back and renders the flower the coral pink it was.
+   Hyperbolic toward 0.85 so the purest colour the rendering shows keeps its
+   low channels at fifteen hundredths of the peak; C¹ at the threshold.
+   Seven tenths is over every ordinary colour: a clear sky sits at six to
+   seven tenths after the matrix, foliage and skin well under
+   (`DngAnalysisBench` prints the purity histogram; over the field test's
+   six scenes under 1.5% of the pixels of any scene without a flower lie
+   above it, and 62% of the rose's). `ToneCurveTest` holds the threshold,
+   the continuity, the ceiling and the hue; the develop parity tests hold
+   the native to the Kotlin through it.
+  |
+  v
 7. Tone curve (global, hue-preserving)
    Three stages applied in order:
    a. Highlight roll-off: compress the *max channel* and scale all three by the
@@ -724,7 +753,16 @@ implementations together.
 - **Replacing step 5 (Phase 3):** Sub-pixel kernel accumulation, which produces
   full colour at 2x resolution and removes the demosaic entirely for bursts that
   take that path. See §3.6, and §3.6.5 for what the chain becomes.
-- **After step 7, before step 8 (Phase 4):** Bilateral-grid local tone mapping.
+- **Before step 7 (built):** Bilateral-grid local tone mapping, §3.5: the
+  pixel scaled by its neighbourhood's lift after step 6a and the exposure
+  gain, before the roll-off.
+- **Step 4, near the clip (planned):** the white balance gain faded toward
+  one over the top three tenths of the sensor's scale. A site at the clip
+  read the clip and not the scene, and balancing it makes a clipped neutral
+  magenta: the tenth field test's sun is a pink disc with a pink fringe,
+  the stage 7b desaturation keyed on luminance reaching only two fifths of
+  the way to white for it. The fix belongs where the balance is applied, in
+  the prepass, and its three mirrored forms; not yet done.
 
 ### 3.2 Merge Accumulation Mathematics
 
@@ -1466,52 +1504,99 @@ carry `COLOR_CORRECTION_GAINS`.
 ### 3.5 Bilateral Grid Local Tone Mapping
 
 **As built** (`Tone.h` `BilateralGrid`, `BilateralGrid.kt` as the reference,
-in both develops behind `DevelopParams.localTone`; **on by default at
-0.15** -- it was 0.5 from the sixth field test to the calibration of 17
-September (§3.8), which found that half compressed the scene's own light
-along with the raw's excess: a backlit tree as bright as its sky, a window
-and its room on one level. The `LOCAL TONE` control turns it off. Off had
-been the PRD's photographic default -- a global scale and a roll-off -- and
-the sixth field test's blown skies said the global chain alone was leaving
-stops of the raw's range on the table: the operator brings the base layer's
-range in a little and carries the detail layer through untouched, which is
-the micro-contrast that rendering was protective of.)
+in both develops behind `DevelopParams.localTone` and
+`DevelopParams.shadowLift`; the `LOCAL TONE` control turns both on, at
+**0.15** and **1.0 / 3.0 stops**, and off together). Two operators share
+one grid:
+
+- the **symmetric operator**, the base layer's range about the picture's
+  mean brought in by the strength -- 0.15 since the calibration of 17
+  September (§3.8), 0.5 before it, which compressed the scene's own light
+  along with the raw's excess: a backlit tree as bright as its sky;
+- the **shadow lift**, since the second calibration of the same day: a
+  neighbourhood far enough under the scene's *bright end* is raised, by up
+  to a ceiling the scene's *range* has earned. The tenth field test's
+  backlit tower had swung from haze to silhouette -- the facade at seven
+  stops under the develop's white, under the display curve's toe -- and a
+  symmetric strength that would have lifted it three stops would have
+  pulled the sky down by as much. The lift is one-sided and anchored on
+  the bright end, so the sky does not move, and it is earned by range so a
+  room or a portrait, whose two or three stops the display holds, renders
+  exactly as the symmetric operator alone renders it.
 
 ```
-Input: linear RGB after the colour matrix and the exposure gain, before the
-global roll-off. Luminance L = 0.2126 R + 0.7152 G + 0.0722 B.
+Input: linear RGB after the colour matrix, the purity compression (§3.1
+step 6a) and the exposure gain, before the global roll-off.
+Luminance L = 0.2126 R + 0.7152 G + 0.0722 B.
 
-Grid: cells 16 px square, 16 bins over log2 L in [-10, +2] (0.8 stop each).
-      Each cell: (sum of log2 L, count).
+Grid: cells `cell` px square, cell = max(16, min(width, height) / 24)
+      (127 px on a 12 MP frame; 63 on the bench's half-size develop of it),
+      16 bins over log2 L in [-10, +2] (0.8 stop each). Each cell: (sum of
+      log2 L, count). Beside it a 240-bin histogram of every splatted log2 L.
 
 Splat: one sample per 2x2 CFA block -- the block's red, the mean of its two
-       greens, its blue, through the matrix and the gain -- into the cell at
-       (x/16, y/16, bin(log2 L)). A quarter of the pixels, no demosaic; the
-       grid is coarser than that by two orders anyway.
+       greens, its blue, through the matrix, the purity compression and the
+       gain -- into the cell at (x/cell, y/cell), shared between the two
+       bins nearest its log2 L by distance. A quarter of the pixels, no
+       demosaic; the grid is coarser than that by orders anyway.
 Blur:  [1 4 6 4 1] / 16 along each of the three axes in turn.
-Slice: per pixel, trilinear at (x/16, y/16, log2 L) -> base b.
+Slice: per pixel, trilinear at (x/cell, y/cell, log2 L) -> base b.
 Pivot: the count-weighted mean base of the whole grid.
-Gain:  k = 2 ^ (-strength * (b - pivot));  R, G, B *= k.
+Bright end E: the 92nd percentile of the histogram. Dark end D: the 10th.
+Range R = E - D.
+
+Ceiling C = min(shadowLiftMax, shadowLift * max(0, R - 3.3))     [stops]
+Lift(b) = -localTone * (b - pivot)                                 (symmetric)
+        + C * smoothstep((E - b - 0.5) / (2.0 * C))                (shadow)
+Gain:  k = 2 ^ Lift(b);  R, G, B *= k.
 ```
 
 The detail layer `log2 L - b` is carried through unchanged because every
-pixel with the same base gets the same gain; the base layer's range about the
-picture's mean shrinks by the strength. Then the global chain proceeds. The
-spec's "global tone curve applied to the base" is this: the shoulder and the
-display curve see a picture whose range has been brought in locally.
+pixel with the same base gets the same gain. The constants: **3.3 stops** is
+the range the global chain renders readably on its own -- past it the dark
+end is under the toe (`RANGE_HELD`); **0.5 stop** under the bright end
+nothing moves, the midtones being the picture (`SHADOW_DEAD_ZONE`); the
+smoothstep rises over **2.0 stops per stop of ceiling** (`SHADOW_RAMP_PER_
+STOP`), which holds the lift's slope against the base under three quarters,
+so two neighbourhoods on the ramp keep their order and a quarter of their
+separation, and past the ramp all of it: the deepest shadows are lifted
+together, not flattened into each other. The **cell** was 16 px; at that
+scale the base resolved the tower's own arches and courses, and lifting the
+base flattened them. At a twenty-fourth of the frame the base is the
+illumination -- the tower as a whole against the sky as a whole -- and the
+architecture is detail that rides through. (The bench's half-size develop
+reads half the cell, so it judges the same neighbourhood as the phone.)
 
-Three properties, each a unit test (`BilateralGridTest`): a bright region
-comes down and a dark one up, meeting at the pivot at full strength; a pixel a
-fifth of a stop above its neighbours stays exactly that far above them; and a
-dark pixel four pixels from a hard bright edge gets the dark side's gain within
-8%, not a blend -- which is the halo a spatial blur would produce and the third
-axis prevents. The operator is hue-preserving because it is one scale per
-pixel. Native and Kotlin agree within the develops' own bound of two codes
+On the field test's six scenes (`DngAnalysisBench`): the backlit tower, the
+street under cumulus and the tower block have ranges of 5.7 to 6.5 stops and
+earn 2.4 to 3.0; the dog on the sofa (2.1) and the rose (2.7) earn nothing.
+The tower's facade, seven stops under white, comes up 2.9 stops --
+sRGB 50 to 70, arches and corbels readable -- and the sky's histogram is
+unchanged (`DngDevelopBench`, `lift10m30` against `cal1`).
+
+Properties, each a unit test (`BilateralGridTest`): a bright region comes
+down and a dark one up under the symmetric operator, meeting at the pivot at
+full strength; a pixel a fifth of a stop above its neighbours stays exactly
+that far above them; a dark pixel four pixels from a hard bright edge gets
+the dark side's gain within 8%, not a blend; a scene of ordinary range earns
+no lift and renders as the symmetric operator alone; a six-stop scene earns
+the ceiling, spends all of it on the dark side and none on the bright end;
+the lift keeps the order of two neighbourhoods along the whole ramp. The
+operator is hue-preserving because it is one scale per pixel. Native and
+Kotlin agree within the develops' own bound of two codes
 (`DevelopParityTest.nativeAndKotlinLocalToneAgreeAndAct`,
-`LinearDevelopParityTest.withTheLocalOperatorItAgrees`).
+`nativeAndKotlinShadowLiftAgreeAndAct`,
+`LinearDevelopParityTest.withTheLocalOperatorItAgrees`,
+`withTheShadowLiftItAgrees`).
 
-Not applied to Super Res tiles: a base computed per tile differs at every seam.
-The right grid for a mosaic is one over the canvas, which is future work.
+Known limits: a lifted region shows what the raw had. The telephoto's
+10-bit raw put the tower at three codes over black, and three stops of lift
+show the quantisation as coarse colour blotching the radius-2 chroma
+smoothing cannot reach (the main sensor's 12-bit raw of the same scene is
+clean); a coarser second chroma pass for lifted shadows is the likely
+answer. Not applied to Super Res tiles: a base computed per tile differs at
+every seam. The right grid for a mosaic is one over the canvas, which is
+future work.
 
 ---
 
@@ -2061,6 +2146,46 @@ phone's -- the phone knows every ZSL shot's pull at the press.
 `DevelopParityTest`, `LinearDevelopParityTest` and `SubPixelParityTest`
 hold the three develops together under them.
 
+**What it found the same afternoon, over the tenth field test's nine DNGs
+(the backlit tower on the telephoto, the street under cumulus, the tower
+block, the rose, and the earlier day's scenes as controls):** the first
+calibration had swung the backlit tower from haze to silhouette -- its
+facade seven stops under white, under the toe -- and rendered the rose,
+which the eye saw as a soft coral pink, as one slab of scarlet.
+`DngAnalysisBench` prints what the develop sees before it renders: the
+scene's luminance histogram by stops, its range, and its colour purity by
+hue; `DngPetalProbe` follows a saturated red through the chain, camera
+space to sRGB. The two showed the causes -- the tower's mode at −7 stops
+against the sky's at −2, and the matrix taking the petals' green from three
+tenths of red to one tenth -- and the fixes are structural, not a turn of a
+dial:
+
+| Parameter | Was | Is | Why |
+|---|---|---|---|
+| `shadowLift` / `shadowLiftMax` (new, §3.5) | -- | **1.0 / 3.0 stops** | The local operator's shadow side: a neighbourhood under the scene's bright end raised by up to a ceiling the scene's range earns -- a stop per stop beyond 3.3, so the dog and the rose earn nothing and the backlit scenes earn 2.4 to 3.0. Anchored on the bright end, so the sky does not move. The tower's arches and corbels are readable (`lift10m30`); the dog on the sofa is byte-identical to before. |
+| `BilateralGrid` cell | 16 px | **shorter side / 24** | At 16 px the base resolved the tower's own architecture and lifting the base flattened it; at 127 px the base is the illumination and the architecture is detail. The bench's half-size develop reads half the cell and so judges the same neighbourhood. |
+| `purityThreshold` / `purityCeiling` (new, §3.1 step 6a) | -- | **0.70 / 0.85** | The matrix's overshoot on a spectral colour compressed before the tone chain, hue kept exactly. The rose goes from sRGB (239, 67, 65) to a coral (230, 115, 110) with its petals' shading back; the sky, at six to seven tenths of purity, is untouched (`pu70c85` against `nopurity`). |
+
+Tried and not taken: the shadow lift anchored on the scene's mean (the
+tower needed to overshoot the mean to read; a slope past one would invert
+neighbourhoods) or on its median (the median flips four stops as a
+composition changes); a two-stop dead zone with a steeper ramp (the street's
+foreground flattened to soup at a slope of 0.94); a chroma path through the
+shoulder that spent a saturated colour's compression on its chroma rather
+than its level (real, but an afterthought once the purity was compressed,
+and removed); thirty-two bins (the rings round the sun the bench showed were
+in the raw -- the lens's flare -- not the grid's quantisation, and the
+phone's JPEG has them too).
+
+The DNG now says what the JPEG did in one more way: `AsShotNeutral` is
+rewritten with the reciprocal of the develop's white balance gains
+(`DngMetadata.asShotNeutralOffset`, patched beside `BaselineExposure`), since
+on the 11 Pro's telephoto the HAL's neutral colour point and its gains
+disagreed by a fifth of a stop in blue and the bench -- and every converter
+-- rendered the telephoto's clouds warm where the phone's were white. DNGs
+written before that carry the neutral point, and the bench renders them
+with it.
+
 ## Appendix: File Inventory by Subsystem
 
 ### Pipeline (app/src/main/java/dev/multiframe/camera/pipeline/)
@@ -2071,7 +2196,7 @@ hold the three develops together under them.
 | **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt` |
 | **2x canvas** | `SubPixelAccumulator.kt` (reference), `NativeSubPixel.kt` (strips, and the develop entry points), `SubPixelCoverage.kt` (the prediction and its bounds), `LinearDeveloper.kt` (the linear develop, reference), `SuperResCapture.kt` (the outputs) |
 | **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `BilateralGrid.kt` (local tone, reference), `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
-| **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` (reads a DNG's colour tags; places the `BaselineExposure` the guard's pull is written into, §3.7) |
+| **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` (reads a DNG's colour tags; places the `BaselineExposure` the guard's pull and the `AsShotNeutral` the develop's white balance are written into, §3.7, §3.8) |
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt`, `ShutterCap.kt` (shutter priority under the meter, §3.7) |
 | **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `LensProfile.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |
 | **DCG calibration** | `DcgCalibration.kt`, `DcgProfiler.kt`, `DcgCalibrationStore.kt` |
@@ -2087,7 +2212,7 @@ hold the three develops together under them.
 | File | Purpose |
 |---|---|
 | `bayer_merge.cpp` | NEON-vectorized merge accumulation, noise estimation, shading correction, prepass, the CFA develop. |
-| `Tone.h` | The tone chain shared by both develops: gamma and display tables, the shoulder table, `renderLinear`, shading interpolation, the band scheduler, and the `BilateralGrid` local tone operator (§3.5). Header-only. |
+| `Tone.h` | The tone chain shared by both develops: gamma and display tables, the shoulder table, the purity compression (§3.1 step 6a), `renderLinear`, shading interpolation, the band scheduler, and the `BilateralGrid` local tone operator with its shadow lift (§3.5). Header-only. |
 | `SubPixel.cpp` | Sub-pixel kernel accumulation onto a 2x canvas, strip-major over an mmap output, tiled for cache residency (§3.6). Held to `SubPixelAccumulator.kt` within one 16-bit count. Also the JNI for the canvas's develop. |
 | `LinearDevelop.cpp` / `.h` | The develop for the 2x canvas: black, shading, white balance, matrix and tone from `Tone.h`, sharpen on band-local luma, into three-byte RGB with the canvas released strip by strip, then the strip encoder (§3.6.5). Held to `LinearDeveloper.kt`. |
 | `Align.cpp` | Native 4-level pyramid tile alignment with equiangular sub-pixel refinement at the finest level (§3.3.1). Held to `Aligner.kt` at zero differing tiles. |

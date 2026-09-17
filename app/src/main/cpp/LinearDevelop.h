@@ -52,6 +52,9 @@ struct Params {
 
     /** The local tone operator's strength, REFERENCE §3.5; zero is off. */
     float localTone = 0.0f;
+    /** Its shadow lift: stops per stop of range beyond the held range, and the ceiling. Zero is off. */
+    float shadowLift = 0.0f;
+    float shadowLiftMax = 3.0f;
 
     /** Capture sharpening; amount <= 0 disables. Mirrors Sharpen.kt. */
     float sharpenAmount = 0.45f;
