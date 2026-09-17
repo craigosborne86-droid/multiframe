@@ -41,6 +41,14 @@ picture, the sensor saw it in the scene."
   the white balance turns that green. The reference frame is the newest
   (lowest-ISO only under DCG). The DNG carries the guard's pull undone in
   `BaselineExposure`; do not brighten the raw pixels instead.
+- **The develop stays near the meter.** The automatic gain is held within
+  half a stop under and three quarters over the meter's own gain
+  (`DevelopParams.meteredGain`, `RawDeveloper.boundedGain`, the same bound
+  in `LinearDevelop.cpp`); the bright end is placed at 0.40, not 0.62. A
+  placement left to itself renders every scene the same brightness -- the
+  "HDR soup" -- and a night scene is not a daylight. Judge a tone change on
+  the desk first (`DngDevelopBench`, REFERENCE §3.8), never by rebuilding
+  and walking outside, and never by the full device suite.
 - **The shoulder's white is where the sensor stops**: `white = gain`
   (`DevelopParams.withGain`, `Tone.h resolveShoulder`), so a clipped pixel
   is display white. A constant white point over nominal renders the clip

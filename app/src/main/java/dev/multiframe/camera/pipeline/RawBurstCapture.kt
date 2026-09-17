@@ -209,7 +209,9 @@ object RawBurstCapture {
                 lens = lens,
                 lensProfile = lensProfile,
                 outputFormat = outputFormat,
-                develop = develop,
+                // The sequential camera has no guard and no pull: the meter's
+                // exposure is the intent, and the develop stays near it.
+                develop = if (develop.meteredGain == 0f) develop.copy(meteredGain = 1f) else develop,
                 writeDng = writeDng,
             )
         } finally {

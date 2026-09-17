@@ -96,6 +96,14 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // The offline develop bench (DngDevelopBench) reads real DNGs from a
+        // directory named on the command line: -Pmf.dng.dir=... -Pmf.out.dir=...
+        // -Pmf.variants=... ; absent, the bench is skipped.
+        unitTests.all { test ->
+            listOf("mf.dng.dir", "mf.out.dir", "mf.variants", "mf.crop", "mf.scale").forEach { key ->
+                project.findProperty(key)?.let { test.systemProperty(key, it.toString()) }
+            }
+        }
     }
 }
 

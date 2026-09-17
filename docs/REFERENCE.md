@@ -681,8 +681,9 @@ Merged CFA (uint16, Bayer-patterned)
     and it is *noise-adaptive*: the amount fades from full at ISO 800 to
     nothing at ISO 3200 (`DevelopParams.adaptedTo`), because on a frame at
     that gain what it would restore is grain, and sharpened grain is static.
-    Parameters: amount (default 0.55), threshold (default 3.5 code values),
-    maxShift (28).
+    Parameters: amount (default 0.45; 0.55 until §3.8's calibration found
+    it beginning to draw the edge at 100% on brickwork), threshold (default
+    3.5 code values), maxShift (20, from 28).
   |
   v
 Output: 8-bit sRGB ARGB int array -> JPEG via libjpeg-turbo
@@ -1465,13 +1466,16 @@ carry `COLOR_CORRECTION_GAINS`.
 ### 3.5 Bilateral Grid Local Tone Mapping
 
 **As built** (`Tone.h` `BilateralGrid`, `BilateralGrid.kt` as the reference,
-in both develops behind `DevelopParams.localTone`; **on by default at 0.5**
-since the sixth field test, the `LOCAL TONE` control turns it off. Off had
+in both develops behind `DevelopParams.localTone`; **on by default at
+0.15** -- it was 0.5 from the sixth field test to the calibration of 17
+September (§3.8), which found that half compressed the scene's own light
+along with the raw's excess: a backlit tree as bright as its sky, a window
+and its room on one level. The `LOCAL TONE` control turns it off. Off had
 been the PRD's photographic default -- a global scale and a roll-off -- and
-the field test's blown skies said the global chain alone was leaving stops
-of the raw's range on the table: the operator brings the base layer's range
-in and carries the detail layer through untouched, which is the
-micro-contrast that rendering was protective of.)
+the sixth field test's blown skies said the global chain alone was leaving
+stops of the raw's range on the table: the operator brings the base layer's
+range in a little and carries the detail layer through untouched, which is
+the micro-contrast that rendering was protective of.)
 
 ```
 Input: linear RGB after the colour matrix and the exposure gain, before the
@@ -1962,8 +1966,9 @@ seen, and pulls further -- up to what the burst affords, `0.5 · log2(N)`
 stops -- where the histogram shows clipping: −1.0 EV on an ordinary scene
 at eight frames, −1.5 on a blown sky, −2.0 on a blown sky at sixteen. The
 raw's clip point moves a stop above the scene's bright end; the develop's
-own auto-exposure (92nd percentile to 0.62) puts the midtones back; the
-filmic shoulder of §3.1 step 7 spends the stop on the highlights' tones;
+own auto-exposure (92nd percentile to 0.40, held within half a stop under
+and three quarters over the meter's own gain -- §3.8) puts the midtones
+back; the filmic shoulder of §3.1 step 7 spends the stop on the highlights' tones;
 the merge takes the shadows' stop of noise back. NIGHT, and AUTO on a dark
 scene, run without the guard and without the bias.
 
@@ -2011,6 +2016,50 @@ into the eight bytes it left (`DngMetadata.baselineExposureOffset`,
 positioned read and write on the descriptor), with the shot's pull
 (`ZslCapture.Shot.pullStops`, read at the press) negated. The pixels are
 untouched; only the rendering intent is corrected.
+
+### 3.8 The Rendering, Calibrated on the Desk
+
+**The bench.** `DngDevelopBench` (`app/src/test/.../bench/`) reads the DNGs
+the phone wrote -- the merged CFA, the levels and pattern, the colour from
+the DNG's matrices and `AsShotNeutral` through the same `ColorScience`
+solve as the phone, the lens shading from the opcode list's gain maps,
+`BaselineExposure` as the guard's pull undone -- and develops them through
+the Kotlin reference pipeline (`RawDeveloper.develop`, which the native
+develop is held to within two codes), one JPEG per named variant, in about
+a second a frame at half resolution:
+
+```
+./gradlew :app:testDebugUnitTest --tests '*DngDevelopBench*' \
+    -Pmf.dng.dir=/path/to/dngs -Pmf.out.dir=/path/to/out \
+    -Pmf.variants=old,current -Pmf.scale=half        # or full, or -Pmf.crop=x,y,w,h
+```
+
+A tone change is judged on real photographs in seconds rather than after a
+build, an install and a walk outside. Full frames take the main lenses'
+geometry from §2.4's records (`BenchLenses`) and measure the aberration as
+the phone does, so a 100% crop is the phone's picture; without the resample
+the demosaic's own texture along a high-contrast edge shows, which the
+phone never shows.
+
+**What it found, 17 September 2026, over fourteen DNGs of the eighth field
+test and the day after (a dog on a sofa and in a hallway, a rose in sun, a
+backlit tower, a street under cumulus, a tower block against blue):**
+
+| Parameter | Was | Is | Why |
+|---|---|---|---|
+| `highlightTarget` | 0.62 | **0.40** | The bright end of every scene sat at four fifths of white and the midtones with it: the lifted, veiled rendering. At 0.40 the sky is deep with the clouds' structure kept, the backlit tree is dark as it was, the dog is the colour of the dog. |
+| `contrast` | 0.30 | **0.42** | With the bright end placed lower, the S-curve's slope puts the depth back. |
+| `LOCAL_TONE_ON` | 0.5 | **0.15** | Half compressed the scene's own light; 0.15 keeps the operator to a little back from the extremes. |
+| `Sharpen.amount` / `maxShift` | 0.55 / 28 | **0.45 / 20** | At 100% on brickwork and window frames the old setting was beginning to draw the edge rather than restore it. |
+| `meteredGain` (new) | -- | 2^(−pull) | The automatic gain is held within half a stop under and three quarters over the meter's own gain (`RawDeveloper.boundedGain`, the same bound in the native CFA develop and the linear develop of the 2x canvas). Left to itself the placement made every scene the same brightness: a night street lifted until its bright end reached the target, a grey daylight with the noise floor for texture. The develop now puts back what the guard took, plus a nudge for the highlights, and a scene the meter exposed dark stays dark. Zero -- the mosaic's tiles, a DNG written before the tag carried the pull -- leaves the placement alone. |
+
+The bound bites where the pull is known and not where it is not: on the
+DNGs written before `BaselineExposure` carried the pull the bench renders
+the bounded variants dark, which is the bench's ignorance and not the
+phone's -- the phone knows every ZSL shot's pull at the press.
+`RawDeveloperTest` holds the bound and the shipped numbers;
+`DevelopParityTest`, `LinearDevelopParityTest` and `SubPixelParityTest`
+hold the three develops together under them.
 
 ## Appendix: File Inventory by Subsystem
 

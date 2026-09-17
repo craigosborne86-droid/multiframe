@@ -42,15 +42,21 @@ struct Params {
     /** exposureGain <= 0 means measure it from the canvas, as the CFA develop does. */
     tone::ToneParams tone;
     float autoPercentile = 0.92f;
-    float autoTarget = 0.62f;
+    float autoTarget = 0.40f;
+    /**
+     * The meter's own gain -- two to the guard's pull undone -- or zero for
+     * none; the measured gain is held within half a stop under it and three
+     * quarters over (DevelopParams.meteredGain, RawDeveloper.boundedGain).
+     */
+    float meteredGain = 0.0f;
 
     /** The local tone operator's strength, REFERENCE §3.5; zero is off. */
     float localTone = 0.0f;
 
     /** Capture sharpening; amount <= 0 disables. Mirrors Sharpen.kt. */
-    float sharpenAmount = 0.55f;
+    float sharpenAmount = 0.45f;
     float sharpenThreshold = 3.5f;
-    float sharpenMaxShift = 28.0f;
+    float sharpenMaxShift = 20.0f;
 
     /** Chrominance smoothing before the sharpen; amount <= 0 disables. Mirrors ChromaSmooth.kt. */
     int chromaRadius = 2;

@@ -244,8 +244,15 @@ normal preview startup, using the existing ZSL ring. The user never sees them.
   a constant white point over nominal rendered the clip grey and the
   picture hazy (eighth field test).
 - **Local tone on by default.** The bilateral-grid operator (§3.5) runs in
-  every develop at its standing strength; the `LOCAL TONE` control turns it
-  off.
+  every develop at its standing strength -- 0.15 since the desk calibration
+  of 17 September (`REFERENCE.md` §3.8), which found the earlier 0.5
+  flattening the scene's own light; the `LOCAL TONE` control turns it off.
+- **The rendering is metered, then placed.** The develop's gain puts back
+  what the guard took and may nudge the bright end toward its placement by
+  at most three quarters of a stop up or half a stop down; a scene the meter
+  exposed dark stays dark. The bright end is placed at 0.40 of linear white
+  and the midtone S-curve at 0.42: the sky deep, the backlit tree dark, the
+  dog the colour of the dog, none of it lifted into a veil.
 
 ---
 

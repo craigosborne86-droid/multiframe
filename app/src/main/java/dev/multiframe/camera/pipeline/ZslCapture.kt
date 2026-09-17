@@ -4,6 +4,7 @@ import android.content.Context
 import android.hardware.camera2.CaptureResult
 import android.util.Log
 import kotlin.math.max
+import kotlin.math.pow
 
 private const val TAG = "Multiframe"
 
@@ -110,6 +111,11 @@ object ZslCapture {
         onProgress: (String) -> Unit = {},
     ): RawBurstResult {
         val profile = SensorProfile.from(stream.characteristics)
+        // The meter's intent, for the develop to stay near: the guard's pull
+        // undone. A shot taken with no pull (NIGHT, a dark scene) is developed
+        // at about the brightness the meter chose, not lifted to a daylight.
+        @Suppress("NAME_SHADOWING")
+        val develop = develop.copy(meteredGain = 2.0.pow(-shot.pullStops.toDouble()).toFloat())
         val statsBefore = shot.statsBefore
         val frameCount = shot.frameCount
         val handoverMicros = shot.handoverMicros

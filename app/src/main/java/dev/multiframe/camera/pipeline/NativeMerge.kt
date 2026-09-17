@@ -106,9 +106,13 @@ class NativeMerge private constructor(
         val gain = if (params.exposureGain > 0f) {
             params.exposureGain
         } else {
-            nAutoExposure(
-                merged, width, height, profile.cfaPattern, black, profile.whiteLevel,
-                color.gains, params.highlightPercentile, params.highlightTarget,
+            // Held near the meter's intent where it is known: DevelopParams.meteredGain.
+            RawDeveloper.boundedGain(
+                nAutoExposure(
+                    merged, width, height, profile.cfaPattern, black, profile.whiteLevel,
+                    color.gains, params.highlightPercentile, params.highlightTarget,
+                ),
+                params.meteredGain,
             )
         }
         val tBitmap = System.currentTimeMillis()

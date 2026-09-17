@@ -44,12 +44,19 @@ object Sharpen {
     private const val RADIUS = 1
 
     data class Params(
-        /** How much of the detail difference to add back. */
-        val amount: Float = 0.55f,
+        /**
+         * How much of the detail difference to add back. 0.45, from 0.55,
+         * and the cap below from 28 to 20: at 100% on brickwork and window
+         * frames the old setting was beginning to draw the edge rather than
+         * restore it. The resample of the optics correction already costs a
+         * little acutance; this puts that back and stops (`DngDevelopBench`,
+         * `b` against `bsoft` and `bnosharp`).
+         */
+        val amount: Float = 0.45f,
         /** Luminance differences below this, in 0..255, are left alone. */
         val threshold: Float = 3.5f,
         /** Cap on how far any pixel may move, to stop edges from ringing. */
-        val maxShift: Float = 28f,
+        val maxShift: Float = 20f,
     ) {
         val enabled: Boolean get() = amount > 0f
     }

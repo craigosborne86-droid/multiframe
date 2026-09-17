@@ -185,7 +185,7 @@ struct ToneParams {
      * resolveShoulder, which every develop calls once its gain is known.
      */
     float white = 0.0f;
-    float contrast = 0.30f;
+    float contrast = 0.42f;
     float desatStrength = 1.0f;
     float desatStart = 1.0f;
     float blackPoint = 0.012f;

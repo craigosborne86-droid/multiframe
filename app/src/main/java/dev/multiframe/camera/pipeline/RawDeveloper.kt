@@ -30,16 +30,44 @@ data class DevelopParams(
      * explicit value is honoured as given. See [ToneCurve.shoulder].
      */
     val shoulderWhite: Float = SHOULDER_WHITE_AUTO,
-    /** Linear level the bright end of the scene is mapped to. */
-    val highlightTarget: Float = 0.62f,
+    /**
+     * Linear level the bright end of the scene is mapped to.
+     *
+     * 0.40 -- two thirds of display white once encoded -- and not the 0.62
+     * it was. At 0.62 the bright end of every scene, the sky and the sunlit
+     * wall included, sat at four fifths of white and the midtones with it:
+     * the lifted, veiled rendering of the eighth field test, the "HDR soup"
+     * the PRD's photographic rendering is against. Chosen on the desk over
+     * fourteen of that test's DNGs (`DngDevelopBench`, variant `e`):
+     * skies deep with the clouds' structure kept, the backlit tree dark as
+     * it was, the dog on the sofa the colour of the dog.
+     */
+    val highlightTarget: Float = 0.40f,
     /** Percentile treated as the bright end, ignoring speculars. */
     val highlightPercentile: Float = 0.92f,
+    /**
+     * The gain that reproduces the meter's own intent -- two to the guard's
+     * pull undone -- or zero where the develop has no meter to defer to.
+     *
+     * The bright end's target above is a *placement*, and left to itself it
+     * placed every scene the same: a night street was lifted until its
+     * bright end reached the target, which is a grey daylight with the noise
+     * floor for texture. Where the meter's intent is known, the automatic
+     * gain is held within [METERED_GAIN_BELOW_STOPS] under it and
+     * [METERED_GAIN_ABOVE_STOPS] over it, so a scene the meter exposed dark
+     * stays dark -- shadows are shadows -- and the develop only puts back
+     * what the guard took, plus a nudge for the highlights' placement.
+     * See [RawDeveloper.boundedGain].
+     */
+    val meteredGain: Float = 0f,
     /**
      * Midtone contrast, as the strength of an S-curve applied after the gamma
      * encode. The slope at mid-grey is 1 + 0.875 * this. Zero renders the scene
      * with no curve at all, which looks washed out rather than neutral.
+     * 0.42, from 0.30, with the bright end placed lower: the two together are
+     * what put the depth back into a picture the old placement flattened.
      */
-    val contrast: Float = 0.30f,
+    val contrast: Float = 0.42f,
     /** How completely the brightest areas give up their colour. */
     val highlightDesaturation: Float = 1.0f,
     /**
@@ -124,6 +152,17 @@ data class DevelopParams(
         const val AUTO_EXPOSURE = -1f
 
         /**
+         * How far the automatic gain may fall under, or rise over, the
+         * meter's own: half a stop under (a bright end already high is
+         * brought down a little), three quarters over (the highlights'
+         * placement may lift a low-key scene a little, and no more). A night
+         * scene is then a night scene: the meter made it dark, and the
+         * develop keeps it within a stop of that.
+         */
+        const val METERED_GAIN_BELOW_STOPS = 0.5f
+        const val METERED_GAIN_ABOVE_STOPS = 0.75f
+
+        /**
          * A shoulder white of zero: resolve it from the gain. See [withGain].
          *
          * The shoulder's white was a constant of five times nominal white
@@ -152,8 +191,15 @@ data class DevelopParams(
          */
         fun shoulderWhiteFor(gain: Float): Float = gain.coerceIn(SHOULDER_WHITE_MIN, SHOULDER_WHITE_MAX)
 
-        /** The strength the LOCAL TONE control turns on. */
-        const val LOCAL_TONE_ON = 0.5f
+        /**
+         * The strength the LOCAL TONE control turns on. Half, for one field
+         * test, compressed the base layer's range by half and with it the
+         * scene's own light: a backlit tree as bright as its sky, a window
+         * and its room on one level. 0.15 keeps the operator to what it is
+         * for -- a little back from the extremes -- and leaves chiaroscuro
+         * to the scene (`DngDevelopBench`, variants `b` against `e`).
+         */
+        const val LOCAL_TONE_ON = 0.15f
 
         /** Up to this ISO the rendering is the daylight rendering. */
         const val LOW_ISO = 800
@@ -242,7 +288,20 @@ object RawDeveloper {
     ): Float = if (params.exposureGain > 0f) {
         params.exposureGain
     } else {
-        autoExposureGain(frame, sensor, color, params)
+        boundedGain(autoExposureGain(frame, sensor, color, params), params.meteredGain)
+    }
+
+    /**
+     * The automatic gain, held near the meter's intent where that is known:
+     * see [DevelopParams.meteredGain]. Every develop -- this one, the native
+     * CFA develop and the linear develop of the 2x canvas -- applies the same
+     * bound, so the three agree about how bright a scene is.
+     */
+    fun boundedGain(auto: Float, meteredGain: Float): Float {
+        if (meteredGain <= 0f) return auto
+        val floor = meteredGain * 2f.pow(-DevelopParams.METERED_GAIN_BELOW_STOPS)
+        val ceiling = meteredGain * 2f.pow(DevelopParams.METERED_GAIN_ABOVE_STOPS)
+        return auto.coerceIn(floor, ceiling)
     }
 
     /**

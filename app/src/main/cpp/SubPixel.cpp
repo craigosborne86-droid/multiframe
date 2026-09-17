@@ -907,9 +907,10 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     // autoPercentile, autoTarget, localTone, shoulderWhite -- the order
     // NativeSubPixel packs them in. The tenth is read where it is given, so
     // a nine-float caller renders with the shoulder placed from the gain.
-    float tone[10] = {0, 0.7f, 0.3f, 1.0f, 1.0f, 0.012f, 0.92f, 0.62f, 0.0f, 0.0f};
+    // ... then meteredGain, the eleventh (0 for none): see DevelopParams.
+    float tone[11] = {0, 0.7f, 0.42f, 1.0f, 1.0f, 0.012f, 0.92f, 0.40f, 0.0f, 0.0f, 0.0f};
     const jsize toneCount = env->GetArrayLength(jtone);
-    env->GetFloatArrayRegion(jtone, 0, std::min<jsize>(toneCount, 10), tone);
+    env->GetFloatArrayRegion(jtone, 0, std::min<jsize>(toneCount, 11), tone);
     p.tone.exposureGain = tone[0];
     p.tone.knee = tone[1];
     p.tone.contrast = tone[2];
@@ -920,11 +921,12 @@ bool readDevelopParams(JNIEnv* env, jfloatArray jblack, jint white, jfloatArray 
     p.autoTarget = tone[7];
     p.localTone = tone[8];
     p.tone.white = tone[9];
+    p.meteredGain = tone[10];
 
     // amount, threshold, maxShift, then the chroma smoothing's radius, sigma
     // and amount -- the order NativeSubPixel packs them in. An older caller
     // passing three leaves the chroma defaults.
-    float sharpen[6] = {0.55f, 3.5f, 28.0f, 2.0f, 12.0f, 1.0f};
+    float sharpen[6] = {0.45f, 3.5f, 20.0f, 2.0f, 12.0f, 1.0f};
     const jsize n = std::min<jsize>(6, env->GetArrayLength(jsharpen));
     env->GetFloatArrayRegion(jsharpen, 0, n, sharpen);
     p.sharpenAmount = sharpen[0];

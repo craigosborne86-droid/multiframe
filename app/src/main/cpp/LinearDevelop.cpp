@@ -35,6 +35,10 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "LinearDevelop", __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "LinearDevelop", __VA_ARGS__)
 
+/** DevelopParams.METERED_GAIN_BELOW_STOPS / ABOVE_STOPS, stated here for the native develop. */
+constexpr float kMeteredGainBelowStops = 0.5f;
+constexpr float kMeteredGainAboveStops = 0.75f;
+
 namespace multiframe {
 namespace linear {
 
@@ -340,6 +344,13 @@ bool developToRgb8(uint16_t* rgb16, int width, int height, const Params& params,
     const int64_t tExposure = nowMicros();
     if (p.tone.exposureGain <= 0.0f) {
         p.tone.exposureGain = autoExposure(rgb16, width, height, p);
+        if (p.meteredGain > 0.0f) {
+            // The same bound as RawDeveloper.boundedGain: the meter's intent,
+            // half a stop under to three quarters over.
+            p.tone.exposureGain = std::clamp(p.tone.exposureGain,
+                                             p.meteredGain * std::exp2(-kMeteredGainBelowStops),
+                                             p.meteredGain * std::exp2(kMeteredGainAboveStops));
+        }
     }
     resolveShoulder(p.tone);
     const int64_t tDevelop = nowMicros();

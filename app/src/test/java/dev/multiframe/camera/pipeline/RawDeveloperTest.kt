@@ -5,6 +5,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import kotlin.math.abs
+import kotlin.math.pow
 
 @RunWith(JUnit4::class)
 class RawDeveloperTest {
@@ -97,6 +98,32 @@ class RawDeveloperTest {
             previous = r
         }
         assertThat(previous).isGreaterThan(200)
+    }
+
+    @Test
+    fun `the automatic gain stays near the meter's intent where that is known`() {
+        // The guard pulled a stop: the meter meant twice this raw. A scene the
+        // placement would lift eight times is held to three quarters of a
+        // stop over the meter; one it would bring under is held to half a
+        // stop under; one it agrees with is left alone.
+        assertThat(RawDeveloper.boundedGain(8f, 2f)).isWithin(1e-4f).of(2f * 2f.pow(0.75f))
+        assertThat(RawDeveloper.boundedGain(1f, 2f)).isWithin(1e-4f).of(2f * 2f.pow(-0.5f))
+        assertThat(RawDeveloper.boundedGain(2.4f, 2f)).isEqualTo(2.4f)
+        // No pull known -- the mosaic's tiles, a bench without the meter -- and the placement rules.
+        assertThat(RawDeveloper.boundedGain(8f, 0f)).isEqualTo(8f)
+        // A night scene the meter exposed at its own gain is not lifted to a daylight.
+        assertThat(RawDeveloper.boundedGain(12f, 1f)).isWithin(1e-4f).of(2f.pow(0.75f))
+    }
+
+    @Test
+    fun `the shipped rendering is the calibrated one`() {
+        val p = DevelopParams()
+        assertThat(p.highlightTarget).isWithin(1e-6f).of(0.40f)
+        assertThat(p.contrast).isWithin(1e-6f).of(0.42f)
+        assertThat(DevelopParams.LOCAL_TONE_ON).isWithin(1e-6f).of(0.15f)
+        assertThat(p.sharpen.amount).isWithin(1e-6f).of(0.45f)
+        assertThat(p.sharpen.maxShift).isWithin(1e-6f).of(20f)
+        assertThat(p.meteredGain).isEqualTo(0f)
     }
 
     @Test
