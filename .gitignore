@@ -18,3 +18,8 @@ captures/
 
 # Signing material
 keystore.properties
+
+# Local ground-truth captures (manifest and fixture instructions are versioned)
+app/src/test/resources/dng_samples/**/*.dng
+app/src/test/resources/dng_samples/**/*.jpg
+app/src/test/resources/dng_samples/**/*.jpeg

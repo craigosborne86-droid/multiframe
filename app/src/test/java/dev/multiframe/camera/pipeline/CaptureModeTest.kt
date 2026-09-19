@@ -153,15 +153,15 @@ class CaptureModeTest {
     }
 
     @Test
-    fun `super res plans like auto, because the mosaic exposes its own tiles`() {
+    fun `super res plans a sixteen frame single viewpoint burst`() {
         val auto = CaptureModes.plan(CaptureMode.AUTO, bright, 28, 8)
         val superRes = CaptureModes.plan(CaptureMode.SUPER_RES, bright, 28, 8)
-        assertThat(superRes.frames).isEqualTo(auto.frames)
+        assertThat(superRes.frames).isEqualTo(16)
         assertThat(superRes.maxExposureNs).isEqualTo(auto.maxExposureNs)
-        assertThat(superRes.resolved).isEqualTo(CaptureMode.AUTO)
-        assertThat(CaptureMode.SUPER_RES.isSingleCapture).isFalse()
+        assertThat(superRes.resolved).isEqualTo(CaptureMode.SUPER_RES)
+        assertThat(CaptureMode.SUPER_RES.isSingleCapture).isTrue()
         assertThat(CaptureMode.entries.filter { it.isSingleCapture }).containsExactly(
-            CaptureMode.AUTO, CaptureMode.NIGHT, CaptureMode.ACTION,
+            CaptureMode.AUTO, CaptureMode.NIGHT, CaptureMode.ACTION, CaptureMode.SUPER_RES,
         )
         assertThat(CaptureMode.SUPER_RES.label).isEqualTo("SUPER RES")
     }

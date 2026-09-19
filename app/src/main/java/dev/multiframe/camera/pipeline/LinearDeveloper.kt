@@ -170,6 +170,7 @@ object LinearDeveloper {
                         local[0] *= k; local[1] *= k; local[2] *= k
                     }
                     ToneCurve.renderLinear(local, resolved)
+                    SensorSaturation.neutralise(local, SensorSaturation.canvasWeight(rgb16, i, black, profile.whiteLevel))
                     out[y * width + x] = (0xFF shl 24) or
                         (encode(local[0], resolved) shl 16) or
                         (encode(local[1], resolved) shl 8) or

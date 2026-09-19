@@ -179,6 +179,10 @@ void developRow(const uint16_t* src, int width, int y, const Params& p, const fl
             r *= k; g *= k; b *= k;
         }
         renderLinear(r, g, b, p.tone, shoulder);
+        float clipped = 1.0f;
+        for (int c = 0; c < 3; ++c) clipped = std::min(clipped,
+            (static_cast<float>(s[c]) - p.black[c]) / std::max(1.0f, p.white - p.black[c]));
+        neutraliseSaturation(r, g, b, saturationWeight(clipped));
 
         uint8_t* d = dst + static_cast<size_t>(x) * 3;
         d[0] = display(r);

@@ -1266,7 +1266,8 @@ void demosaicAndTone(const float* plane, int width, int height,
                      const BilateralGrid* localTone = nullptr,
                      float localToneStrength = 0.0f,
                      float shadowLift = 0.0f,
-                     float shadowLiftMax = 0.0f) {
+                     float shadowLiftMax = 0.0f,
+                     const uint16_t* raw = nullptr, const int* black = nullptr, int white = 0) {
     const int w1 = width;
     const int w2 = width * 2;
 
@@ -1359,6 +1360,9 @@ void demosaicAndTone(const float* plane, int width, int height,
                     renderLinear(r, g, b, tone, shoulder);
                 }
 
+                if constexpr (Ablation == kToneFull) {
+                    neutraliseSaturation(r, g, b, cfaSaturation(raw, width, height, x, y, black, white));
+                }
                 // RGBA_8888 is byte order R,G,B,A in memory.
                 if constexpr (Ablation == kToneNoDisplayChain) {
                     q[0] = rawByte(r);
@@ -1873,7 +1877,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     tDemosaic = nowMicros();
     demosaicAndTone<kToneFull>(plane.data(), width, height, dstBase, stride,
                                cfa, m, tone, display, shoulder, nullptr, gridPtr, localTone,
-                               shadowLift, shadowLiftMax);
+                               shadowLift, shadowLiftMax, src, black, white);
 
     const int64_t tEnd = nowMicros();
     LOGI("develop: prepass %lldms, local tone grid %lldms, demosaic+tone %lldms, total %lldms",

@@ -176,6 +176,30 @@ struct Rgb {
     float r, g, b;
 };
 
+// Sensor clip evidence. Kept independent of WB, shading and display gamut.
+inline float saturationWeight(float minChannel) {
+    const float t = std::clamp((minChannel - 0.70f) / (1.0f - 0.70f), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+inline void neutraliseSaturation(float& r, float& g, float& b, float weight) {
+    r += (1.0f - r) * weight;
+    g += (1.0f - g) * weight;
+    b += (1.0f - b) * weight;
+}
+inline float cfaSaturation(const uint16_t* raw, int width, int height,
+                           int x, int y, const int* black, int white) {
+    if (raw == nullptr || width < 2 || height < 2) return 0.0f;
+    x = std::min(x, width - 2); y = std::min(y, height - 2);
+    float level = 1.0f;
+    for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+        const int pedestal = black[((y + dy) & 1) * 2 + ((x + dx) & 1)];
+        const float v = (static_cast<float>(raw[static_cast<size_t>(y + dy) * width + x + dx]) - pedestal) /
+                        std::max(1, white - pedestal);
+        level = std::min(level, v);
+    }
+    return saturationWeight(level);
+}
+
 struct ToneParams {
     float exposureGain = 1.0f;
     float knee = 0.70f;

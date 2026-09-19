@@ -28,8 +28,8 @@ import javax.imageio.ImageWriteParam
  *
  * `mf.scale` is `half` (every other CFA cell, for tone) or `full`;
  * `mf.crop=x,y,w,h` develops one full-resolution window instead, for detail.
- * The variants are named in [VARIANTS]; the lens shading in the DNG's opcode
- * list is applied, the optics correction is not (it does not change tone).
+ * Optics follows chroma/defringe/sharpen, exactly as RawBurstCapture.
+ * Crop coordinates refer to the corrected, valid, unrotated full-resolution image.
  */
 class DngDevelopBench {
 
@@ -39,6 +39,7 @@ class DngDevelopBench {
             // What the app ships: DevelopParams' defaults with the LOCAL TONE control on.
             "current" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON),
             // The calibration of 17 September before this one: no shadow lift, no purity compression.
+            "beforeclip" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON),
             "cal1" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, purityThreshold = 0f),
             // The rendering of the eighth field test, kept so the change can be seen.
             "old" to DevelopParams(localTone = 0.5f, highlightTarget = 0.62f, contrast = 0.30f, purityThreshold = 0f,
@@ -54,6 +55,25 @@ class DngDevelopBench {
             "oldunbounded" to DevelopParams(localTone = 0.5f, highlightTarget = 0.62f, contrast = 0.30f, meteredGain = -1f, purityThreshold = 0f,
                 sharpen = Sharpen.Params(amount = 0.55f, threshold = 3.5f, maxShift = 28f)),
         ) + tuningVariants()
+
+        /** Production's final gather and valid-region crop, then optional inspection crop. */
+        fun finish(pixels: IntArray, width: Int, height: Int, optics: Optics.Params, crop: List<Int>? = null): Image {
+            val scale = Optics.apply(pixels, width, height, optics)
+            val model = optics.distortion?.takeIf { !it.isIdentity }
+            val inset = if (model == null && scale.isIdentity) dev.multiframe.camera.pipeline.LensDistortion.Inset.NONE
+                else dev.multiframe.camera.pipeline.LensDistortion.validInset(model, width, height, scale)
+            val validW = inset.width(width)
+            val validH = inset.height(height)
+            val box = crop ?: listOf(0, 0, validW, validH)
+            require(box.size == 4) { "mf.crop must be x,y,w,h" }
+            val (x, y, w, h) = box
+            require(x >= 0 && y >= 0 && w > 0 && h > 0 && x.toLong() + w <= validW && y.toLong() + h <= validH) {
+                "crop $box outside corrected ${validW}x${validH} frame"
+            }
+            val out = IntArray(w * h)
+            for (row in 0 until h) System.arraycopy(pixels, (inset.top + y + row) * width + inset.left + x, out, row * w, w)
+            return Image(out, w, h)
+        }
 
         /** Around the shipped operator and the purity compression, for the next calibration. */
         private fun tuningVariants(): Map<String, DevelopParams> {
@@ -77,16 +97,16 @@ class DngDevelopBench {
         assumeTrue("no -Pmf.dng.dir; the bench is not run", dir != null && dir.isDirectory)
         val out = File(System.getProperty("mf.out.dir") ?: File(dir!!, "out").path).apply { mkdirs() }
         val wanted = System.getProperty("mf.variants")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
-            ?: VARIANTS.keys.toList()
+            ?: listOf("current")
         val scale = System.getProperty("mf.scale") ?: "half"
         val crop = System.getProperty("mf.crop")?.split(',')?.map { it.trim().toInt() }
 
-        val files = dir!!.listFiles { f -> f.extension.equals("dng", ignoreCase = true) }!!.sortedBy { it.name }
+        val files = dir!!.listFiles { f -> !f.name.startsWith("._") && f.extension.equals("dng", ignoreCase = true) && (dir.name != "september" || f.name.startsWith("MF_202609")) }!!.sortedBy { it.name }
         println("bench: ${files.size} DNGs, variants $wanted, scale $scale${crop?.let { ", crop $it" } ?: ""}")
         for (file in files) {
             val whole = DngFile.read(file)
             val dng = when {
-                crop != null -> whole.crop(crop[0], crop[1], crop[2], crop[3])
+                crop != null -> whole
                 scale == "full" -> whole
                 else -> whole.decimated()
             }
@@ -98,32 +118,36 @@ class DngDevelopBench {
             for (variant in wanted) {
                 val params = VARIANTS[variant] ?: error("no variant $variant; have ${VARIANTS.keys}")
                 val t0 = System.currentTimeMillis()
-                // The optics the phone applies: the lens's geometry, from the
-                // development devices' probe records (REFERENCE §2.4) keyed by
-                // the DNG's focal length, and the aberration measured from this
-                // frame as the phone measures it. Whole frames only; a crop is
-                // not in the coordinates the model was written in.
-                val optics = if (crop == null) Optics.Params(
+                val optics = Optics.Params(
                     distortion = BenchLenses.modelFor(whole, dng.frame.width, dng.frame.height),
-                    correctAberration = true, lensLabel = "bench", lensId = "bench-${whole.focalMm}",
-                ) else null
+                    correctAberration = true, lensLabel = "bench",
+                    // Estimate each variant independently: order must not change the result.
+                    lensId = null,
+                )
                 // The meter's intent, as the DNG carries it: BaselineExposure is
                 // the guard's pull undone, so two to it is the metered gain. A
                 // variant that sets meteredGain itself (negative: unbounded) keeps it.
                 val metered = if (params.meteredGain != 0f) params.meteredGain.coerceAtLeast(0f)
                 else Math.pow(2.0, dng.baselineExposure.toDouble()).toFloat()
                 val pixels = RawDeveloper.develop(
-                    dng.frame, dng.sensor, dng.color,
-                    params.copy(optics = optics ?: params.optics, meteredGain = metered), dng.shading,
+                    dev.multiframe.camera.pipeline.BayerFrame(dng.frame.width, dng.frame.height, dng.frame.data.copyOf()),
+                    dng.sensor, dng.color,
+                    params.adaptedTo(dng.iso).copy(optics = null, meteredGain = metered), dng.shading,
+                    recoverSensorSaturation = variant != "beforeclip",
                 )
+                val corrected = finish(pixels, dng.frame.width, dng.frame.height, optics, crop)
                 val ms = System.currentTimeMillis() - t0
                 val suffix = crop?.let { "_crop" } ?: if (scale == "full") "" else "_half"
                 val target = File(out, "${dng.name}__$variant$suffix.jpg")
-                writeJpeg(pixels, dng.frame.width, dng.frame.height, target)
-                println("  $variant: ${ms}ms -> ${target.name}")
+                writeJpeg(corrected.pixels, corrected.width, corrected.height, target)
+                println("  $variant: ${ms}ms, ${corrected.width}x${corrected.height} -> ${target.name}")
             }
         }
     }
+
+    data class Image(val pixels: IntArray, val width: Int, val height: Int)
+
+
 
     private fun writeJpeg(argb: IntArray, width: Int, height: Int, target: File) {
         val image = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
@@ -141,33 +165,3 @@ class DngDevelopBench {
     }
 }
 
-/**
- * The geometric models of the two development devices' main lenses, from the
- * probe records in REFERENCE.md §2.4 -- the DNG does not carry the model in
- * the form `LensDistortion.Model` takes -- picked by the DNG's focal length
- * and scaled to the frame being developed. Null for a lens not on record,
- * which develops without the geometry (the tone is the same; edges keep the
- * demosaic's texture the resample would have smoothed).
- */
-object BenchLenses {
-    private class Record(val focalMm: Float, val arrayW: Int, val arrayH: Int, val intrinsics: FloatArray, val distortion: FloatArray)
-
-    private val records = listOf(
-        // Pixel 11 Pro 24mm.
-        Record(6.9f, 4080, 3064, floatArrayOf(2833.28f, 2833.28f, 2048.94f, 1538.04f, 0f), floatArrayOf(0.09295f, -0.15067f, 0.09918f, 0f, 0f)),
-        // Pixel 9 Pro XL 24mm.
-        Record(6.9f, 4080, 3072, floatArrayOf(2852.81f, 2852.81f, 2044.85f, 1537.71f, 0f), floatArrayOf(0.09004f, -0.15054f, 0.10187f, 0f, 0f)),
-    )
-
-    fun modelFor(dng: DngFile, width: Int, height: Int): dev.multiframe.camera.pipeline.LensDistortion.Model? {
-        // [dng] is the whole frame, so its size is the array's.
-        val r = records.firstOrNull {
-            kotlin.math.abs(it.focalMm - dng.focalMm) < 0.2f && it.arrayW == dng.frame.width && it.arrayH == dng.frame.height
-        } ?: return null
-        val model = dev.multiframe.camera.pipeline.LensDistortion.Model(
-            fx = r.intrinsics[0], fy = r.intrinsics[1], cx = r.intrinsics[2], cy = r.intrinsics[3], skew = r.intrinsics[4],
-            k1 = r.distortion[0], k2 = r.distortion[1], k3 = r.distortion[2], p1 = r.distortion[3], p2 = r.distortion[4],
-        ).scaledTo(r.arrayW, r.arrayH, width, height)
-        return dev.multiframe.camera.pipeline.LensDistortion.limitStretch(model, width, height)
-    }
-}

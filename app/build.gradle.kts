@@ -94,12 +94,21 @@ android {
         buildConfig = true
     }
 
+    sourceSets.getByName("test").java.srcDir("src/sharedTest/java")
+    sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/java")
+
+    // Local camera fixtures are read in place by the bench, never packaged/copied by Gradle.
+    sourceSets.getByName("test").resources.setSrcDirs(listOf("src/test/resources/jvm"))
+
     testOptions {
         unitTests.isReturnDefaultValues = true
         // The offline develop bench (DngDevelopBench) reads real DNGs from a
         // directory named on the command line: -Pmf.dng.dir=... -Pmf.out.dir=...
         // -Pmf.variants=... ; absent, the bench is skipped.
         unitTests.all { test ->
+            if (project.findProperty("mf.out.dir") != null && project.findProperty("mf.dng.dir") == null) {
+                test.systemProperty("mf.dng.dir", project.file("src/test/resources/dng_samples/september").absolutePath)
+            }
             listOf("mf.dng.dir", "mf.out.dir", "mf.variants", "mf.crop", "mf.scale").forEach { key ->
                 project.findProperty(key)?.let { test.systemProperty(key, it.toString()) }
             }

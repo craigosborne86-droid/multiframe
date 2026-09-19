@@ -15,7 +15,7 @@ class DngPetalProbe {
     fun theRedAtEachStage() {
         val dir = System.getProperty("mf.dng.dir")?.takeIf { it.isNotBlank() }?.let(::File)
         assumeTrue(dir != null && dir.isDirectory)
-        for (file in dir!!.listFiles { f -> f.extension.equals("dng", ignoreCase = true) }!!.sortedBy { it.name }) {
+        for (file in dir!!.listFiles { f -> !f.name.startsWith("._") && f.extension.equals("dng", ignoreCase = true) && (dir.name != "september" || f.name.startsWith("MF_202609")) }!!.sortedBy { it.name }) {
             val dng = DngFile.read(file).decimated()
             val params = DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON)
             val metered = 2.0.pow(dng.baselineExposure.toDouble()).toFloat()

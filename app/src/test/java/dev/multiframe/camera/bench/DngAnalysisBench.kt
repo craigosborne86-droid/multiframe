@@ -22,7 +22,7 @@ class DngAnalysisBench {
     fun whatTheDevelopSees() {
         val dir = System.getProperty("mf.dng.dir")?.takeIf { it.isNotBlank() }?.let(::File)
         assumeTrue("no -Pmf.dng.dir; the analysis is not run", dir != null && dir.isDirectory)
-        val files = dir!!.listFiles { f -> f.extension.equals("dng", ignoreCase = true) }!!.sortedBy { it.name }
+        val files = dir!!.listFiles { f -> !f.name.startsWith("._") && f.extension.equals("dng", ignoreCase = true) && (dir.name != "september" || f.name.startsWith("MF_202609")) }!!.sortedBy { it.name }
         for (file in files) {
             val dng = DngFile.read(file).decimated()
             val params = DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON)

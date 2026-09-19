@@ -19,6 +19,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
@@ -51,6 +56,7 @@ fun SettingsScreen(
     chips: List<ControlSpec>,
     onControl: (String) -> Unit,
     onDismiss: () -> Unit,
+    labs: (@Composable () -> Unit)? = null,
     /** The manual controls, supplied by the screen that owns their state. */
     panel: @Composable () -> Unit,
 ) {
@@ -109,7 +115,42 @@ fun SettingsScreen(
                         .background(Ink.Hairline),
                 )
                 panel()
+                if (labs != null) {
+                    val view = LocalView.current
+                    var expanded by remember { mutableStateOf(false) }
+                    Text(
+                        "LABS · TECHNOLOGY PREVIEWS", style = Type.Control,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                            .clickable { Haptics.segment(view); expanded = !expanded }
+                            .padding(16.dp).semantics { contentDescription = "Labs (Technology Previews)" },
+                    )
+                    if (expanded) labs()
+                }
             }
+        }
+    }
+}
+
+/** Experimental multi-viewpoint capture is entered only from Settings → Labs. */
+@Composable
+fun BrenizerLabs(
+    preset: dev.multiframe.camera.pipeline.MosaicPreset,
+    megapixels: Map<dev.multiframe.camera.pipeline.MosaicPreset, Double>,
+    enabled: Boolean,
+    onPreset: (dev.multiframe.camera.pipeline.MosaicPreset) -> Unit,
+    onLaunch: () -> Unit,
+) {
+    val view = LocalView.current
+    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+        Text("Brenizer Sweep (Beta) · Best on tripods or distant scenes (>5m)", style = Type.Control)
+        if (enabled) {
+            MosaicPresetPill(preset = preset, customOffered = false, oneShotOffered = false,
+                megapixels = megapixels, onPreset = { Haptics.segment(view); onPreset(it) })
+            Text("ARM BRENIZER SWEEP", style = Type.Control,
+                modifier = Modifier.heightIn(min = 48.dp)
+                    .background(Ink.Pane, RoundedCornerShape(24.dp))
+                    .clickable { Haptics.segment(view); onLaunch() }
+                    .padding(16.dp).semantics { contentDescription = "Arm Brenizer Sweep (Beta)" })
         }
     }
 }

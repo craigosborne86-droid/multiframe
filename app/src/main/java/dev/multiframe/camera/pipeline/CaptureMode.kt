@@ -13,12 +13,7 @@ enum class CaptureMode {
     /** Something is moving; spend light to stop it. */
     ACTION,
 
-    /**
-     * A picture larger than the sensor: a grid of telephoto tiles, each a
-     * merged burst, composited into one canvas. The mode's exposure is the
-     * mosaic's own -- locked, floored -- so as a capture plan it is AUTO's.
-     * See `MosaicCapture`.
-     */
+    /** One viewpoint, sixteen raw frames accumulated on the 2x sensor canvas. */
     SUPER_RES;
 
     val label: String
@@ -30,7 +25,7 @@ enum class CaptureMode {
         }
 
     /** Whether this mode is a single burst from the ring, as against a mosaic of them. */
-    val isSingleCapture: Boolean get() = this != SUPER_RES
+    val isSingleCapture: Boolean get() = true
 
     fun next(): CaptureMode = entries[(ordinal + 1) % entries.size]
 }
@@ -125,6 +120,13 @@ object CaptureModes {
         requestedFrames: Int,
     ): CapturePlan {
         val ceiling = availableFrames.coerceAtLeast(1)
+        if (mode == CaptureMode.SUPER_RES) return CapturePlan(
+            frames = minOf(MosaicPreset.ONE_SHOT_FRAMES, ceiling),
+            maxExposureNs = AUTO_EXPOSURE_NS,
+            protectHighlights = analysis.highlightLevel >= DARK_THRESHOLD,
+            resolved = CaptureMode.SUPER_RES,
+            reason = "single-viewpoint sub-pixel accumulation",
+        )
 
         val resolved = when (mode) {
             // A Super Res tile is exposed by the mosaic's lock, not by a plan;

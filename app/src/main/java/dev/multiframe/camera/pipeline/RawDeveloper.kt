@@ -430,6 +430,8 @@ object RawDeveloper {
         color: ColorProfile,
         params: DevelopParams = DevelopParams(),
         shading: ShadingMap? = null,
+        /** Reference-only ablation for the offline bench. Production always enables this. */
+        recoverSensorSaturation: Boolean = true,
     ): IntArray {
         val w = frame.width
         val h = frame.height
@@ -438,7 +440,7 @@ object RawDeveloper {
         val resolved = params.withGain(resolveGain(frame, sensor, color, params))
         val grid = if (resolved.localTone > 0f || resolved.shadowLift > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
         parallelRows(h) { yStart, yEnd ->
-            renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading, grid)
+            renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading, grid, recoverSensorSaturation)
         }
         // Geometry before anything that reads a neighbourhood. Both of the
         // passes below decide what a pixel is from the pixels around it, and
@@ -471,6 +473,7 @@ object RawDeveloper {
         rowBase: Int,
         shading: ShadingMap?,
         grid: BilateralGrid? = null,
+        recoverSensorSaturation: Boolean = true,
     ) {
         val m = color.matrix
         val rgb = FloatArray(3)
@@ -499,6 +502,7 @@ object RawDeveloper {
                     rgb[0] *= k; rgb[1] *= k; rgb[2] *= k
                 }
                 ToneCurve.renderLinear(rgb, params)
+                if (recoverSensorSaturation) SensorSaturation.neutralise(rgb, SensorSaturation.cfaWeight(frame, sensor, x, y))
 
                 out[(y - rowBase) * w + x] = (0xFF shl 24) or
                     (encode(rgb[0], params) shl 16) or

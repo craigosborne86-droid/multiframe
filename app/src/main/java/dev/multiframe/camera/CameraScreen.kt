@@ -337,10 +337,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // mosaic records when it is wider than the capture lens, and the lens to
     // return to on leaving.
     var mosaicReturnLens by remember { mutableStateOf<Lens?>(null) }
+    var brenizerActive by remember { mutableStateOf(false) }
     var mosaicPreset by remember {
         // The drawn-region preset is not offered on the pill; a saved one
         // falls back to the smaller grid.
-        mutableStateOf(restored.mosaicPreset.takeIf { it != MosaicPreset.CUSTOM } ?: MosaicPreset.DETAIL_BOOST)
+        mutableStateOf(restored.mosaicPreset.takeIf { it.isMosaic && it != MosaicPreset.CUSTOM } ?: MosaicPreset.DETAIL_BOOST)
     }
     // A failed capture flashes its dot for a beat; this is the beat.
     var mosaicFlashUntil by remember { mutableLongStateOf(0L) }
@@ -461,11 +462,11 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     }
 
     // What the chosen mode implies for this scene, recomputed as either moves.
-    val capturePlan = remember(captureMode, scene, zslStream, burstFrames) {
+    val capturePlan = remember(captureMode, scene, zslStream, burstFrames, digitalZoom, caps, brenizerActive) {
         val stream = zslStream
         if (stream == null) null
         else CaptureModes.plan(
-            mode = captureMode,
+            mode = if (!brenizerActive && dev.multiframe.camera.pipeline.SuperResPolicy.wantsCanvas(captureMode, digitalZoom, caps?.supportsSuperRes == true)) CaptureMode.SUPER_RES else captureMode,
             analysis = scene ?: SceneAnalysis(0f, 0.5f, 0.1f, 3f),
             availableFrames = stream.maxBurst,
             requestedFrames = burstFrames,
@@ -1134,7 +1135,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // mode is not offered on a phone whose attitude cannot be read.
     val motion = remember { MotionSensor(context) }
     DisposableEffect(motion) { onDispose { motion.close() } }
-    val superResOffered = mosaicCaptureLens != null && zslDecision is ZslDecision.Stream && motion.hasAttitude
+    val brenizerOffered = mosaicCaptureLens != null && zslDecision is ZslDecision.Stream && motion.hasAttitude
+    val superResOffered = caps?.supportsSuperRes == true && zslDecision is ZslDecision.Stream &&
+        (zslStream?.maxBurst ?: 0) >= MosaicPreset.ONE_SHOT_FRAMES
 
     // The sensors run for as long as the mode is selected, not just during a
     // capture: the rotation vector takes most of a second to converge after
@@ -1143,8 +1146,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // shutter; idle, they are off. And the preview's zoom goes back to one:
     // the dots are computed on the uncropped sensor frame, and a zoomed
     // preview would move under them by the zoom.
-    LaunchedEffect(superResPhase.selected, zslStream) {
-        if (superResPhase.selected) {
+    LaunchedEffect(superResPhase.selected, brenizerActive, zslStream) {
+        if (superResPhase.selected && brenizerActive) {
             motion.start()
             val stream = zslStream
             val c = caps
@@ -1161,10 +1164,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // The lens follows the engine while Super Res is armed: a grid is shot
     // on the telephoto, the one-shot on the lens the user came from -- or
     // any lens they pick meanwhile, since the strip stays offered for it.
-    LaunchedEffect(mosaicPreset, superResPhase) {
+    LaunchedEffect(mosaicPreset, superResPhase, brenizerActive) {
         if (superResPhase != SuperResMachine.Phase.ARMED) return@LaunchedEffect
         val capture = mosaicCaptureLens
-        if (mosaicPreset.isMosaic) {
+        if (brenizerActive) {
             if (capture != null && lens?.cameraId != capture.cameraId) {
                 lens = capture
                 status = "switching to ${capture.label}…"
@@ -1180,8 +1183,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // with the lens the user came from as the framing where that is wider.
     // Null until the stream is up on the capture lens, and null for the
     // one-shot, which is not a mosaic.
-    val mosaicPlan = remember(superResPhase, mosaicPreset, zslStream, lens, mosaicReturnLens) {
-        if (!superResPhase.selected) null else {
+    val mosaicPlan = remember(superResPhase, mosaicPreset, brenizerActive, zslStream, lens, mosaicReturnLens) {
+        if (!superResPhase.selected || !brenizerActive) null else {
             val stream = zslStream
             if (stream == null || stream.lensId != lens?.cameraId) null
             else MosaicPlanner.planPreset(
@@ -1197,7 +1200,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // The megapixel badge for each grid on the pill: what the canvas would be
     // on this lens, from the same planner the capture uses.
     val presetMegapixels = remember(zslStream, mosaicCaptureLens) {
-        val capture = mosaicCaptureLens ?: return@remember emptyMap<MosaicPreset, Double>()
+        val capture = mosaicCaptureLens
         val w = zslStream?.config?.width ?: return@remember emptyMap<MosaicPreset, Double>()
         val h = zslStream?.config?.height ?: return@remember emptyMap<MosaicPreset, Double>()
         buildMap {
@@ -1205,7 +1208,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // lens is up: this sensor's frame at 2x.
             put(MosaicPreset.ONE_SHOT, MosaicPreset.oneShotMegapixels(w, h))
             for (preset in listOf(MosaicPreset.DETAIL_BOOST, MosaicPreset.LARGE_FORMAT)) {
-                MosaicPlanner.planPreset(preset, null, capture, w, h)?.let { put(preset, it.megapixels) }
+                capture?.let { MosaicPlanner.planPreset(preset, null, it, w, h) }?.let { put(preset, it.megapixels) }
             }
         }
     }
@@ -1217,7 +1220,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             mosaicView = mosaicPlan?.let { MosaicCapture.armedView(it, it.captureLens.label) }
             if (System.currentTimeMillis() >= superResSummaryUntil) {
                 status = when {
-                    !mosaicPreset.isMosaic -> "1-SHOT · %.0f MP · hold still, then press the shutter".format(
+                    !brenizerActive -> "1-SHOT · %.0f MP · hold still, then press the shutter".format(
                         presetMegapixels[MosaicPreset.ONE_SHOT] ?: 0.0,
                     )
                     mosaicPlan == null -> "switching to the telephoto…"
@@ -1237,6 +1240,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
      */
     val selectMode: (CaptureMode) -> Unit = { mode ->
         if (mode == CaptureMode.SUPER_RES) {
+            if (superResOffered && superResPhase.controlsEnabled && brenizerActive) {
+                mosaicReturnLens?.let { lens = it }
+                brenizerActive = false
+                captureMode = CaptureMode.SUPER_RES
+                mosaicView = null
+            }
             if (superResOffered && superResPhase == SuperResMachine.Phase.IDLE) {
                 superResPhase = SuperResMachine.apply(superResPhase, SuperResMachine.Event.Select)
                 captureMode = mode
@@ -1246,7 +1255,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 zslWanted = true
                 // The grids shoot on the telephoto; the one-shot shoots on
                 // whatever lens the user is on, since it is for any distance.
-                if (mosaicPreset.isMosaic && capture != null && lens?.cameraId != capture.cameraId) {
+                if (brenizerActive && capture != null && lens?.cameraId != capture.cameraId) {
                     lens = capture
                     status = "switching to ${capture.label}…"
                 }
@@ -1257,6 +1266,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 mosaicReturnLens?.let { lens = it }
                 mosaicReturnLens = null
             }
+            brenizerActive = false
             captureMode = mode
             status = ""
         }
@@ -1266,10 +1276,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // list changed, the stream fell back -- is left for AUTO rather than kept
     // armed with nothing to arm. Not while running: the run ends itself when
     // its stream closes, and lands on ARMED, where this then applies.
-    LaunchedEffect(superResOffered, zslWanted, superResPhase) {
-        if (superResPhase == SuperResMachine.Phase.ARMED && (!superResOffered || !zslWanted)) {
+    LaunchedEffect(superResOffered, brenizerOffered, brenizerActive, zslWanted, superResPhase) {
+        if (superResPhase == SuperResMachine.Phase.ARMED && (!(if (brenizerActive) brenizerOffered else superResOffered) || !zslWanted)) {
             selectMode(CaptureMode.AUTO)
-            status = "super res needs the raw ring and the telephoto"
+            status = "capture unavailable on this camera"
         }
     }
 
@@ -1477,13 +1487,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     }
                 }
             }
-            .pointerInput(zslStream, camera, caps, superResPhase.selected) {
+            .pointerInput(zslStream, camera, caps, superResPhase.selected, brenizerActive) {
                 detectTransformGestures { _, _, gestureZoom, _ ->
                     if (gestureZoom == 1f) return@detectTransformGestures
                     // Not in Super Res: the dots are computed on the sensor's
                     // frame, which no zoom crops, and the preview is what the
                     // zoom crops. The two would part company by the zoom.
-                    if (superResPhase.selected) return@detectTransformGestures
+                    if (superResPhase.selected && brenizerActive) return@detectTransformGestures
                     val c = caps ?: return@detectTransformGestures
                     val stream = zslStream
                     if (stream != null) {
@@ -1650,7 +1660,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             settingsOpen = showSettings,
             proOpen = showPro,
             aboutOpen = showAbout,
-            mode = captureMode.label,
+            mode = if (brenizerActive) "BRENIZER" else captureMode.label,
             // Say what AUTO settled on, not just that it is AUTO.
             resolvedMode = resolvedLabel?.takeIf { zslStream != null },
             // Only offered where the hardware said yes. On a camera that stalls
@@ -1822,7 +1832,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             // strip stays while it is armed.
             val rearLenses = remember(lenses) { LensCatalog.rear(lenses) }
             val lensChoice = !superResPhase.selected ||
-                (superResPhase == SuperResMachine.Phase.ARMED && !mosaicPreset.isMosaic)
+                (superResPhase == SuperResMachine.Phase.ARMED && !brenizerActive)
             if (rearLenses.size > 1 && lensChoice) {
                 Row(
                     modifier = Modifier
@@ -1888,7 +1898,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     // grids assume a scene far enough that the tiles share a
                     // plane; the one-shot assumes nothing but a still hand.
                     Text(
-                        text = if (mosaicPreset.isMosaic) "BEST FOR SCENES > 3 M" else "ANY DISTANCE · HOLD STILL",
+                        text = if (brenizerActive) "BRENIZER SWEEP (BETA) · DISTANT SCENES > 5 M" else "16 FRAMES · HOLD STILL",
                         style = Type.Label,
                         color = Ink.Muted,
                         modifier = Modifier
@@ -1896,17 +1906,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             .rotateLayout(-layout.handRotation)
                             .semantics { contentDescription = "super res hint" },
                     )
-                    MosaicPresetPill(
-                        preset = mosaicPreset,
-                        customOffered = false,
-                        oneShotOffered = caps?.supportsSuperRes == true,
-                        megapixels = presetMegapixels,
-                        onPreset = {
-                            Haptics.segment(view)
-                            mosaicPreset = it
-                        },
-                        modifier = Modifier.padding(bottom = 6.dp),
-                    )
+
                 }
 
                 // The ZSL shutter, for the ordinary modes and the one-shot
@@ -1929,10 +1929,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
                     fun lockAndQueue() {
                         val shot = ZslCapture.take(stream, frames)
-                        if (shot.count == 0) {
+                        if (shot.count == 0 || (canvas2x && shot.count != MosaicPreset.ONE_SHOT_FRAMES)) {
                             shot.close()
                             Haptics.reject(view)
-                            status = "ring empty: no frames buffered yet"
+                            status = if (canvas2x) "super res needs 16 ready frames" else "ring empty: no frames buffered yet"
                             return
                         }
                         Haptics.shutter(view)
@@ -1980,7 +1980,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 lockPending = false
                             }
                             if (zslStream !== stream) return@launch
-                            if (stream.readyFrames() < MIN_BURST_FRAMES.coerceAtMost(frames)) {
+                            if (stream.readyFrames() < (if (canvas2x) frames else MIN_BURST_FRAMES.coerceAtMost(frames))) {
                                 // The camera did not refill in the time the
                                 // frames take: the ring is dropping. Not a
                                 // photograph; say so.
@@ -2071,7 +2071,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             // this lens onto the 2x canvas, through the same
                             // queue as any shot.
                             if (superResPhase.selected) {
-                                if (mosaicPreset.isMosaic) {
+                                if (brenizerActive) {
                                     startSuperRes()
                                 } else if (superResPhase == SuperResMachine.Phase.ARMED && stream != null &&
                                     caps?.supportsSuperRes == true
@@ -2085,7 +2085,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
                             if (stream != null) {
                                 val plan = capturePlan
-                                takeZsl(stream, plan?.frames ?: burstFrames, plan?.resolved?.label ?: "ZSL", canvas2x = false)
+                                val canvas = dev.multiframe.camera.pipeline.SuperResPolicy.wantsCanvas(captureMode, digitalZoom, superResOffered)
+                                takeZsl(stream, if (canvas) MosaicPreset.ONE_SHOT_FRAMES else plan?.frames ?: burstFrames,
+                                    if (canvas) "SUPER RES" else plan?.resolved?.label ?: "ZSL", canvas2x = canvas)
                                 return@ShutterButton
                             }
 
@@ -2340,6 +2342,25 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 onDismiss = {
                     Haptics.segment(view)
                     showSettings = false
+                },
+                labs = if (!brenizerOffered) null else {
+                    {
+                        dev.multiframe.camera.ui.BrenizerLabs(
+                            preset = mosaicPreset,
+                            megapixels = presetMegapixels,
+                            enabled = !busy && superResPhase.controlsEnabled,
+                            onPreset = { mosaicPreset = it },
+                            onLaunch = {
+                                selectMode(CaptureMode.AUTO)
+                                mosaicReturnLens = lens
+                                brenizerActive = true
+                                superResPhase = SuperResMachine.Phase.ARMED
+                                captureMode = CaptureMode.AUTO
+                                zslWanted = true
+                                showSettings = false
+                            },
+                        )
+                    }
                 },
             ) {
                 SetOncePanel(
