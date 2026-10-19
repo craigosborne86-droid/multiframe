@@ -23,3 +23,10 @@ keystore.properties
 app/src/test/resources/dng_samples/**/*.dng
 app/src/test/resources/dng_samples/**/*.jpg
 app/src/test/resources/dng_samples/**/*.jpeg
+
+# Acceptance and forensics evidence (tens of GB; kept on disk, never versioned)
+work/
+
+# Personal agent settings and presentation material
+.codex/
+Multiframe_Pitch_Deck.pptx
