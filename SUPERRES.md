@@ -1,4 +1,11 @@
-# Super-resolution by telephoto mosaic
+# Brenizer Sweep (Beta) — Labs technology preview
+
+**V1 realignment, 19 September 2026:** this document describes the multi-tile
+experiment entered from Settings → Labs. Primary SUPER RES exclusively takes
+a stationary 16-frame burst through `SubPixel.cpp`, also requested at zoom ≥2×
+on capable streams. Older references here to a primary mode/preset describe
+the previous interface. The Labs label is `Brenizer Sweep (Beta) · Best on
+tripods or distant scenes (>5m)`.
 
 > **Is a feature like this possible?** Yes. It is well-founded rather than
 > speculative, the mathematics is exact rather than approximate, and the core
@@ -7,10 +14,20 @@
 
 ## The idea
 
-The 110mm lens sees a quarter of the width the 24mm lens does. Sweep it across
-the 24mm framing, stitch the frames, and you have that framing at roughly
-twenty times the pixel count — with no invented detail, because every pixel was
-measured by a sensor.
+Ryan Brenizer's bokeh panorama combines **overlapping, wide-aperture telephoto
+frames** into a wider view while retaining the telephoto lens's shallow depth
+of field. Focus, exposure and white balance stay locked across the grid; the
+camera should rotate as nearly as possible about the lens's entrance pupil so
+foreground and background do not shift against one another. Multiframe uses
+the longest RAW-capable telephoto lens at its fixed hardware aperture. A phone
+cannot open that aperture further or manufacture the technique's bokeh, so the
+strength of the shallow-depth-of-field effect depends on the actual lens and
+subject distance. The 2×2 and 3×3 guided grids remain in Settings → Labs.
+
+The telephoto lens also sees less of the scene per frame. Stitching those
+frames expands the field of view at high measured resolution, with no invented
+detail. The guidance grid provides overlap; image features and homographies,
+not the nominal grid coordinates, determine the final placement.
 
 This is not upscaling and it is not generative. It is the same thing an
 astronomer does with a mosaic, or a landscape photographer with a stitched

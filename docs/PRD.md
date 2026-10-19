@@ -1,7 +1,7 @@
 # Multiframe — Product Requirements Document
 
 **Version:** 1.0
-**Date:** 2026-09-10
+**Date:** 2026-09-19
 **Status:** Baseline — approved for Phase 1 execution
 
 ---
@@ -27,22 +27,22 @@ This is the product's core differentiator and is non-negotiable:
 - **No cloud processing.** No frames leave the device. No network permission is
   requested.
 - **No "computational photography" that invents detail.** The merge averages
-  measured samples. The super-resolution stitches measured tiles. The tone curve
+  measured samples. The super-resolution accumulates measured sub-pixel samples. The tone curve
   redistributes measured light. Each operation has a mathematical proof that its
   output is a function of its input and nothing else.
 
 The user promise: "If you see it in the picture, the sensor saw it in the scene."
 
-### 1.3 Competitive Positioning
+### 1.3 Rendering target
 
-| Axis | Stock OEM (Pixel Camera, Samsung Pro) | Adobe Project Indigo | Multiframe |
-|---|---|---|---|
-| Noise reduction | Neural network hallucination | Neural network (optional) | Temporal averaging of measured frames |
-| Dynamic range | Multi-frame HDR with tone fusion | Multi-frame HDR with local tone mapping | DCG bracketed merge + bilateral grid local tone map |
-| Super-resolution | AI upscaling | AI-assisted | Optical: telephoto tile stitching (Brenizer method) |
-| Output format | JPEG/HEIC, processed | DNG + JPEG | DNG (merged raw) + JPEG (developed) |
-| Manual control | Limited | Full (on import) | Full Camera2 manual exposure, focus, WB at capture |
-| Offline | Yes | No (cloud features) | Yes (zero network) |
+V1 targets natural SLR-like tonality: a filmic highlight shoulder, deep shadows
+that preserve scene mood, restrained colour, and organic fine texture. No flat
+HDR rendering, indiscriminate scene brightening, plastic smoothing or edge halos.
+Sensor-clipped neutral light sources must converge smoothly to neutral white.
+
+Primary super-resolution uses measured sub-pixel offsets within a stationary
+burst. The Brenizer mosaic is an experimental Labs feature. Earlier field-test
+notes below describe historical interfaces and do not override this specification.
 
 ### 1.4 Target Audience
 
@@ -307,85 +307,52 @@ settings each land where they should (walked on the Pixel 9 Pro XL).
 
 ---
 
-### 2.3 Guided Telephoto Super-Resolution (The Brenizer Engine)
+### 2.3 Single-viewpoint Super Res and experimental Brenizer Sweep
 
-#### 2.3.1 Concept
+#### 2.3.1 Zoom reconstruction in PHOTO and NIGHT
 
-Use the telephoto lens (longer focal length, higher per-pixel resolution) to
-capture a grid of tiles that, stitched together, cover the wide-angle lens's
-field of view at the telephoto's native resolution. This is the Brenizer method
-(panoramic bokeh) applied to resolution rather than depth of field.
+The only primary modes are PHOTO and NIGHT, with a slide-up PRO drawer.
+Rear zoom stops are 0.5×, 1×, 2×, 5× and 10× where the hardware can supply
+that field of view. A flip control selects the front camera. Prefer separately
+exposed center cameras when present; otherwise use runtime-advertised
+`CROPPED_RAW` for HAL-selected un-binning/remosaic. Availability is not proof
+that a given frame was un-binned: its `SCALER_RAW_CROP_REGION` is authoritative.
 
-Example: a 110mm telephoto covering a 24mm wide-angle framing produces a ~4.6x
-linear resolution gain. At 12 MP per tile and 49 tiles (7x7), the theoretical
-output is 263 MP. Practically, overlap reduces this; the default cap is 80 MP /
-610 MB working memory.
+Digital zoom and 2×/10× center cameras request a stationary 16-frame burst
+through `SubPixel.cpp` in either mode. Natural hand tremor supplies fractional
+sample phases. The 2× canvas has four times the source pixel count before any
+remaining framing crop; recovered detail depends on motion rejection and
+phase coverage. Retain the coverage fallback instead of promising 50 MP when
+the measured samples cannot support it. Zoom does not replace NIGHT's exposure
+policy with PHOTO's. Frames from different zoom/crop configurations cannot mix.
 
-#### 2.3.2 User-Selectable Matrices
+PRO reserves space below the fitted sensor image, including its focus ruler.
+The shutter remains visible and usable in both PRO states. Turning PRO on
+switches the sensor from AE to manual ISO and shutter at the latest live meter
+reading, and holds the current automatic white balance where AWB lock is
+advertised (otherwise it uses an advertised manual preset). Focus stays AF
+until its manual tab is used. Turning PRO off restores AE, AF, and AWB auto.
+The active image remains fully visible. Landscape metadata occupies an edge
+rail. Gallery review respects cutouts, swipes between captures, and zooms about
+the gesture centroid with pan bounds based on the fitted photograph.
 
-**Built (Phase 4), revised after four field tests.** `MosaicPreset`,
-remembered in `AppSettings.mosaicPreset`; `MosaicPlanner.planGrid`,
-`planRegion` and `planPreset`; the `1-SHOT · 50 MP | 2×2 · 33 MP | 3×3 · 75 MP`
-pill directly above the shutter while SUPER RES is armed, with each engine's
-megapixels from the planner on the lens in hand.
+Manual 1–6 s exposure applies to explicit still requests. Repeating preview
+is capped at 1/30 s; the hardware's readout limit still applies. A long burst's
+total capture time includes each requested exposure. A sensor performing a
+multi-second integration cannot simultaneously deliver fresh 30 fps preview.
+DNG orientation is derived from sensor orientation, facing and physical device
+rotation and written through `DngCreator.setOrientation`.
 
-**Two engines in one mode.** The pill's first preset, `1-SHOT`
-(`MosaicPreset.ONE_SHOT`), is not a mosaic: a single tap takes a sixteen-frame
-burst from the ring on whatever lens is up and accumulates it on the 2x
-sub-pixel canvas of §5.2 from the hand's own tremor -- four times the
-sensor's pixels, at any distance, with no stitching and no parallax, for the
-face, the table and the room the grids cannot do. It shoots through the
-same develop queue as any shot, and the readout says `· 2X` or why not. The
-grids are the telephoto engine, for the scene far enough that its tiles
-share a plane; the HUD says so under the count -- `BEST FOR SCENES > 3 M`
-for a grid, `ANY DISTANCE · HOLD STILL` for the one-shot -- and the lens
-strip stays offered for the one-shot alone. The `2X` set-once toggle that
-used to ask for the canvas on every ordinary shot is gone: the canvas is an
-engine of Super Res now, chosen where the other engines are.
+#### 2.3.2 Settings → Labs (Technology Previews)
 
-**The grid is angular, at thirty percent overlap.** Neighbouring nodes are
-seventy percent of the telephoto's field of view apart, horizontally and
-vertically -- `Δyaw = FOV_h × 0.70`, `Δpitch = FOV_v × 0.70` -- and the
-canvas is the plane those directions project onto, reaching the outermost
-tile's far edge plus a margin for aim. Thirty percent of every tile is shared
-with each neighbour whatever the lens, which is what registration and the
-blend need and what a hand-held aim inside the lock radius still leaves
-intact. `REFERENCE.md` §3.4.4.
+The multi-viewpoint experiment is labelled exactly:
+`Brenizer Sweep (Beta) · Best on tripods or distant scenes (>5m)`.
 
-**The mode is called SUPER RES.** It was MOSAIC, and before that "sweep" -- a
-sweep is a pan, and a pan is the blurred frame this mode exists to avoid. It
-is SUPER RES on every surface: the carousel, the pill, the settings, the
-enums (`CaptureMode.SUPER_RES`, `SuperResMachine`) and these documents; the
-canvas classes keep their `Mosaic*` names because that is what the object is.
-
-Four presets replace the fixed 7x7 grid:
-
-| Preset | Grid | Tiles | Use Case | Approx. Output |
-|---|---|---|---|---|
-| **1-Shot** | none (2x canvas) | 1 burst of 16 | Any distance: portraits, close-ups, everyday scenes; zero parallax | 4× the sensor: 50 MP on this device |
-| **Detail Boost** | 2x2 | 4 | Quick detail enhancement, handheld-friendly, scenes beyond ~3 m | ~33 MP |
-| **Large Format** | 3x3 | 9 | Medium-format equivalent, manageable, scenes beyond ~3 m | ~75 MP |
-| **Custom Bounding Box** | User-drawn | Variable | Full control over coverage area | Variable |
-
-**The mode is a first-class mode**, beside AUTO, NIGHT and ACTION in the
-carousel under the shutter, and its grids shoot with the longest lens that
-delivers raw (the one-shot shoots on the lens in hand). Selecting it *arms*
-it: for a grid the viewfinder switches to that lens and says so,
-the raw ring is switched on if it was off (the mode needs it and asks nobody
-to know that), the outline of the whole picture -- 1.65 frames across for a
-2x2, 2.3 for a 3x3 -- is drawn on the viewfinder with its tile nodes inside
-it, and the grid pill sits above the shutter so the grid can be chosen with
-its outline in view and the thumb already where it will press. Nothing has
-been taken. The shutter anchors the capture wherever the reticle points and
-the guidance begins; STOP, or the system back gesture, ends a running capture
-keeping what was taken and returns to armed; selecting another mode, or back
-while armed, returns to the lens and the ring setting the user came from. The
-mode is offered only where there is a longer raw lens, a ring, and an
-attitude sensor (§2.3.3), and is never the mode the app reopens in.
-
-Custom Bounding Box: planned (`MosaicPlanner.planRegion` is built and tested)
-and not on the pill. The region has to be drawn on a wider lens before the
-telephoto comes up, and that gesture is not yet designed into the mode.
+Labs contains the persisted 2×2 and 3×3 matrix selector and an explicit arm
+action. Arming uses the longest RAW lens, then returns to the viewfinder for
+the guided capture described below. It is a distinct Labs session, not a primary mode. It requires a RAW capture lens, a ZSL stream and attitude sensing.
+Custom region drawing remains unavailable. Multi-viewpoint captures can exhibit
+parallax on nearby subjects; they are not the single-viewpoint V1 engine.
 
 #### 2.3.3 Reticle/Dot Guidance System
 
@@ -456,7 +423,7 @@ STILL or HOLD STEADY ON THE DOT while it waits. `REFERENCE.md` §3.4.4.
 
 **This replaces the free-roam panning arrow concept.**
 
-When the capture begins (the shutter, with SUPER RES armed):
+When the capture begins (the shutter, with Brenizer Sweep armed from Labs):
 
 1. The viewfinder is already on the telephoto lens, from selecting the mode.
 2. One target dot is active at a time -- the nodes are taken top-left,

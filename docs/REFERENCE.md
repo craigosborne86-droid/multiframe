@@ -1,5 +1,55 @@
 # Multiframe — Engineering & Design Reference Pack
 
+## September 2026 camera fundamentals reset
+
+Current user-facing modes are PHOTO and NIGHT only. Old stored AUTO migrates
+to PHOTO; retired ACTION and SUPER_RES selections fall back to PHOTO. Historical
+phase notes below describe earlier interfaces and do not override this reset.
+
+- Rear lens stops: 0.5× / 1× / 2× / 5× / 10×, plus front/rear flip. Physical
+  center cameras are preferred where exposed. CameraCapabilities gates the
+  API 34 `CROPPED_RAW` stream use case. The HAL may un-bin at suitable zoom and
+  lighting; `SCALER_RAW_CROP_REGION` identifies each frame's actual field.
+- Zoom accumulation runs in both modes, preserving their exposure policy.
+  `RenderCrop` maps requested framing into the reported RAW region and crops
+  only after full development. It handles off-center HAL crops and avoids
+  double-cropping an un-binned center frame. The DNG retains measured RAW data.
+- Zoom changes invalidate readiness until metadata confirms the new request;
+  subsequent RAW crop changes restart the readiness window. A short 16-frame
+  canvas burst is refused, rather than mixing fields of view.
+- Tap focus copies the active request's exposure, WB, zoom and targets into
+  the one-shot AF trigger. AF/AE regions are separately capability-gated.
+  Zoom-ratio metering uses post-zoom coordinates; legacy crop requests map
+  into their sensor crop. Image bounds, display rotation and mirror are applied.
+- Long manual preview exposures are clamped to 33,333,333 ns; preview ISO
+  compensates within the sensor limit so the exposure aid remains usable. Explicit still
+  bursts use the requested duration and validate every locked timestamp against
+  their capture sequence. Preview resumes before development is queued. A
+  sensor cannot produce fresh preview during the same long integration.
+- Both CFA and sub-pixel robustness now use a finite-support weight. Let
+  `q = residual² / noiseEnvelope²`: weight is 1 for q ≤ 1,
+  `(4-q)/(3q)` for 1 < q < 4, and 0 for q ≥ 4. This removes the old nonzero
+  tail that could accumulate displaced silhouettes across many frames. The
+  sub-pixel envelope still includes interpolation uncertainty. Reference
+  samples keep unit weight; gain normalization remains black + (raw-black)/g.
+- Viewfinder sizing keeps a 45 dp turret and 322 dp console invariant in both
+  PRO states. The shutter occupies a permanent 130 dp band beneath the 43 dp
+  console header; only readouts beside it and controls below it swap. PRO,
+  histogram and optional manual rows never feed their measured heights back
+  into the preview.
+  Guides use actual surface bounds; landscape metadata stays on the edge rail.
+  Manual-focus peaking is composed in the preview's OpenGL draw from the same
+  latched camera texture. A multiscale sharpness check marks sparse resolving
+  detail in cyan at no more than 28% opacity. There is no timed RAW mask or
+  separately drawn peaking overlay to trail the live image.
+- Gallery uses HorizontalPager. Single-finger gestures pass to the pager at
+  scale 1; transformed images consume pan. Zoom uses centroid minus viewport
+  center, and pan limits use the fitted image dimensions, not letterbox space.
+- DNG orientation tags: 0°→1, 90°→6, 180°→3, 270°→8; the front-facing device
+  rotation sign is reversed. Both ordinary and canvas sidecar writers set it.
+
+
+
 **Version:** 1.0
 **Date:** 2026-09-10
 
@@ -115,7 +165,7 @@ not about the interface.
    only chromatic marks permitted over the photograph, and each is a
    *transient state about the photograph*: it appears when the thing is
    true and vanishes when it stops being true. `Peaking` is drawn in the
-   preview's bounds and orientation, from the sensor's own luma, while
+   preview's bounds and orientation, from the current preview frame, while
    manual focus is engaged and at no other time.
 
 ---
@@ -170,6 +220,8 @@ makes it testable (the helper can be a no-op in unit tests).
 object Haptics {
     fun shutter(view: View)    = view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
     fun tick(view: View)       = view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+    // dialDetent uses the device vibrator's predefined EFFECT_CLICK;
+    // see Theme.kt for the unsupported-device fallback.
     fun segment(view: View)    = view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK)
     fun reject(view: View)     = view.performHapticFeedback(HapticFeedbackConstants.REJECT)
     fun confirm(view: View)    = view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
@@ -183,11 +235,12 @@ object Haptics {
 | Shutter pressed | `onClick` on shutter button | `Haptics.shutter` | Strong confirmation: a photograph was taken. On the ZSL path it fires the moment after the frames are locked (`ZslCapture.take`, microseconds into the press), so the frames it could blur are already in the ring's hand and the develop that follows is not waited on; on the sequential path it fires at the press, before the burst starts. With the self-timer it fires at the press and the frames are locked when the countdown ends |
 | Shutter pressed, ring empty | `onClick` with no frame ready | `Haptics.reject` | Nothing was taken; the status says so |
 | Self-timer tick | Each countdown second | `Haptics.tick` | Light metronome, not distracting |
-| Mode toggle | GUARD, LOCAL TONE, HISTOGRAM, DNG, SUPER RES 1-SHOT/2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
+| Mode toggle | GUARD, LOCAL TONE, HISTOGRAM, DNG, Labs Brenizer 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
 | Cycle value | FRAMES, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
-| Mode selected | AUTO, NIGHT, ACTION or SUPER RES chosen in the carousel | `Haptics.segment` | A dial detent; selecting SUPER RES also switches the lens, which has the same detent |
+| Mode selected | PHOTO or NIGHT chosen in the carousel | `Haptics.segment` | A dial detent; arming Brenizer Sweep also switches the lens, which has the same detent |
 | Super Res stopped | STOP tapped, or the back gesture while running | `Haptics.segment` | Acknowledging the request; the stop itself lands a moment later and is not felt |
 | Slider at detent | ISO at round number (100, 200, ...), EV at 0 | `Haptics.tick` | Subtle stop point, not every pixel of drag |
+| Rangefinder manual dial | Each selected ISO, shutter, focus, frames or colour value | `Haptics.dialDetent` (`EFFECT_CLICK`) | A stronger, distinct click for each selected value; suppressed while a burst is in flight. Release coasts at most half a detent before snapping to the nearest value |
 | Lens switch | New lens selected in strip | `Haptics.segment` | Camera is physically switching |
 | Super Res anchored | First frame taken; the dots appear | `Haptics.segment` | The capture has begun; same detent as the lens switch that preceded it |
 | Super Res node taken | Reticle has held still on a dot through the stability gate, the fresh frames exposed after the lock are in hand and the node is done | `Haptics.confirm` | "Got it" — eyes are on the subject. Fires *after* the last fresh frame is exposed and the burst is snapshotted, never before or during: the frames a haptic could blur are already in hand. Nothing fires at the lock itself, which only begins the exposure. This is the photograph; nothing afterwards can un-take it |
@@ -197,7 +250,7 @@ object Haptics {
 | Mosaic complete | Every node captured | `Haptics.confirm` | The mosaic has finished itself |
 | Error action | Tapping a disabled control, invalid state | `Haptics.reject` | Something went wrong |
 | Settings open/close | The gear over the picture; DONE or the back gesture | (none) opening, `Haptics.segment` closing from DONE | Opening a screen is its own feedback; DONE is a control and gets the detent |
-| PRO drawer open/close | PRO beside the shutter; the back gesture | (none) | The drawer's slide is sufficient feedback |
+| PRO mode on/off | PRO in the console header; the back gesture | `Haptics.segment` | Changes actual AE and white-balance requests as well as the drawer |
 | Gallery delete confirmed | After confirmation dialog | `Haptics.confirm` | Acknowledge destructive action |
 
 #### 1.3.3 Anti-Patterns
@@ -240,9 +293,9 @@ and the fit.
 
 | Posture | When | Viewfinder | Controls |
 |---|---|---|---|
-| `PORTRAIT` | Tall window, phone upright | Fitted to the window's width, centred | The strip along the bottom |
-| `HAND_LANDSCAPE` | Tall window, phone on its side (device 90°/270°) | As portrait | The same strip -- from where the user stands its rows are a rail down their hand -- with every chip's words turned to read upright, box and all (`UprightInHand`, `Modifier.rotateLayout`) |
-| `SIDEBAR` | Window wider than tall (tablet, foldable open in landscape) | Fitted into the first two thirds | A rail down the last third on `Ink.Panel`, vertically centred |
+| `PORTRAIT` | Tall window, phone upright | Full bleed behind transparent system bars and fixed controls | The strip along the bottom |
+| `HAND_LANDSCAPE` | Tall window held sideways because the host has not rotated it | As portrait | Fallback: the strip's content turns with the hand (`UprightInHand`, `Modifier.rotateLayout`) |
+| `SIDEBAR` | Window wider than tall (phone landscape, tablet, foldable open in landscape) | Fitted into the first two thirds | A rail down the last third on `Ink.Panel`, vertically centred |
 | `TABLETOP` | `FoldingFeature` half-opened with a horizontal hinge | The pane above the hinge | The pane below it |
 
 #### 1.4.3 Foldable Support
@@ -256,31 +309,22 @@ other window. A phone reports no folding feature and is the flat case.
 
 #### 1.4.4 Orientation
 
-- **Portrait** is the primary layout. All current dimensions are designed for
-  portrait.
-- **On a phone the activity stays in portrait and the controls turn.** The
-  reference asked for a sidebar in landscape; what is built is the same
-  strip with its words turned (`HAND_LANDSCAPE`), and the reason is the
-  camera underneath it. The raw stream's preview surface, the tap-to-focus
-  mapping (`TouchFocus.regionAt`), the mosaic guidance's dots and the
-  peaking overlay all speak in the sensor's portrait frame; rotating the
-  window under them would rebuild the camera session on every turn of the
-  wrist (the surface is replaced) and re-derive every one of those
-  mappings for the display's rotation. Held sideways, the bottom strip *is*
-  a rail along the user's hand -- its rows are columns from where they
-  stand -- and all that was wrong was the words on their side. So each
-  chip's content turns by minus the hand's rotation and takes the shape
-  the turned words need (a chip is then taller than it is wide, the shape a
-  rail's button wants), and nothing else moves: the shutter stays under the
-  thumb it was under. The gauges, the status line, the lens chips' labels
-  and the thumbnail turn the same way. The manual drawer (PRO) does not
-  turn; its sliders are horizontal in either hand.
-- **A window that is itself landscape** -- a tablet, a foldable open flat --
-  gets the sidebar proper (`SIDEBAR`), viewfinder two thirds and controls
-  one third, as §1.4.1's `Expanded` row says.
-- `OrientationTracker` handles EXIF rotation and capture orientation
-  independently of UI orientation, as before; the same quarter turn now
-  also drives the layout.
+- The Activity requests `fullSensor` orientation and does not override
+  orientation configuration changes. Android recreates it on a quarter-turn;
+  CameraX use cases bind to the new display rotation and the RAW surface is
+  reopened. The capture UI uses `SIDEBAR` on a landscape phone, with the
+  preview fitted into the left two thirds and the controls in the right third.
+  PRO state, its selected tab, zebra, LONG EXP selection and digital zoom are
+  saveable across that recreation; capture settings are restored from
+  `AppSettings`.
+- `HAND_LANDSCAPE` is only a fallback when a host keeps a portrait window
+  while the physical device turns. It does not replace the landscape layout.
+- `OrientationTracker` continues to determine capture/EXIF rotation from the
+  physical device independently of the UI window.
+- The Camera2 RAW viewfinder composes peaking in the same GPU pass as its
+  `SurfaceTexture` image. The texture matrix supplies natural orientation;
+  `PeakingPreview` also applies the current display rotation in UV space.
+  A synthetic four-quadrant test checks the quarter-turn transform.
 
 ---
 
@@ -357,8 +401,8 @@ updates (e.g., DCG toggle appears once `supportsBracketing` is confirmed).
 | No ISO range | `SENSOR_INFO_SENSITIVITY_RANGE` null | Hide: DCG. No ISO bracketing possible. |
 | No `setRepeatingBurst` | `session.setRepeatingBurst()` throws | Disable DCG permanently for this device. Log warning. |
 | Single rear camera | `LensCatalog.rear(lenses).size <= 1` | Hide: lens strip, super-res. |
-| Telephoto has no RAW | `LensProfile.supportsRaw == false` for telephoto | `MosaicPlanner.captureLens` falls to the longest raw lens; with none, SUPER RES is not in the carousel. |
-| No attitude sensor | `MotionSensor.hasAttitude == false` | SUPER RES is not in the carousel: the guidance cannot run. |
+| Telephoto has no RAW | `LensProfile.supportsRaw == false` for telephoto | `MosaicPlanner.captureLens` falls to the longest raw lens; with none, Brenizer Sweep is absent from Labs. |
+| No attitude sensor | `MotionSensor.hasAttitude == false` | Brenizer Sweep is absent from Labs: the guidance cannot run. |
 | No OIS on telephoto | `LensProfile.hasOis == false` | Allow Super Res; the stability gate and the shutter floor are what hold the tile sharp. |
 | No distortion data | `LENS_DISTORTION` not reported | Skip distortion correction. Log. Mosaic stitching proceeds without. |
 | Low heap (< 256 MB) | `Runtime.maxMemory()` | Cap burst frames at 4, mosaic canvas at 20 MP. |
@@ -541,10 +585,13 @@ Merged CFA (uint16, Bayer-patterned)
   |
   v
 2. Hot pixel correction
-   For each pixel: if |value - median(same-color neighbors)| > threshold * range,
-     replace with median.
-   Operates on black-subtracted values. The threshold is in units of full scale.
-   Default threshold: 0.10 (10% of range).
+   Compare with the four same-colour neighbours two sites away, clamped at black.
+   Above their maximum by > threshold * range: replace with that maximum;
+   below their minimum by > threshold * range: replace with that minimum.
+   Read the unmodified source so replacements cannot propagate. The threshold
+   is in units of full scale; default 0.10. Both implementations meter the
+   original CFA before this prepass and retain original sensor clipping evidence.
+   This avoids small gain differences becoming large chroma threshold flips.
   |
   v
 3. Lens shading correction
@@ -552,6 +599,12 @@ Merged CFA (uint16, Bayer-patterned)
    shadingGain is bilinearly interpolated from the camera's lens shading map
    (STATISTICS_LENS_SHADING_CORRECTION_MAP).
    Applied per-channel (R, Gr, Gb, B have different shading profiles).
+   Camera2's `LensShadingMap.getGainFactor` uses R / green-even-row /
+   green-odd-row / B order independently of the CFA arrangement. `ShadingMap`
+   converts this once to spatial CFA-site order; DNG GainMap opcodes already
+   use site order. The RGB SuperRes develop converts back using the actual CFA.
+   The map is the remaining correction even when `SENSOR_INFO_LENS_SHADING_APPLIED`
+   is true; apply it once. Reference: Android `CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP`.
    Invariant: after this step, a uniform scene produces uniform pixel values.
   |
   v
@@ -659,6 +712,25 @@ Merged CFA (uint16, Bayer-patterned)
       native `Tone.h` mirrors the key.
    c. Contrast: S-curve applied after gamma encode. Slope at mid-grey =
       1 + 0.875 * contrast.
+   d. Sensor-clipped neutral recovery, after the linear tone chain and before
+      gamma/contrast (`SensorSaturation.kt`, `Tone.h`): read a sliding 2×2 CFA
+      cell containing R/Gr/Gb/B, or the three unbalanced canvas channels. With
+      per-channel black subtraction, let m = min((raw − black)/(white − black)).
+      Let S(x) = smoothstep(clamp((x − 0.70)/0.30, 0, 1)). For all-channel
+      clipping the weight is S(m). Also detect near-white partial clipping:
+      q = min(normalisedRaw * WB), p = max(normalisedRaw), and
+      C(p) = smoothstep(clamp((p − 0.90)/0.10, 0, 1)). Use
+      w = max(S(m), C(p) * S(q)), then C' = C + w(1 − C) for each rendered
+      linear colour channel. No shading, exposure or matrix participates in
+      the sensor evidence. White balance cannot trigger clipping by itself;
+      the second path requires a sensor channel near its physical ceiling.
+      A September tower cell measured B=.656, G=1, G=1, R=.743 of range:
+      with WB R=2.008 and B=1.513, all balanced channels approach white even
+      though only green clips. An all-channel-only mask left it pink.
+      Requiring bright companion channels protects single-channel-clipped
+      spectral flowers. Applying recovery after linear tone prevents the
+      matrix/local tone from recolouring or dimming the white. This does not
+      reconstruct saturated detail. Mirrored in CFA and 2× Kotlin/native paths.
   |
   v
 8. sRGB gamma encode
@@ -669,6 +741,12 @@ Merged CFA (uint16, Bayer-patterned)
   |
   v
 9. Chrominance smoothing (`ChromaSmooth.kt`, `Chroma.h`)
+   Read-back support is regularised: for chroma C, return
+   C + amount * (weightedSum − C * sumW) / max(sumW, 0.01).
+   This is the original weighted mean at normal support, fading toward the
+   pixel's own chroma when support vanishes. The former hard cutoff at 1e-6
+   let a one-code luma difference create a 31-code chroma jump in the September
+   ISO 918 fixture; the continuous fade protects isolated edges and parity.
    A joint bilateral on Cb = B − Y and Cr = R − Y, guided by luminance, at
    half resolution. The picture's Y, Cb, Cr are box-averaged 2×2; on that,
    two separable passes (rows, then columns) of 5 taps each replace each
@@ -715,12 +793,15 @@ Merged CFA (uint16, Bayer-patterned)
     3.5 code values), maxShift (20, from 28).
   |
   v
+12. Fused optics gather (distortion and lateral CA), then valid-region crop
+  |
+  v
 Output: 8-bit sRGB ARGB int array -> JPEG via libjpeg-turbo
 ```
 
 **The optics, and the border.** The geometric corrections -- Brown–Conrady
 undistortion and the lateral aberration rescale -- run as one fused gather
-on the sRGB buffer beside steps 10 and 11 (`Optics.kt`, `Optics.cpp`; the
+on the sRGB buffer after step 11 (`Optics.kt`, `Optics.cpp`; the
 compromise of running them there rather than after step 5 is stated on
 `Optics`). A gather that expands the field reads from beyond the frame
 along part of every edge, and a channel rescaled for aberration reads a
@@ -749,20 +830,16 @@ implementations together.
 
 - **After step 5, before step 6 (Phase 2):** Geometric lens distortion
   correction (Brown-Conrady undistortion) and lateral CA correction (per-channel
-  radial warp) -- currently beside steps 10–11, see above.
+  radial warp) -- currently after step 11, see above.
 - **Replacing step 5 (Phase 3):** Sub-pixel kernel accumulation, which produces
   full colour at 2x resolution and removes the demosaic entirely for bursts that
   take that path. See §3.6, and §3.6.5 for what the chain becomes.
 - **Before step 7 (built):** Bilateral-grid local tone mapping, §3.5: the
   pixel scaled by its neighbourhood's lift after step 6a and the exposure
   gain, before the roll-off.
-- **Step 4, near the clip (planned):** the white balance gain faded toward
-  one over the top three tenths of the sensor's scale. A site at the clip
-  read the clip and not the scene, and balancing it makes a clipped neutral
-  magenta: the tenth field test's sun is a pink disc with a pink fringe,
-  the stage 7b desaturation keyed on luminance reaching only two fifths of
-  the way to white for it. The fix belongs where the balance is applied, in
-  the prepass, and its three mirrored forms; not yet done.
+- **Step 7d (built, 19 September):** sensor-evidenced recovery replaces the
+  proposed near-clip WB fade. Fading WB alone cannot guarantee neutral after
+  a non-neutral matrix and local tone; recovery therefore follows linear tone.
 
 ### 3.2 Merge Accumulation Mathematics
 
@@ -893,9 +970,11 @@ even or a red sample lands on a green site, so a fraction is not something that
 merge can spend. The sub-pixel accumulation (§3.6) is the one consumer of
 `fracDx`, `fracDy`, and exists to spend them.
 
-The luma proxy is computed with `gainScale` normalization: `proxy_value = (raw /
-gainScale)`, so brightness differences from ISO bracketing don't confuse the SAD
-metric.
+The luma proxy sums each complete2×2 CFA cell and subtracts the sum of its
+R/G1/G2/B spatial black levels. That signal is divided by
+`4 * sensor.range * gainScale` before byte encoding, so exposure differences
+from ISO bracketing do not confuse SAD and unequal pedestals do not bias the
+guide. Native Bayer placement still uses even sensor-pixel shifts.
 
 Native (`Align.cpp`) and Kotlin (`Aligner.kt`) make every decision identically,
 including tie-breaking order, and `AlignerParityTest` holds them to zero
@@ -1018,6 +1097,15 @@ found by feature matching (FeatureMatcher) in overlapping regions.
 Estimation: Direct Linear Transform (DLT) with RANSAC for outlier rejection.
 4-point minimal solver, 500 iterations, inlier threshold = 3 pixels.
 
+The guided sweep registers each new proxy against neighbouring accepted
+tiles, not against an assumed grid position. A neighbour can itself have an
+erroneous attitude placement, so `MosaicAssembler` clusters the predicted
+tile homographies by four-corner agreement (two 3-pixel proxy-fit residual
+budgets), selects the group with the most verified inlier support, then
+refits from only that group's weighted corner positions. Averaging all
+pairwise predictions gave a 45-pixel placement error on the fixed DNG
+overlap case when one of two matches came from a misplaced neighbour.
+
 #### 3.4.2 Bundle Adjustment
 
 After individual pairwise homographies are estimated:
@@ -1041,6 +1129,15 @@ Optimization: Levenberg-Marquardt.
 **As built** (`Mosaic.cpp`, `MosaicCanvas.addTile(tile, transform, feathers)`).
 Burt and Adelson's construction, in the running-mean form the canvas already
 kept, so nothing new can overflow and the cost is an eighth again of the canvas.
+
+Before the seam cut or any pyramid level is accumulated, the new tile's
+overlapping samples are compared with the existing canvas. Their median
+luminance ratio gives one exposure gain for the whole tile; a scalar leaves
+the locked white balance unchanged and the median resists a small moving
+object. It is applied during full-resolution sampling and Gaussian-level
+construction without copying the tile. This is Brown and Lowe's gain
+compensation followed by multi-band blending: the broad exposure mismatch is
+removed before the bands feather residual differences.
 
 A tile's Laplacian band k is `G_k - up(G_{k+1})`: its Gaussian level less the
 next coarser one upsampled. Blending that band across tiles with a mask `M_k`
@@ -1637,7 +1734,8 @@ For each frame f, for each CFA sample s at sensor position (sx, sy):
         r  = robustness weight of s          as in 3.2
         w  = k * r
 
-        acc[c] (i,j)  += w * (value(s) / gainScale(f))
+        normalised = black(site(s)) + (value(s) - black(site(s))) / gainScale(f)
+        acc[c] (i,j)  += w * normalised
         wsum[c](i,j)  += w
 
 Resolve, per cell, per channel:
@@ -1645,7 +1743,8 @@ Resolve, per cell, per channel:
 ```
 
 Three things carry over from §3.2 unchanged: gain normalisation, so a DCG burst
-accumulates on one scale; robustness weighting, so a sample that disagrees with
+accumulates on one scale without scaling its CFA black pedestal (including
+the empirical noise comparison); robustness weighting, so a sample that disagrees with
 the reference contributes little; and the reference frame's guaranteed
 contribution, so a cell is never composed entirely of rejected samples.
 
@@ -1892,7 +1991,8 @@ developed to RGBA is 200 MB, which cannot be a Bitmap beside a 256 MB heap
 already holding a ring of raw frames. `LinearDevelop.cpp` develops the canvas
 in strips into three-byte RGB in a second anonymous mapping, releasing each
 strip of the canvas with `madvise(MADV_DONTNEED)` as it is consumed; sharpens
-that in place with the §3.1 operator on a band-local luma; and hands it to the
+that in place with the §3.1 operator on band-local luma, snapshotting every
+band's two outside halo rows before any worker can write; and hands it to the
 strip JPEG encoder (`Jpeg.h`), which writes to the descriptor `ImageSaver`
 opened. The pixels are written in the sensor's orientation and the EXIF
 orientation tag says which way is up, because turning fifty megapixels is a
@@ -2119,12 +2219,26 @@ a second a frame at half resolution:
     -Pmf.variants=old,current -Pmf.scale=half        # or full, or -Pmf.crop=x,y,w,h
 ```
 
-A tone change is judged on real photographs in seconds rather than after a
-build, an install and a walk outside. Full frames take the main lenses'
-geometry from §2.4's records (`BenchLenses`) and measure the aberration as
-the phone does, so a 100% crop is the phone's picture; without the resample
-the demosaic's own texture along a high-contrast edge shows, which the
-phone never shows.
+The default fixture directory (when `mf.out.dir` is supplied) is
+`app/src/test/resources/dng_samples/september/`: September DNGs pulled from
+`/sdcard/DCIM/Multiframe/`. Imported JPEGs and older DNGs are retained but not
+selected. Binary fixtures remain local and are not packaged by Gradle; shared
+DNG parsing and lens records are in `src/sharedTest/java`.
+
+The bench applies `adaptedTo(dng.iso)`, develops with optics disabled, then
+runs optics **after chroma smoothing, defringe and sharpening**, followed by the
+valid-region crop, matching production CFA ordering. `mf.crop=x,y,w,h` develops
+the full-resolution frame first, including full-frame exposure statistics and
+shading coordinates, then extracts the inspection window from the corrected
+valid image. Coordinates are unrotated. Half-scale CFA decimation is for tone
+iteration; use full scale for sharpness. Lens geometry comes from recorded
+main/telephoto models in `BenchLenses`; it is not recovered from the DNG and
+cannot prove parity with unrecorded optics or cached device CA estimates.
+
+`beforeclip,current` isolates the sensor-clipping recovery. Native comparison
+uses `SeptemberDevelopParityTest` with explicit staged fixtures, equal optics
+parameters and stated 8-bit tolerance, alongside the synthetic CFA/2× parity
+classes. These focused checks replace full-suite runs during tone iteration.
 
 **What it found, 17 September 2026, over fourteen DNGs of the eighth field
 test and the day after (a dog on a sofa and in a hallway, a rose in sun, a
@@ -2228,7 +2342,7 @@ with it.
 |---|---|
 | `Theme.kt` | `Ink` palette, `Type` scale, `Haptics` vocabulary, `MultiframeTheme` |
 | `Gauges.kt` | `GaugeState` holder and the live readouts: exposure, histogram, focus, zoom |
-| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`; the builders `chrome` (the one opener over the picture), `pro` (the manual drawer's opener beside the shutter), `settings` (the settings screen's chips: FRAMES, TIMER, DNG, GUIDES, HISTOGRAM, INFO), `carousel` (AUTO · NIGHT · ACTION · SUPER RES), `actions` (STOP, while a Super Res runs; nothing otherwise) |
+| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`; the builders `chrome` (the one opener over the picture), `pro` (the manual drawer's opener beside the shutter), `settings` (the settings screen's chips: FRAMES, TIMER, DNG, GUIDES, HISTOGRAM, INFO), `carousel` (PHOTO · NIGHT), `actions` (STOP, while a Super Res runs; nothing otherwise) |
 | `ControlChips.kt` | Composable rendering: `ChromeOpeners`, `SettingsChips`, `ModeCarousel`, `ActionStrip`, `ControlChip` |
 | `SettingsScreen.kt` | Everything set once, on a screen of its own: the settings chips and the set-once panel |
 | `ControlsPanel.kt` | `ManualPanel` -- exposure, focus, WB, in the PRO drawer over the bottom bar; `SetOncePanel` -- GUARD, LOCAL TONE, HEIF, reset, the capability summary, on the settings screen |

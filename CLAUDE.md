@@ -20,7 +20,7 @@ picture, the sensor saw it in the scene."
   back as the merge reads it, and its mapping outlives a close while a shot
   holds slots. Do not put the develop back on the shutter's path. See
   `docs/REFERENCE.md` §3.7.
-- **Exposure in AUTO:** the meter is bounded by a shutter cap (1/60 s,
+- **Exposure in PHOTO:** the meter is bounded by a shutter cap (1/60 s,
   `ShutterCap`) that takes the exposure by hand only when the meter overruns
   it and hands it back when it can. Do not lengthen `AUTO_EXPOSURE_NS` past
   the frame interval; that is no cap at all. The highlight guard carries a
@@ -67,6 +67,26 @@ picture, the sensor saw it in the scene."
   (`DevelopParams.withGain`, `Tone.h resolveShoulder`), so a clipped pixel
   is display white. A constant white point over nominal renders the clip
   grey and the whole picture hazy; do not put one back.
+- **Only PHOTO and NIGHT are primary modes.** Super-resolution is an automatic
+  zoom feature: 16 stationary ZSL frames feed the 2× `SubPixel.cpp` canvas for
+  digital zoom and sensor-center 2×/10× lenses in either mode. A runtime-gated
+  `CROPPED_RAW` stream lets the HAL select an un-binned center readout; honor
+  `SCALER_RAW_CROP_REGION` and never crop that result twice. Brenizer is Labs-only.
+- **The picture owns its viewport.** Reserve control and metadata bands from
+  window geometry, never drawer content; fit the entire sensor image above PRO.
+  Optional controls and histogram scroll inside the bottom band; landscape metadata stays on an edge.
+  AF/AE use actual image bounds, display orientation, front mirroring and zoom.
+- **Long exposure belongs to still requests.** Repeating manual exposure is
+  capped at 1/30 s. The long burst starts at the press and validates its exact
+  timestamps before handing frames to the develop queue; the sensor cannot
+  supply fresh preview images during a multi-second integration.
+- **Motion rejection has finite support.** Samples inside the noise envelope
+  retain full weight; beyond twice that residual radius their weight is zero.
+  Kotlin, scalar C++, NEON and sub-pixel accumulation must agree.
+- **Sensor clipping is measured before balance and shading.** All-channel
+  saturation fades smoothly to neutral white after the linear tone chain.
+  A clipped channel with near-white WB-balanced companions also fades;
+  isolated spectral-channel saturation must not bleach flowers. See REFERENCE §3.1 step 7d.
 - **The optics correction crops what it cannot read** (`LensDistortion.
   validInset`, `Optics.applyCropped`). Do not invent border pixels --
   repeating the edge made ribs, mirroring made reflections.
@@ -183,8 +203,9 @@ section 3.1:
 
 ```
 Black subtract -> Hot pixel -> Lens shading -> White balance -> Demosaic
--> Color matrix -> Purity compression -> [Local tone] -> Tone curve -> sRGB gamma
--> Chroma smooth -> Defringe -> Sharpen
+-> Color matrix -> Purity compression -> [Local tone] -> Tone curve
+-> Sensor-clipped neutral recovery -> sRGB gamma / Contrast
+-> Chroma smooth -> Defringe -> Sharpen -> Optics -> Valid-region crop
 ```
 
 Do not reorder these steps. Each operates on the output of the previous step.
@@ -219,7 +240,7 @@ this invariant.
   typography, haptics, hardware matrix, pipeline math. The "how."
 - **`CLAUDE.md`** (this file): System context and coding standards. The
   invariants that prevent regression.
-- **`SUPERRES.md`**: Telephoto mosaic super-resolution system documentation.
+- **`SUPERRES.md`**: Experimental Brenizer Sweep system documentation (Labs).
 - **`BASELINE.md`**: Performance baseline measurements and test methodology.
 
 When these documents and a code comment disagree, the document is correct and
