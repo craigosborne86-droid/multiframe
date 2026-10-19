@@ -234,7 +234,7 @@ object Haptics {
 |---|---|---|---|
 | Shutter pressed | `onClick` on shutter button | `Haptics.shutter` | Strong confirmation: a photograph was taken. On the ZSL path it fires the moment after the frames are locked (`ZslCapture.take`, microseconds into the press), so the frames it could blur are already in the ring's hand and the develop that follows is not waited on; on the sequential path it fires at the press, before the burst starts. With the self-timer it fires at the press and the frames are locked when the countdown ends |
 | Shutter pressed, ring empty | `onClick` with no frame ready | `Haptics.reject` | Nothing was taken; the status says so |
-| Self-timer tick | Each countdown second | `Haptics.tick` | Light metronome, not distracting |
+| Self-timer tick | Each countdown second but the last | `Haptics.tick` | Light metronome, not distracting. The last second is silent: the frames the timer locks are exposed in it |
 | Mode toggle | GUARD, LOCAL TONE, HISTOGRAM, DNG, Labs Brenizer 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
 | Cycle value | FRAMES, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
 | Mode selected | PHOTO or NIGHT chosen in the carousel | `Haptics.segment` | A dial detent; arming Brenizer Sweep also switches the lens, which has the same detent |
