@@ -193,15 +193,19 @@ fun SetOncePanel(
     ) {
         SectionLabel("Rendering")
 
-        Row {
+        Column {
             highlightGuard?.let { on ->
                 Toggle("GUARD ${if (on) "ON" else "OFF"}", on) { onHighlightGuard(!on) }
+                Text("Protects bright highlights during capture.", style = Type.Label,
+                    color = Ink.Muted, modifier = Modifier.padding(start = 4.dp, bottom = 12.dp))
             }
             // The bilateral-grid local tone operator. A rendering decision
             // rather than a shot decision: set once. On by default; the 2X
             // toggle that sat beside it is gone -- the 2x canvas is the
             // one-shot engine, chosen above the shutter in Super Res.
             Toggle("LOCAL TONE ${if (localTone) "ON" else "OFF"}", localTone) { onLocalTone(!localTone) }
+            Text("Lifts dark areas while keeping contrast and texture.", style = Type.Label,
+                color = Ink.Muted, modifier = Modifier.padding(start = 4.dp, bottom = 12.dp))
             // Only where the device can actually write one. A control that
             // silently produces JPEGs is worse than no control.
             outputFormat?.let { format ->

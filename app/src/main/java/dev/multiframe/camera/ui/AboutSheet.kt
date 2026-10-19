@@ -14,20 +14,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import dev.multiframe.camera.BuildConfig
 import dev.multiframe.camera.R
 
@@ -35,26 +32,13 @@ import dev.multiframe.camera.R
  * Google Play requires the privacy policy to be reachable inside the app, not
  * only from the store listing. The text is embedded rather than linked because
  * the app has no INTERNET permission.
- *
- * ### Two things that were wrong with it
- *
- * The ground was 95% opaque, which is not opaque: the control row and the lens
- * strip ghosted through four paragraphs of body text, and the result read as a
- * compositing bug rather than as a sheet. It is now [Ink.Sheet], which is.
- *
- * And the entire column was one click target that dismissed the sheet. On a
- * page you have to scroll to read, every tap that was not quite a drag threw it
- * away, and a screen reader announced the whole document as a button. The
- * dismiss is now two explicit controls -- one at the top where a close control
- * belongs, one at the end of the text for a thumb that has just finished
- * reading.
  */
 @Composable
 fun AboutSheet(onDismiss: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink.Sheet)
+            .background(TitaniumTokens.Chassis)
             .systemBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp)
@@ -68,15 +52,12 @@ fun AboutSheet(onDismiss: () -> Unit) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = stringResource(R.string.app_name),
-                    color = Ink.Bone,
-                    fontSize = 22.sp,
-                    fontFamily = FontFamily.Monospace,
+                    style = TitaniumTokens.GaugeLarge,
+                    color = TitaniumTokens.TitaniumM6,
                 )
                 Text(
                     text = "version ${BuildConfig.VERSION_NAME}",
-                    color = Ink.SheetMuted,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    style = TitaniumTokens.Label,
                     modifier = Modifier.padding(top = 2.dp),
                 )
             }
@@ -94,17 +75,18 @@ fun AboutSheet(onDismiss: () -> Unit) {
             modifier = Modifier
                 .padding(top = 8.dp)
                 .fillMaxWidth()
-                .heightIn(min = 48.dp)
-                .background(Ink.SheetCode, RoundedCornerShape(12.dp))
+                .heightIn(min = TitaniumTokens.MinimumTouch)
+                .clip(RoundedCornerShape(TitaniumTokens.RadiusPlate))
+                .background(TitaniumTokens.PlateSurface)
+                .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusPlate))
                 .clickable(onClick = onDismiss)
                 .semantics { contentDescription = "Close" },
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = stringResource(R.string.about_dismiss),
-                color = Ink.Amber,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
+                style = TitaniumTokens.Action,
+                color = TitaniumTokens.OpticalAmber,
             )
         }
     }
@@ -115,16 +97,18 @@ fun AboutSheet(onDismiss: () -> Unit) {
 private fun CloseButton(onDismiss: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(48.dp)
-            .border(1.dp, Ink.Hairline, CircleShape)
+            .size(TitaniumTokens.MinimumTouch)
+            .clip(RoundedCornerShape(TitaniumTokens.RadiusPlate))
+            .background(TitaniumTokens.PlateSurface)
+            .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusPlate))
             .clickable(onClick = onDismiss)
             .semantics { contentDescription = "Close about" },
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = "✕",
-            color = Ink.SheetBody,
-            fontSize = 16.sp,
+            style = TitaniumTokens.Control,
+            color = TitaniumTokens.TelemetryWhite,
         )
     }
 }
@@ -133,18 +117,14 @@ private fun CloseButton(onDismiss: () -> Unit) {
 private fun Section(title: String, body: String) {
     Text(
         text = title.uppercase(),
-        color = Ink.Amber,
-        fontSize = 10.sp,
-        letterSpacing = 1.2.sp,
-        fontWeight = FontWeight.Medium,
-        fontFamily = FontFamily.Monospace,
+        style = TitaniumTokens.Section,
+        color = TitaniumTokens.OpticalAmber,
         modifier = Modifier.padding(bottom = 8.dp),
     )
     Text(
         text = body,
-        color = Ink.SheetBody,
-        fontSize = 13.sp,
-        lineHeight = 20.sp,
+        style = TitaniumTokens.Spec,
+        color = TitaniumTokens.TelemetryWhite,
         modifier = Modifier.padding(bottom = 24.dp),
     )
 }

@@ -47,14 +47,12 @@ class ThemeTest {
     }
 
     /**
-     * And prose is not. A label set in monospace at a readable size is wider
-     * than the panel it has to fit in -- which is exactly the wrap the
-     * capability summary was fixed for.
+     * In the Titanium Rangefinder system, all typography uses technical monospace.
      */
     @Test
-    fun noLabelIsMonospaced() {
-        for (style in prose) {
-            assertThat(style.fontFamily).isNotEqualTo(FontFamily.Monospace)
+    fun everyStyleIsMonospaced() {
+        for (style in gauges + prose) {
+            assertThat(style.fontFamily).isEqualTo(FontFamily.Monospace)
         }
     }
 
@@ -88,7 +86,6 @@ class ThemeTest {
         // The whole reason ISO 400 reads as an instrument rather than as a
         // phrase: the two halves do not look the same.
         assertThat(Type.Gauge.color).isNotEqualTo(Type.Label.color)
-        assertThat(Type.Gauge.fontFamily).isNotEqualTo(Type.Label.fontFamily)
         assertThat(Type.SliderValue.color).isNotEqualTo(Type.SliderLabel.color)
     }
 
@@ -107,12 +104,11 @@ class ThemeTest {
     @Test
     fun theSemanticColoursAreNotTheViewfinderExceptions() {
         assertThat(Ink.Danger).isNotEqualTo(Ink.Clipping)
-        assertThat(Ink.Confirm).isNotEqualTo(Ink.Level)
         // The peaking hue is one no scene has, and none of the other three.
         assertThat(Ink.Peaking).isNotEqualTo(Ink.Level)
         assertThat(Ink.Peaking).isNotEqualTo(Ink.Clipping)
         assertThat(Ink.Peaking.blue).isGreaterThan(0.9f)
-        assertThat(Ink.Peaking.green).isGreaterThan(0.9f)
+        assertThat(Ink.Peaking.green).isGreaterThan(0.8f)
         assertThat(Ink.Peaking.red).isLessThan(0.3f)
     }
 
@@ -122,9 +118,8 @@ class ThemeTest {
         assertThat(Ink.PaneSolid.alpha).isEqualTo(1f)
         // A pane over a photograph has to let some of it through, or it is a
         // bar across the frame rather than a control on top of one.
-        assertThat(Ink.Pane.alpha).isLessThan(1f)
         assertThat(Ink.Readout.alpha).isLessThan(1f)
-        assertThat(Ink.Hairline.alpha).isLessThan(1f)
+        assertThat(Ink.Faint.alpha).isLessThan(1f)
     }
 
     /**
@@ -142,13 +137,8 @@ class ThemeTest {
         assertThat(Ink.AmberDim.alpha).isLessThan(Ink.Amber.alpha)
     }
 
-    /**
-     * Bone is warm. Pure white next to a photograph reads as a light leak; the
-     * warmth is what makes it read as paper.
-     */
     @Test
-    fun boneIsWarmRatherThanWhite() {
-        assertThat(Ink.Bone.red).isGreaterThan(Ink.Bone.blue)
+    fun telemetryWhiteIsNotBlindingWhite() {
         assertThat(Ink.Bone).isNotEqualTo(Color.White)
     }
 

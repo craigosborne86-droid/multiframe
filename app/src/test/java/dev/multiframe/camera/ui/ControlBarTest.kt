@@ -163,39 +163,18 @@ class ControlBarTest {
     // --- the carousel -----------------------------------------------------------
 
     @Test
-    fun theCarouselOffersAutoNightActionAndSuperResWhereTheHardwareAllows() {
-        assertThat(ids(ControlBar.carousel(fullyCapable))).containsExactly(
-            ControlBar.modeId(CaptureMode.AUTO), ControlBar.modeId(CaptureMode.NIGHT),
-            ControlBar.modeId(CaptureMode.ACTION), ControlBar.modeId(CaptureMode.SUPER_RES),
-        ).inOrder()
-        assertThat(ControlBar.carousel(fullyCapable).map { it.label }).containsExactly("AUTO", "NIGHT", "ACTION", "SUPER RES").inOrder()
+    fun theCarouselOffersOnlyPhotoAndNightOnEveryCamera() {
+        for (state in listOf(fullyCapable, bare)) {
+            assertThat(ControlBar.carousel(state).map { it.label }).containsExactly("PHOTO", "NIGHT").inOrder()
+        }
     }
 
     @Test
-    fun aPhoneWithNoLongerLensOrNoAttitudeIsOfferedNoSuperRes() {
-        assertThat(ids(ControlBar.carousel(fullyCapable.copy(superResOffered = false))))
-            .doesNotContain(ControlBar.modeId(CaptureMode.SUPER_RES))
-    }
-
-    @Test
-    fun withoutARingThereIsOnlyAutoAndNoCarouselToDraw() {
-        // The burst modes are plans for the ring; a phone without one has
-        // AUTO, which is not a choice. `ModeCarousel` draws nothing for a
-        // list of one.
-        assertThat(ids(ControlBar.carousel(bare))).containsExactly(ControlBar.modeId(CaptureMode.AUTO))
-    }
-
-    @Test
-    fun theSelectedModeIsTheHeavyOneAndAutoCarriesWhatItSettledOn() {
-        val night = ControlBar.carousel(fullyCapable.copy(mode = "NIGHT"))
-        assertThat(night.single { it.active }.label).isEqualTo("NIGHT")
-        // AUTO's reading is what the scene made of it, shown only on AUTO.
-        val auto = ControlBar.carousel(fullyCapable.copy(mode = "AUTO", resolvedMode = "NIGHT"))
-        assertThat(auto.single { it.id == ControlBar.modeId(CaptureMode.AUTO) }.value).isEqualTo("NIGHT")
-        assertThat(auto.single { it.id == ControlBar.modeId(CaptureMode.NIGHT) }.value).isNull()
-        // Settled on itself: no reading.
-        val plain = ControlBar.carousel(fullyCapable.copy(mode = "AUTO", resolvedMode = "AUTO"))
-        assertThat(plain.single { it.id == ControlBar.modeId(CaptureMode.AUTO) }.value).isNull()
+    fun selectedModeIsTheHeavyOne() {
+        for (mode in CaptureMode.entries) {
+            assertThat(ControlBar.carousel(fullyCapable.copy(mode = mode.label)).single { it.active }.label)
+                .isEqualTo(mode.label)
+        }
     }
 
     @Test
@@ -313,6 +292,7 @@ class ControlBarTest {
     @Test
     fun burstSizesNeverExceedWhatTheRingCanHold() {
         assertThat(ControlBar.burstStepsUpTo(10)).containsExactly(1, 2, 4, 8).inOrder()
+        assertThat(ControlBar.burstStepsUpTo(32)).containsExactly(1, 2, 4, 8, 12, 16, 24, 28).inOrder()
         // A ring too small for even the smallest step still has to offer one.
         assertThat(ControlBar.burstStepsUpTo(0)).containsExactly(1)
     }
@@ -321,6 +301,8 @@ class ControlBarTest {
     fun burstCyclingWrapsAndStaysWithinTheCeiling() {
         assertThat(ControlBar.nextBurst(4, 10)).isEqualTo(8)
         assertThat(ControlBar.nextBurst(8, 10)).isEqualTo(1)
+        assertThat(ControlBar.nextBurst(24, 32)).isEqualTo(28)
+        assertThat(ControlBar.nextBurst(28, 32)).isEqualTo(1)
         // A count above the ceiling -- the ring shrank under it -- drops back
         // to a legal one rather than wrapping from a position that is not there.
         assertThat(ControlBar.nextBurst(32, 10)).isEqualTo(1)

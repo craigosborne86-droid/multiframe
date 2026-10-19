@@ -34,26 +34,15 @@ import kotlin.math.roundToInt
  * the device's turn and the fold in, a [CameraLayout] out -- so every
  * arrangement can be held on the JVM without a phone to turn.
  *
- * ### Why the window stays portrait on a phone and the controls turn
+ * ### Rotation
  *
- * `REFERENCE.md` §1.4 asks for a sidebar of controls in landscape. On a
- * phone the activity stays in portrait (the manifest's lock) and the
- * controls *turn* instead: the raw stream, the tap-to-focus mapping, the
- * mosaic guidance and the peaking overlay all speak in the sensor's
- * portrait frame, and rotating the window under them would rebuild the
- * camera session on every turn of the wrist and re-derive every one of
- * those mappings for the display's rotation. Held sideways, the bottom
- * strip of controls *is* a rail along the user's right or left hand -- its
- * rows are columns from where the user stands -- and all that is wrong is
- * that the words in it are on their side. So each chip's content turns to
- * read upright ([UprightInHand], [rotateLayout]) and takes the shape the
- * turned words need, and nothing else moves: the shutter stays under the
- * thumb it was under. A window that is itself wider than it is tall -- a
- * tablet, a foldable open flat in landscape -- gets the sidebar proper
- * ([Posture.SIDEBAR]): the viewfinder in the first two thirds, the controls
- * in a column down the last third. A foldable half-opened on a table
- * ([Posture.TABLETOP]) puts the viewfinder above the hinge and the controls
- * below it, where the camera's own rules would put them.
+ * The Activity follows all four sensor orientations. A wide window, including
+ * a phone in landscape, gets [Posture.SIDEBAR]: the viewfinder in the first
+ * two thirds and the controls in the last third. Android recreates the
+ * Activity on a quarter-turn so the camera use cases bind with the new target
+ * rotation. [Posture.HAND_LANDSCAPE] remains a fallback for a host that keeps
+ * a portrait window while the physical device turns. A half-opened foldable
+ * with a horizontal hinge uses [Posture.TABLETOP].
  */
 enum class Posture {
     /** A tall window, the phone upright: controls in a strip along the bottom. */
@@ -113,7 +102,11 @@ object CameraLayouts {
             return CameraLayout(Posture.TABLETOP, cls, 0, 0.dp, fold.hingeTopPx, fold.hingeBottomPx)
         }
         if (widthDp > heightDp) {
-            return CameraLayout(Posture.SIDEBAR, cls, 0, (widthDp * RAIL_SHARE).dp, 0, 0)
+            // A tall phone turned sideways has more letterbox width than a
+            // tablet. Give that spare run to the instrument rail, while
+            // retaining a full 4:3 photographic rectangle beside it.
+            val rail = maxOf(widthDp * RAIL_SHARE, widthDp - heightDp * 4f / 3f)
+            return CameraLayout(Posture.SIDEBAR, cls, 0, rail.dp, 0, 0)
         }
         val turned = turn == 90 || turn == 270
         return CameraLayout(if (turned) Posture.HAND_LANDSCAPE else Posture.PORTRAIT, cls, if (turned) turn else 0, 0.dp, 0, 0)

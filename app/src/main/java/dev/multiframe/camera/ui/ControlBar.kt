@@ -1,6 +1,7 @@
 package dev.multiframe.camera.ui
 
 import dev.multiframe.camera.pipeline.CaptureMode
+import dev.multiframe.camera.pipeline.FrameCountPolicy
 import dev.multiframe.camera.pipeline.SuperResMachine
 
 /**
@@ -109,7 +110,7 @@ data class ControlBarState(
     val proOpen: Boolean = false,
     val aboutOpen: Boolean = false,
     /** The selected capture mode, by label. */
-    val mode: String = "AUTO",
+    val mode: String = "PHOTO",
     /** What AUTO settled on for this scene, when it settled on something other than itself. */
     val resolvedMode: String? = null,
     /**
@@ -196,16 +197,14 @@ object ControlBar {
         else CaptureMode.entries.firstOrNull { it.name == id.removePrefix(MODE_PREFIX) }
 
     /** Burst sizes offered, filtered against what the ring can actually hold. */
-    val BURST_STEPS = listOf(1, 2, 4, 8, 12, 16, 24, 28, 32)
+    val BURST_STEPS = FrameCountPolicy.STEPS
 
     fun burstStepsUpTo(ceiling: Int): List<Int> =
-        BURST_STEPS.filter { it <= ceiling }.ifEmpty { listOf(1) }
+        FrameCountPolicy.stepsUpTo(ceiling)
 
     /** The next burst size, wrapping. */
     fun nextBurst(current: Int, ceiling: Int): Int {
-        val steps = burstStepsUpTo(ceiling)
-        val here = steps.indexOf(current)
-        return if (here < 0) steps.first() else steps[(here + 1) % steps.size]
+        return FrameCountPolicy.next(current, ceiling)
     }
 
     /** The next self-timer delay, wrapping. */
@@ -335,21 +334,7 @@ object ControlBar {
         )
     }
 
-    /**
-     * The mode carousel under the shutter: AUTO, NIGHT, ACTION, SUPER RES.
-     *
-     * The modes are what a photographer changes between shots, and they were
-     * a chip in the top row that cycled on each tap -- three taps to get from
-     * NIGHT back to AUTO, reading the label each time. Laid out, every mode
-     * is one tap away and the selected one is the heavy one. AUTO carries
-     * what it settled on as its reading, so the user sees the camera's
-     * decision without having to make it.
-     *
-     * NIGHT and ACTION are plans for the ring and are not offered without one;
-     * SUPER RES is offered where there is a longer lens to take the tiles
-     * with and an attitude sensor to guide them. A phone with neither has an
-     * AUTO that is not a choice, and no carousel is drawn for it.
-     */
+    /** PHOTO and NIGHT remain separate from automatic zoom reconstruction and Labs. */
     fun carousel(state: ControlBarState): List<ControlSpec> = buildList {
         // Switching mode reconfigures the capture; not while one is in flight.
         val settled = !state.busy && state.superRes.controlsEnabled
@@ -361,14 +346,8 @@ object ControlBar {
             active = state.mode == m.label,
             enabled = settled,
         )
-        add(mode(CaptureMode.AUTO, state.resolvedMode?.takeIf { it != "AUTO" && state.mode == "AUTO" }))
-        if (state.streamOffered) {
-            add(mode(CaptureMode.NIGHT))
-            add(mode(CaptureMode.ACTION))
-        }
-        if (state.superResOffered || state.superRes.selected) {
-            add(mode(CaptureMode.SUPER_RES))
-        }
+        add(mode(CaptureMode.PHOTO))
+        add(mode(CaptureMode.NIGHT))
     }
 
     /**

@@ -127,9 +127,9 @@ class GaugeState {
  * camera's own dial stops saying `1/4` and starts saying `0.5"`. Kept out of the
  * composable so the formatting can be tested without one.
  */
-fun shutterLabel(exposureNs: Long): String {
+fun shutterLabel(exposureNs: Long, locale: java.util.Locale = java.util.Locale.getDefault()): String {
     val seconds = exposureNs / 1_000_000_000.0
-    return if (seconds >= 0.4) "%.1fs".format(seconds)
+    return if (seconds >= 0.4) "%.1fs".format(locale, seconds)
     else "1/${(1.0 / seconds).toInt()}"
 }
 

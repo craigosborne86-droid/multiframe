@@ -42,7 +42,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.app.ActivityCompat
 import dev.multiframe.camera.R
@@ -182,7 +181,7 @@ fun OnboardingScreen(step: OnboardingState.Step, onPrimary: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink.Sheet)
+            .background(TitaniumTokens.Chassis)
             .systemBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 28.dp)
@@ -192,36 +191,37 @@ fun OnboardingScreen(step: OnboardingState.Step, onPrimary: () -> Unit) {
     ) {
         Text(
             text = stringResource(R.string.app_name),
-            color = Ink.Bone,
-            fontSize = 22.sp,
-            fontFamily = FontFamily.Monospace,
+            style = TitaniumTokens.GaugeLarge,
+            color = TitaniumTokens.TitaniumM6,
         )
         Spacer(Modifier.heightIn(min = 28.dp))
         Text(
             text = stringResource(R.string.onboarding_mission),
-            color = Ink.SheetBody,
-            fontSize = 18.sp,
-            lineHeight = 26.sp,
+            style = TitaniumTokens.IntroBody,
+            color = TitaniumTokens.TelemetryWhite,
             modifier = Modifier.semantics { contentDescription = "mission statement" },
         )
 
         Spacer(Modifier.heightIn(min = 36.dp))
-        Text(text = stringResource(R.string.onboarding_camera_heading), style = Type.Section, color = Ink.Muted)
+        Text(text = stringResource(R.string.onboarding_camera_heading), style = TitaniumTokens.Section, color = TitaniumTokens.OpticalAmber)
         Text(
             text = stringResource(R.string.onboarding_camera_body),
-            color = Ink.SheetBody, fontSize = 14.sp, lineHeight = 21.sp,
+            style = TitaniumTokens.Spec,
+            color = TitaniumTokens.TelemetryWhite,
             modifier = Modifier.padding(top = 6.dp),
         )
         Spacer(Modifier.heightIn(min = 20.dp))
-        Text(text = stringResource(R.string.onboarding_storage_heading), style = Type.Section, color = Ink.Muted)
+        Text(text = stringResource(R.string.onboarding_storage_heading), style = TitaniumTokens.Section, color = TitaniumTokens.OpticalAmber)
         Text(
             text = stringResource(R.string.onboarding_storage_body),
-            color = Ink.SheetBody, fontSize = 14.sp, lineHeight = 21.sp,
+            style = TitaniumTokens.Spec,
+            color = TitaniumTokens.TelemetryWhite,
             modifier = Modifier.padding(top = 6.dp),
         )
         Text(
             text = stringResource(R.string.onboarding_network_body),
-            color = Ink.SheetMuted, fontSize = 14.sp, lineHeight = 21.sp,
+            style = TitaniumTokens.Spec,
+            color = TitaniumTokens.TelemetryDim,
             modifier = Modifier.padding(top = 6.dp),
         )
 
@@ -232,7 +232,8 @@ fun OnboardingScreen(step: OnboardingState.Step, onPrimary: () -> Unit) {
                     if (step == OnboardingState.Step.DENIED) R.string.onboarding_denied
                     else R.string.onboarding_denied_permanently,
                 ),
-                color = Ink.Bone, fontSize = 14.sp, lineHeight = 21.sp,
+                style = TitaniumTokens.Spec,
+                color = TitaniumTokens.Danger,
                 modifier = Modifier.semantics { contentDescription = "camera refused" },
             )
         }
@@ -245,14 +246,13 @@ fun OnboardingScreen(step: OnboardingState.Step, onPrimary: () -> Unit) {
                 else -> R.string.onboarding_continue
             },
         )
-        // The one button: a pill, filled, the weight of a selected thing.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 420.dp)
-                .heightIn(min = 52.dp)
-                .background(Ink.Bone, RoundedCornerShape(26.dp))
-                .border(1.dp, Ink.Bone, RoundedCornerShape(26.dp))
+                .heightIn(min = TitaniumTokens.MinimumTouch)
+                .background(TitaniumTokens.PlateSurface, RoundedCornerShape(TitaniumTokens.RadiusPlate))
+                .border(TitaniumTokens.Hairline, TitaniumTokens.OpticalAmber, RoundedCornerShape(TitaniumTokens.RadiusPlate))
                 .clickable {
                     Haptics.segment(view)
                     onPrimary()
@@ -260,7 +260,7 @@ fun OnboardingScreen(step: OnboardingState.Step, onPrimary: () -> Unit) {
                 .semantics { contentDescription = label },
             contentAlignment = Alignment.Center,
         ) {
-            Text(text = label, style = Type.Control, color = Ink.OnBone)
+            Text(text = label, style = TitaniumTokens.Action, color = TitaniumTokens.OpticalAmber)
         }
     }
 }

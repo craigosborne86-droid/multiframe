@@ -10,6 +10,21 @@ import org.junit.Test
 class CameraLayoutsTest {
 
     @Test
+    fun `tap mapping follows the visible source crop on a tall phone`() {
+        val sourceAspect = 3f / 4f
+        val viewportAspect = 9f / 20f
+        val (left, top) = centerCroppedPoint(0f, 0f, sourceAspect, viewportAspect)
+        val (middleX, middleY) = centerCroppedPoint(.5f, .5f, sourceAspect, viewportAspect)
+        val (right, bottom) = centerCroppedPoint(1f, 1f, sourceAspect, viewportAspect)
+        assertThat(left).isWithin(.0001f).of(.2f)
+        assertThat(right).isWithin(.0001f).of(.8f)
+        assertThat(top).isEqualTo(0f)
+        assertThat(bottom).isEqualTo(1f)
+        assertThat(middleX).isEqualTo(.5f)
+        assertThat(middleY).isEqualTo(.5f)
+    }
+
+    @Test
     fun `a phone upright is the portrait strip whatever its aspect`() {
         for ((w, h) in listOf(360f to 640f, 393f to 852f, 412f to 915f, 384f to 896f)) {
             val layout = CameraLayouts.decide(w, h, 0, null)
@@ -35,7 +50,13 @@ class CameraLayoutsTest {
     }
 
     @Test
-    fun `a wide window gets the sidebar, a third of it, and its width class`() {
+    fun `a wide window reserves the spare space beside a 4 by 3 photo for its rail`() {
+        // The phone window itself rotates: 952×427 dp on the UI emulator.
+        // Physical orientation must not turn controls a second time.
+        val landscapePhone = CameraLayouts.decide(952f, 427f, 90, null)
+        assertThat(landscapePhone.posture).isEqualTo(Posture.SIDEBAR)
+        assertThat(landscapePhone.handRotation).isEqualTo(0)
+        assertThat(landscapePhone.railWidth.value).isWithin(.5f).of(952f - 427f * 4f / 3f)
         val tablet = CameraLayouts.decide(1280f, 800f, 0, null)
         assertThat(tablet.posture).isEqualTo(Posture.SIDEBAR)
         assertThat(tablet.windowClass).isEqualTo(WindowClass.WIDE)

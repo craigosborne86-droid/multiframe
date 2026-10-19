@@ -18,9 +18,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import dev.multiframe.camera.pipeline.Attitude
@@ -172,72 +169,6 @@ fun Histogram(
                 ),
             )
         }
-    }
-}
-
-/**
- * Focus peaking overlay.
- *
- * Marks where the image is resolving detail, drawn straight from a small edge
- * map rather than as thousands of individual shapes: at one rectangle per
- * marked pixel a 500-wide map would be tens of thousands of draw calls a
- * second. An ImageBitmap is one.
- *
- * Shown only while manual focus is engaged, because that is the only time it
- * answers a question the user is asking. In [Ink.Peaking], the cyan every
- * camera with a focus ring uses: a hue no scene has, so an edge lit by it is
- * unmistakably the overlay's and not the picture's.
- *
- * The mask is read from the sensor, in the sensor's orientation; the picture
- * is drawn in the display's. The mask is turned through [sensorOrientation]
- * as it is turned into an image -- the same mapping a focus tap goes through
- * the other way -- so an edge lands on the edge it was found at. The first
- * version drew the landscape mask straight onto the portrait screen, which
- * put every edge on the wrong side of the picture.
- */
-@Composable
-fun Peaking(
-    mask: ByteArray?,
-    maskWidth: Int,
-    maskHeight: Int,
-    modifier: Modifier = Modifier,
-    colour: Color = Ink.Peaking,
-    sensorOrientation: Int = 0,
-) {
-    if (mask == null || maskWidth <= 0 || maskHeight <= 0) return
-    if (mask.size < maskWidth * maskHeight) return
-
-    val image = remember(mask, maskWidth, maskHeight, sensorOrientation) {
-        val swaps = ((sensorOrientation % 360) + 360) % 360 % 180 != 0
-        val outW = if (swaps) maskHeight else maskWidth
-        val outH = if (swaps) maskWidth else maskHeight
-        val pixels = IntArray(outW * outH)
-        // Colour components, so only the alpha varies per pixel.
-        val base = colour.toArgb() and 0x00FFFFFF
-        for (y in 0 until outH) {
-            val fy = (y + 0.5f) / outH
-            for (x in 0 until outW) {
-                val (sx, sy) = dev.multiframe.camera.pipeline.TouchFocus.toSensorFraction((x + 0.5f) / outW, fy, sensorOrientation)
-                val mx = (sx * maskWidth).toInt().coerceIn(0, maskWidth - 1)
-                val my = (sy * maskHeight).toInt().coerceIn(0, maskHeight - 1)
-                val strength = mask[my * maskWidth + mx].toInt() and 0xFF
-                // Transparent where nothing is resolving, so the picture shows
-                // through everywhere the overlay has nothing to say.
-                pixels[y * outW + x] = (strength shl 24) or base
-            }
-        }
-        android.graphics.Bitmap.createBitmap(
-            pixels, outW, outH, android.graphics.Bitmap.Config.ARGB_8888,
-        ).asImageBitmap()
-    }
-
-    Canvas(modifier = modifier.fillMaxSize()) {
-        drawImage(
-            image = image,
-            dstSize = androidx.compose.ui.unit.IntSize(
-                size.width.toInt(), size.height.toInt(),
-            ),
-        )
     }
 }
 
@@ -521,10 +452,10 @@ fun MosaicPresetPill(
         for (option in options) {
             val selected = option == preset
             val badge = megapixels[option]?.let { "%.0f MP".format(it) }
-            val description = "super res ${option.label}" + (badge?.let { " · $it" } ?: "")
+            val description = "${if (oneShotOffered) "super res" else "Brenizer Sweep"} ${option.label}" + (badge?.let { " · $it" } ?: "")
             Row(
                 modifier = Modifier
-                    .defaultMinSize(minWidth = 48.dp, minHeight = 42.dp)
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                     .background(if (selected) Ink.Bone else Color.Transparent, RoundedCornerShape(21.dp))
                     .clickable { onPreset(option) }
                     .semantics { contentDescription = description }
