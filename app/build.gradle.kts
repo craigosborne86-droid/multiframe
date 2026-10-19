@@ -94,8 +94,8 @@ android {
         buildConfig = true
     }
 
-    sourceSets.getByName("test").java.srcDir("src/sharedTest/java")
-    sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/java")
+    sourceSets.getByName("test").kotlin.srcDir("src/sharedTest/java")
+    sourceSets.getByName("androidTest").kotlin.srcDir("src/sharedTest/java")
 
     // Local camera fixtures are read in place by the bench, never packaged/copied by Gradle.
     sourceSets.getByName("test").resources.setSrcDirs(listOf("src/test/resources/jvm"))
@@ -109,8 +109,13 @@ android {
             if (project.findProperty("mf.out.dir") != null && project.findProperty("mf.dng.dir") == null) {
                 test.systemProperty("mf.dng.dir", project.file("src/test/resources/dng_samples/september").absolutePath)
             }
-            listOf("mf.dng.dir", "mf.out.dir", "mf.variants", "mf.crop", "mf.scale").forEach { key ->
+            listOf("mf.dng.dir", "mf.out.dir", "mf.variants", "mf.crop", "mf.scale", "mf.mosaic", "mf.stages", "mf.burst.dir", "mf.burst.out", "mf.burst.sr", "mf.burst.quant", "mf.burst.noise", "mf.burst.refine").forEach { key ->
                 project.findProperty(key)?.let { test.systemProperty(key, it.toString()) }
+            }
+            // Opt-in ARM64 desktop replay; never changes the device APK/runtime.
+            project.findProperty("mf.host.lib")?.let {
+                test.jvmArgs("-Djava.library.path=$it")
+                test.maxHeapSize = "4g"
             }
         }
     }

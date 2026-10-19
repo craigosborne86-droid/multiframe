@@ -5,6 +5,10 @@ import dev.multiframe.camera.pipeline.DevelopParams
 import dev.multiframe.camera.pipeline.Optics
 import dev.multiframe.camera.pipeline.RawDeveloper
 import dev.multiframe.camera.pipeline.Sharpen
+import dev.multiframe.camera.pipeline.Homography
+import dev.multiframe.camera.pipeline.MosaicAssembler
+import dev.multiframe.camera.pipeline.Plane
+import dev.multiframe.camera.pipeline.FeatureMatcher
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.awt.image.BufferedImage
@@ -27,7 +31,7 @@ import javax.imageio.ImageWriteParam
  *         -Pmf.variants=current,indigo -Pmf.scale=half
  *
  * `mf.scale` is `half` (every other CFA cell, for tone) or `full`;
- * `mf.crop=x,y,w,h` develops one full-resolution window instead, for detail.
+ * `mf.crop=x,y,w,h` develops the full-resolution frame, then crops for detail.
  * Optics follows chroma/defringe/sharpen, exactly as RawBurstCapture.
  * Crop coordinates refer to the corrected, valid, unrotated full-resolution image.
  */
@@ -38,8 +42,9 @@ class DngDevelopBench {
         val VARIANTS: Map<String, DevelopParams> = linkedMapOf(
             // What the app ships: DevelopParams' defaults with the LOCAL TONE control on.
             "current" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON),
-            // The calibration of 17 September before this one: no shadow lift, no purity compression.
+            // Same pipeline with only sensor-clipping recovery disabled.
             "beforeclip" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, shadowLift = DevelopParams.SHADOW_LIFT_ON),
+            // Earlier calibration: no shadow lift or purity compression.
             "cal1" to DevelopParams(localTone = DevelopParams.LOCAL_TONE_ON, purityThreshold = 0f),
             // The rendering of the eighth field test, kept so the change can be seen.
             "old" to DevelopParams(localTone = 0.5f, highlightTarget = 0.62f, contrast = 0.30f, purityThreshold = 0f,
@@ -129,25 +134,79 @@ class DngDevelopBench {
                 // variant that sets meteredGain itself (negative: unbounded) keeps it.
                 val metered = if (params.meteredGain != 0f) params.meteredGain.coerceAtLeast(0f)
                 else Math.pow(2.0, dng.baselineExposure.toDouble()).toFloat()
+                val stages = if (System.getProperty("mf.stages") == "true")
+                    DevelopStageDumps(File(out, "${dng.name}__$variant-stages"), dng.frame.width, dng.frame.height)
+                        .also { it.raw(dng.frame) } else null
                 val pixels = RawDeveloper.develop(
                     dev.multiframe.camera.pipeline.BayerFrame(dng.frame.width, dng.frame.height, dng.frame.data.copyOf()),
                     dng.sensor, dng.color,
                     params.adaptedTo(dng.iso).copy(optics = null, meteredGain = metered), dng.shading,
                     recoverSensorSaturation = variant != "beforeclip",
+                    observer = stages,
                 )
+                stages?.finish()
                 val corrected = finish(pixels, dng.frame.width, dng.frame.height, optics, crop)
                 val ms = System.currentTimeMillis() - t0
                 val suffix = crop?.let { "_crop" } ?: if (scale == "full") "" else "_half"
                 val target = File(out, "${dng.name}__$variant$suffix.jpg")
                 writeJpeg(corrected.pixels, corrected.width, corrected.height, target)
                 println("  $variant: ${ms}ms, ${corrected.width}x${corrected.height} -> ${target.name}")
+                if (System.getProperty("mf.mosaic") == "true") {
+                    val result = mosaicAlignmentCase(corrected.pixels, corrected.width, corrected.height)
+                    File(out, "${dng.name}__$variant-mosaic.txt").writeText(result + "\n")
+                    println("  mosaic: $result")
+                }
             }
         }
     }
 
     data class Image(val pixels: IntArray, val width: Int, val height: Int)
 
-
+    /**
+     * Real-DNG overlap case: three neighbours agree, while one previously
+     * placed neighbour carries a 90-pixel attitude error. The next frame must
+     * follow the image features rather than averaging that error into the grid.
+     */
+    private fun mosaicAlignmentCase(pixels: IntArray, width: Int, height: Int): String {
+        val tileW = 640
+        val tileH = 520
+        val scale = 4
+        require(width >= 1240 && height >= 1020) { "mosaic bench needs a 1240x1020 developed scene" }
+        fun proxy(sx: Int, sy: Int): Plane {
+            val data = ByteArray((tileW / scale) * (tileH / scale))
+            for (y in 0 until tileH / scale) for (x in 0 until tileW / scale) {
+                val rgb = pixels[(sy + y * scale) * width + sx + x * scale]
+                val luma = ((rgb shr 16 and 255) * 0.2126f +
+                    (rgb shr 8 and 255) * 0.7152f + (rgb and 255) * 0.0722f).toInt()
+                data[y * (tileW / scale) + x] = luma.toByte()
+            }
+            return Plane(tileW / scale, tileH / scale, data)
+        }
+        val a = MosaicAssembler(1600, 1200, tileW, tileH)
+        val anchor = a.anchor(proxy(200, 200)).transform
+        val base = anchor.apply(0f, 0f)
+        fun place(sx: Int, sy: Int, dx: Int, dy: Int) {
+            check(a.place(proxy(sx, sy), Homography.translation(
+                (base[0] + dx).toDouble(), (base[1] + dy).toDouble(),
+            ), 20, 1f) != null)
+        }
+        place(600, 200, 490, 0) // an erroneous but still nearby neighbour
+        place(200, 500, 0, 300)
+        place(450, 380, 250, 180)
+        val target = proxy(600, 500)
+        println("mosaic matches: " + listOf(200 to 200, 600 to 200, 200 to 500, 450 to 380).map { (x, y) ->
+            FeatureMatcher.register(FeatureMatcher.extract(proxy(x, y)), FeatureMatcher.extract(target))?.let {
+                "${it.inliers.size}/%.2f".format(it.inlierRatio)
+            } ?: "0"
+        })
+        val located = a.locate(target, scale.toFloat())
+            ?: return "unregistrable: ${a.lastFailure}"
+        val origin = located.transform.apply(0f, 0f)
+        val error = kotlin.math.hypot(origin[0] - (base[0] + 400f), origin[1] - (base[1] + 300f))
+        return "origin=(%.2f,%.2f) error=%.2fpx inliers=%d ratio=%.2f".format(
+            origin[0], origin[1], error, located.inliers, located.inlierRatio,
+        )
+    }
 
     private fun writeJpeg(argb: IntArray, width: Int, height: Int, target: File) {
         val image = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
@@ -164,4 +223,3 @@ class DngDevelopBench {
         writer.dispose()
     }
 }
-

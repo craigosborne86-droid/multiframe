@@ -122,7 +122,7 @@ class DngFile private constructor(
             val illum2 = int(TAG_ILLUMINANT_2)?.let { ColorScience.illuminantKelvin(it) }
             val calibration = DngMetadata.readCalibration(bytes)!!.copy(illuminant1Kelvin = illum1, illuminant2Kelvin = illum2)
             val blend = ColorScience.solveBlend(calibration, neutral)
-            val matrix = ColorScience.cameraToSrgb(calibration, floatArrayOf(1f, 1f, 1f), blend)
+            val matrix = ColorScience.balancedCameraToSrgb(calibration, neutral, blend, gains)
             val color = ColorProfile(gains, matrix.m)
             val kelvin = ColorScience.cctForBlend(calibration, neutral, blend)
 
