@@ -224,6 +224,11 @@ class DngMetadataTest {
         assertThat(values[0]).isWithin(1e-5f).of(0.5f)
         assertThat(values[1]).isWithin(1e-5f).of(1f)
         assertThat(values[2]).isWithin(1e-5f).of(0.625f)
+        // A HAL neutral can differ from the ISP gains: preserve the neutral
+        // selected for the JPEG matrix rather than silently replacing it.
+        val direct = ByteBuffer.wrap(DngMetadata.encodeCameraNeutral(bytes, floatArrayOf(.5f, 1f, .7f)))
+            .order(ByteOrder.LITTLE_ENDIAN)
+        assertThat(direct.getInt(16).toFloat() / direct.getInt(20)).isWithin(1e-5f).of(.7f)
         // Signed-rational tags are not mistaken for it.
         assertThat(DngMetadata.asShotNeutralOffset(tiff(mapOf(neutral to floatArrayOf(0.5f, 1f, 0.66f))))).isNull()
     }

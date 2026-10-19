@@ -28,6 +28,8 @@ class NativeMerge private constructor(
 ) : AutoCloseable {
 
     private var closed = false
+    private var referenceNoise: RawNoiseModel? = null
+    private var usingMetadataNoise = false
 
     val proxyWidth = width / 2
     val proxyHeight = height / 2
@@ -38,11 +40,21 @@ class NativeMerge private constructor(
         return Plane(proxyWidth, proxyHeight, out)
     }
 
-    fun setReference(frame: ByteBuffer, rowStride: Int) =
+    fun setReference(frame: ByteBuffer, rowStride: Int, noise: RawNoiseModel? = null) {
+        referenceNoise = noise
         nSetReference(handle, frame, rowStride)
+    }
 
-    fun addFrame(frame: ByteBuffer, rowStride: Int, field: AlignmentField, gainScale: Float = 1f) =
+    fun addFrame(frame: ByteBuffer, rowStride: Int, field: AlignmentField, gainScale: Float = 1f,
+                 noise: RawNoiseModel? = null) {
+        val useMetadata = referenceNoise != null && noise != null
+        if (useMetadata || usingMetadataNoise) {
+            nSetNoiseModels(handle, if (useMetadata) referenceNoise!!.packed() else null,
+                if (useMetadata) noise!!.packed() else null)
+        }
+        usingMetadataNoise = useMetadata
         nAddFrame(handle, frame, rowStride, field.dx, field.dy, field.tilesX, field.tilesY, gainScale)
+    }
 
     /**
      * Writes the merged CFA data into a direct buffer, which is also off the
@@ -78,7 +90,7 @@ class NativeMerge private constructor(
         color: ColorProfile,
         params: DevelopParams = DevelopParams(),
     ): Float {
-        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
         return nAutoExposure(
             merged, width, height, profile.cfaPattern, black, profile.whiteLevel,
             color.gains, params.highlightPercentile, params.highlightTarget,
@@ -98,7 +110,7 @@ class NativeMerge private constructor(
         params: DevelopParams = DevelopParams(),
         shading: ShadingMap? = null,
     ): Bitmap? {
-        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
         // Five stages hide behind one figure here, and four of them have never
         // been timed. Every one is a full pass over twelve and a half
         // megapixels, so any of them could be the largest.
@@ -181,6 +193,7 @@ class NativeMerge private constructor(
 
     private external fun nLumaProxy(h: Long, buf: ByteBuffer, rowStride: Int, out: ByteArray, gainScale: Float)
     private external fun nSetReference(h: Long, buf: ByteBuffer, rowStride: Int)
+    private external fun nSetNoiseModels(h: Long, reference: FloatArray?, alternate: FloatArray?)
     private external fun nAddFrame(
         h: Long, buf: ByteBuffer, rowStride: Int,
         dx: IntArray, dy: IntArray, tilesX: Int, tilesY: Int,
@@ -358,7 +371,7 @@ class NativeMerge private constructor(
             selfCheck: Boolean,
         ): LongArray? {
             if (!isAvailable()) return null
-            val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+            val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
             return NativeMerge(0L, 0, 0, profile).nPrepassBench(
                 width, height, profile.cfaPattern, black, profile.whiteLevel,
                 gains, map.gains, map.columns, map.rows, hotPixelThreshold, rounds,
@@ -387,7 +400,7 @@ class NativeMerge private constructor(
             params: BayerMergeParams = BayerMergeParams(),
         ): NativeMerge? {
             if (!isAvailable()) return null
-            val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+            val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
             // nCreate is an instance method on the JNI side, so a zero handle
             // instance is used purely to reach it. It allocates nothing.
             val h = NativeMerge(0L, width, height, profile).nCreate(

@@ -490,8 +490,8 @@ class SubPixelAccumulatorTest {
 
     /**
      * Gain normalisation, as in the ordinary merge. A frame at four times the
-     * ISO reads four times the value; divided by its gainScale it lands on the
-     * reference's scale and the merge sees one exposure.
+     * ISO reads four times the signal above black. The pedestal stays fixed;
+     * normalising that signal returns the reference's exposure.
      */
     @Test
     fun aHighGainFrameIsNormalisedBeforeItIsPlaced() {
@@ -515,7 +515,9 @@ class SubPixelAccumulatorTest {
             if (sx == 0f && sy == 0f) continue
             val base = bayerFrame(s, sx, sy)
             val boosted = BayerFrame(sensorW, sensorH, ShortArray(base.data.size) { i ->
-                ((base.data[i].toInt() and 0xFFFF) * gain).toInt().coerceAtMost(1023).toShort()
+                (profile.blackAt(i % sensorW, i / sensorW) +
+                    ((base.data[i].toInt() and 0xFFFF) - profile.blackAt(i % sensorW, i / sensorW)) * gain)
+                    .toInt().coerceIn(0, profile.whiteLevel).toShort()
             })
             acc.add(boosted, fieldFor(sx, sy), gainScale = gain)
         }
@@ -537,7 +539,9 @@ class SubPixelAccumulatorTest {
         val s = scene()
         val base = bayerFrame(s, 0.5f, 0.5f)
         val boosted = BayerFrame(sensorW, sensorH, ShortArray(base.data.size) { i ->
-            ((base.data[i].toInt() and 0xFFFF) * 2).coerceAtMost(1023).toShort()
+            (profile.blackAt(i % sensorW, i / sensorW) +
+                ((base.data[i].toInt() and 0xFFFF) - profile.blackAt(i % sensorW, i / sensorW)) * 2)
+                .coerceIn(0, profile.whiteLevel).toShort()
         })
 
         val acc = SubPixelAccumulator(sensorW, sensorH, profile)

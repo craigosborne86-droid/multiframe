@@ -36,6 +36,10 @@
 #include <mutex>
 #include <thread>
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 #include "Jpeg.h"
 #include "LinearDevelop.h"
 #include "Tone.h"
@@ -201,9 +205,18 @@ public:
     void AddFrame(const uint8_t* data, int strideBytes, const int* dx, const int* dy,
                   const float* fracDx, const float* fracDy, float gainScale);
     bool Finish();
+    void prefilterHalfPixelBox();
 
     int width() const { return width_; }
     int height() const { return height_; }
+    int64_t alignmentCount() const { return static_cast<int64_t>(tilesX_) * tilesY_; }
+    bool inputFits(int64_t capacityBytes, int strideBytes) const {
+        const int64_t rowBytes = static_cast<int64_t>(sensorW_) * sizeof(uint16_t);
+        if (capacityBytes < 0 || strideBytes < rowBytes) return false;
+        // Only the pixels of the last row are read; trailing padding is optional.
+        const int64_t required = static_cast<int64_t>(sensorH_ - 1) * strideBytes + rowBytes;
+        return capacityBytes >= required;
+    }
     const uint16_t* output() const { return out_; }
     /**
      * The canvas for the develop to consume. Once developed with release the
@@ -412,7 +425,9 @@ void SubPixelCanvas::estimateNoise(const Frame& f) {
             if (rawAlt >= white_) continue;
             sampleReference(ax, ay, fx, fy, rs);
             if (rs.uncertainty > kFlatForNoise) continue;
-            const float altV = static_cast<float>(rawAlt) * f.invGain;
+            // Normalise radiance, preserving this CFA site's black pedestal.
+            const float pedestal = static_cast<float>(black_[(ay & 1) * 2 + (ax & 1)]) * (1.0f - f.invGain);
+            const float altV = static_cast<float>(rawAlt) * f.invGain + pedestal;
             const int b = binOf(rs.value);
             if (samples[b].size() < 3000) samples[b].push_back(std::fabs(altV - rs.value));
         }
@@ -634,13 +649,15 @@ void SubPixelCanvas::accumulateStrip(int stripY0, int stripY1, std::vector<float
 
                             const int rawAlt = at(f.data, f.strideBytes, ax, ay);
                             if (f.invGain < 1.0f && rawAlt >= white_) continue;
-                            const float altV = static_cast<float>(rawAlt) * f.invGain;
+                            // The same affine normalisation used by native Bayer fusion.
+                            const float pedestal = static_cast<float>(black_[(ay & 1) * 2 + (ax & 1)]) * (1.0f - f.invGain);
+                            const float altV = static_cast<float>(rawAlt) * f.invGain + pedestal;
 
                             sampleReference(ax, ay, fx, fy, rs);
                             const float d = altV - rs.value;
                             const float d2 = d * d;
                             const float n2 = noiseVar_[binOf(rs.value)] + rs.uncertainty * rs.uncertainty;
-                            const float r = d2 <= n2 ? 1.0f : n2 / d2;
+                            const float r = d2 <= n2 ? 1.0f : (d2 < 4.0f * n2 ? (4.0f * n2 - d2) / (3.0f * d2) : 0.0f);
 
                             const int c = colourAt(ax, ay);
                             splat(acc, wsum, base, rows, rowMin, rowMax, colMin, colMax, c, u, v, altV, r);
@@ -756,6 +773,74 @@ void SubPixelCanvas::resolveStrip(int stripY0, int stripY1, std::vector<float>& 
     for (int c = 0; c < kChannels; ++c) interiorHolesC_[c] += interiorHolesC[c].load();
 }
 
+/**
+ * Integrate each reconstructed output cell over a half-pixel box before the
+ * develop. Four bilinear reads at (+/- 1/4, +/- 1/4) output pixels reduce to
+ * the separable 1:6:1 kernel below. It suppresses the phase-dependent noise
+ * mesh of resampling without making up detail or allocating a second canvas.
+ * Only three RGB rows are kept while the mmap is rewritten in place.
+ */
+void SubPixelCanvas::prefilterHalfPixelBox() {
+    const int samples = width_ * kChannels;
+    if (samples <= 0 || height_ <= 0) return;
+    std::vector<uint16_t> previous(samples), current(samples), next(samples);
+
+#if defined(__ARM_NEON)
+    auto box8 = [](uint16x8_t left, uint16x8_t center, uint16x8_t right) {
+        auto half = [](uint16x4_t l, uint16x4_t c, uint16x4_t r) {
+            uint32x4_t sum = vaddq_u32(vmovl_u16(l), vmulq_n_u32(vmovl_u16(c), 6));
+            sum = vaddq_u32(sum, vmovl_u16(r));
+            return vmovn_u32(vshrq_n_u32(vaddq_u32(sum, vdupq_n_u32(4)), 3));
+        };
+        return vcombine_u16(half(vget_low_u16(left), vget_low_u16(center), vget_low_u16(right)),
+                            half(vget_high_u16(left), vget_high_u16(center), vget_high_u16(right)));
+    };
+#endif
+
+    auto horizontal = [&](int y, std::vector<uint16_t>& dst) {
+        const uint16_t* src = out_ + static_cast<size_t>(y) * samples;
+        for (int c = 0; c < kChannels; ++c) {
+            dst[c] = static_cast<uint16_t>((7u * src[c] + src[c + kChannels] + 4u) >> 3);
+        }
+        int i = kChannels;
+#if defined(__ARM_NEON)
+        for (; i + 8 <= samples - kChannels; i += 8) {
+            vst1q_u16(dst.data() + i, box8(vld1q_u16(src + i - kChannels),
+                vld1q_u16(src + i), vld1q_u16(src + i + kChannels)));
+        }
+#endif
+        for (; i < samples - kChannels; ++i) {
+            dst[i] = static_cast<uint16_t>((src[i - kChannels] + 6u * src[i] +
+                src[i + kChannels] + 4u) >> 3);
+        }
+        for (int c = samples - kChannels; c < samples; ++c) {
+            dst[c] = static_cast<uint16_t>((src[c - kChannels] + 7u * src[c] + 4u) >> 3);
+        }
+    };
+
+    horizontal(0, current);
+    previous = current;
+    horizontal(std::min(1, height_ - 1), next);
+    for (int y = 0; y < height_; ++y) {
+        uint16_t* dst = out_ + static_cast<size_t>(y) * samples;
+        int i = 0;
+#if defined(__ARM_NEON)
+        for (; i + 8 <= samples; i += 8) {
+            vst1q_u16(dst + i, box8(vld1q_u16(previous.data() + i),
+                vld1q_u16(current.data() + i), vld1q_u16(next.data() + i)));
+        }
+#endif
+        for (; i < samples; ++i) {
+            dst[i] = static_cast<uint16_t>((previous[i] + 6u * current[i] + next[i] + 4u) >> 3);
+        }
+        if (y + 1 < height_) {
+            previous.swap(current);
+            current.swap(next);
+            horizontal(std::min(y + 2, height_ - 1), next);
+        }
+    }
+}
+
 bool SubPixelCanvas::Finish() {
     if (ref_ == nullptr || out_ == nullptr) return false;
     const int64_t tNoise = multiframe::tone::nowMicros();
@@ -788,6 +873,7 @@ bool SubPixelCanvas::Finish() {
         accumulateMicros += t1 - t0;
         resolveMicros += multiframe::tone::nowMicros() - t1;
     }
+    prefilterHalfPixelBox();
     LOGI("finish: %d strips, accumulate %lldms, resolve %lldms, %zu frames",
          (height_ + kStripRows - 1) / kStripRows, static_cast<long long>(accumulateMicros / 1000),
          static_cast<long long>(resolveMicros / 1000), alts_.size() + 1);
@@ -837,7 +923,8 @@ JNIEXPORT jboolean JNICALL
 Java_dev_multiframe_camera_pipeline_NativeSubPixel_nSetReference(
         JNIEnv* env, jobject, jlong h, jobject buffer, jint strideBytes) {
     auto* c = reinterpret_cast<SubPixelCanvas*>(h);
-    if (c == nullptr) return JNI_FALSE;
+    if (c == nullptr || buffer == nullptr ||
+        !c->inputFits(env->GetDirectBufferCapacity(buffer), strideBytes)) return JNI_FALSE;
     auto* data = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buffer));
     if (data == nullptr) return JNI_FALSE;
     c->SetReference(data, strideBytes);
@@ -849,11 +936,14 @@ Java_dev_multiframe_camera_pipeline_NativeSubPixel_nAddFrame(
         JNIEnv* env, jobject, jlong h, jobject buffer, jint strideBytes,
         jintArray jdx, jintArray jdy, jfloatArray jfracDx, jfloatArray jfracDy, jfloat gainScale) {
     auto* c = reinterpret_cast<SubPixelCanvas*>(h);
-    if (c == nullptr) return JNI_FALSE;
+    if (c == nullptr || buffer == nullptr ||
+        !c->inputFits(env->GetDirectBufferCapacity(buffer), strideBytes) ||
+        jdx == nullptr || jdy == nullptr || jfracDx == nullptr || jfracDy == nullptr) return JNI_FALSE;
     auto* data = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buffer));
     if (data == nullptr) return JNI_FALSE;
     const jsize n = env->GetArrayLength(jdx);
-    if (env->GetArrayLength(jdy) < n || env->GetArrayLength(jfracDx) < n || env->GetArrayLength(jfracDy) < n) {
+    if (n != c->alignmentCount() || env->GetArrayLength(jdy) != n ||
+        env->GetArrayLength(jfracDx) != n || env->GetArrayLength(jfracDy) != n) {
         return JNI_FALSE;
     }
     std::vector<jint> dx(n), dy(n);
@@ -862,6 +952,7 @@ Java_dev_multiframe_camera_pipeline_NativeSubPixel_nAddFrame(
     env->GetIntArrayRegion(jdy, 0, n, dy.data());
     env->GetFloatArrayRegion(jfracDx, 0, n, fdx.data());
     env->GetFloatArrayRegion(jfracDy, 0, n, fdy.data());
+    if (env->ExceptionCheck()) return JNI_FALSE;
     c->AddFrame(data, strideBytes, dx.data(), dy.data(), fdx.data(), fdy.data(), gainScale);
     return JNI_TRUE;
 }
@@ -970,7 +1061,7 @@ JNIEXPORT jfloatArray JNICALL
 Java_dev_multiframe_camera_pipeline_NativeSubPixel_nDevelopToJpeg(
         JNIEnv* env, jobject, jlong h, jint fd, jfloatArray jblack, jint white, jfloatArray jwb,
         jfloatArray jmatrix, jfloatArray jshading, jint shadingColumns, jint shadingRows,
-        jfloatArray jtone, jfloatArray jsharpen, jint quality) {
+        jfloatArray jtone, jfloatArray jsharpen, jint quality, jfloatArray jcrop) {
     auto* c = reinterpret_cast<SubPixelCanvas*>(h);
     if (c == nullptr || c->mutableOutput() == nullptr || fd < 0) return nullptr;
 
@@ -981,11 +1072,13 @@ Java_dev_multiframe_camera_pipeline_NativeSubPixel_nDevelopToJpeg(
         return nullptr;
     }
 
+    float crop[4] = {0, 0, 1, 1};
+    if (jcrop != nullptr && env->GetArrayLength(jcrop) == 4) env->GetFloatArrayRegion(jcrop, 0, 4, crop);
     multiframe::linear::Stats st;
     const bool ok = multiframe::linear::developToJpeg(
         c->mutableOutput(), c->width(), c->height(), p, quality,
         [fd](const unsigned char* data, size_t n) { return multiframe::jpeg::writeAll(fd, data, n); },
-        &st);
+        &st, crop);
     return ok ? statsArray(env, st) : nullptr;
 }
 

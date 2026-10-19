@@ -40,6 +40,7 @@ object DngMetadata {
     private const val TAG_COLOR_MATRIX_2 = 0xC622
     private const val TAG_CAMERA_CALIBRATION_1 = 0xC623
     private const val TAG_CAMERA_CALIBRATION_2 = 0xC624
+    private const val TAG_ANALOG_BALANCE = 0xC627
     private const val TAG_FORWARD_MATRIX_1 = 0xC714
     private const val TAG_FORWARD_MATRIX_2 = 0xC715
     private const val TAG_BASELINE_EXPOSURE = 0xC62A
@@ -73,6 +74,11 @@ object DngMetadata {
         val colour2 = matrix(TAG_COLOR_MATRIX_2)
         if (colour1 == null && colour2 == null) return null
 
+        val analog = entries[TAG_ANALOG_BALANCE]
+            ?.let { readRationals(dng, it, 3) }
+            ?.let { Mat3.diagonal(it[0], it[1], it[2]) }
+            ?: Mat3.IDENTITY
+
         return ColorScience.Calibration(
             colorMatrix1 = colour1 ?: colour2!!,
             colorMatrix2 = colour2 ?: colour1!!,
@@ -80,6 +86,7 @@ object DngMetadata {
             calibration2 = matrix(TAG_CAMERA_CALIBRATION_2) ?: Mat3.IDENTITY,
             forward1 = matrix(TAG_FORWARD_MATRIX_1),
             forward2 = matrix(TAG_FORWARD_MATRIX_2),
+            analogBalance = analog,
         )
     }
 
@@ -191,14 +198,10 @@ object DngMetadata {
      *
      * ### Why the DNG carries the develop's white balance
      *
-     * `DngCreator` writes AsShotNeutral from the HAL's neutral colour point
-     * and the develop balances by the HAL's white balance gains; the two are
-     * the same quantity by different routes, and on the Pixel 11 Pro's
-     * telephoto they disagree by a fifth of a stop in blue. The JPEG's clouds
-     * were white and the DNG's, in every converter and on the bench, were
-     * warm. The DNG is made to say what the JPEG did: the neutral is the
-     * reciprocal of the gains the develop used, so both outputs of one shot
-     * carry one white balance and the desk renders what the phone rendered.
+     * The HAL's neutral and its ISP white-balance gains can disagree (by a
+     * fifth of a stop in blue on the Pixel 11 Pro telephoto). The JPEG now
+     * uses the selected camera neutral in the Chapter 6 transform; the DNG
+     * writes that same neutral rather than a reciprocal of the ISP gains.
      */
     fun asShotNeutralOffset(header: ByteArray): Long? {
         val entry = readIfd0(header)?.get(TAG_AS_SHOT_NEUTRAL) ?: return null
@@ -213,12 +216,18 @@ object DngMetadata {
      * byte order: the reciprocal of each gain, with green at one.
      */
     fun encodeAsShotNeutral(header: ByteArray, gains: FloatArray): ByteArray {
-        val order = if (header.size >= 2 && header[0] == 'M'.code.toByte()) ByteOrder.BIG_ENDIAN
-        else ByteOrder.LITTLE_ENDIAN
         val green = ((gains[1] + gains[2]) / 2f).coerceAtLeast(1e-3f)
         val neutral = floatArrayOf(green / gains[0].coerceAtLeast(1e-3f), 1f, green / gains[3].coerceAtLeast(1e-3f))
+        return encodeCameraNeutral(header, neutral)
+    }
+
+    /** Serializes the selected DNG camera neutral directly (Chapter 6, AsShotNeutral). */
+    fun encodeCameraNeutral(header: ByteArray, neutral: FloatArray): ByteArray {
+        require(neutral.size >= 3 && neutral.take(3).all { it > 0f })
+        val order = if (header.size >= 2 && header[0] == 'M'.code.toByte()) ByteOrder.BIG_ENDIAN
+        else ByteOrder.LITTLE_ENDIAN
         val out = ByteBuffer.allocate(24).order(order)
-        for (n in neutral) out.putInt(Math.round(n * NEUTRAL_DENOMINATOR)).putInt(NEUTRAL_DENOMINATOR)
+        for (i in 0..2) out.putInt(Math.round(neutral[i] * NEUTRAL_DENOMINATOR)).putInt(NEUTRAL_DENOMINATOR)
         return out.array()
     }
 

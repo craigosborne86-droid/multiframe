@@ -74,24 +74,18 @@ data class ColorProfile(
             // The neutral colour point is the sensor's own answer; the white
             // balance gains are the fallback, since their reciprocal is the
             // same quantity by a different route.
-            val neutral = result?.get(CaptureResult.SENSOR_NEUTRAL_COLOR_POINT)
-                ?.let { floatArrayOf(it[0].toFloat(), it[1].toFloat(), it[2].toFloat()) }
-                ?: floatArrayOf(
-                    1f / fallback.gains[0].coerceAtLeast(1e-3f),
-                    1f,
-                    1f / fallback.gains[3].coerceAtLeast(1e-3f),
-                )
+            val neutral = cameraNeutral(result, fallback.gains)
 
             // Interpolated by colour temperature where the device published the
             // illuminants its matrices were measured under, and by the
             // red-to-blue proxy where it did not. See `ColorScience.solveBlend`
             // for the circularity this resolves.
             val blend = ColorScience.solveBlend(calibration, neutral)
-            // The demosaic has already applied the white balance gains, so by
-            // the time this matrix is used a neutral is (1, 1, 1). Normalising
-            // against the raw neutral instead would balance the picture twice.
-            val matrix = ColorScience.cameraToSrgb(
-                calibration, floatArrayOf(1f, 1f, 1f), blend,
+            // Demosaic applies the recorded gains once. Chapter 6's matrix
+            // takes unbalanced camera coordinates, so compose it with the
+            // inverse of those gains rather than replacing AsShotNeutral by 1.
+            val matrix = ColorScience.balancedCameraToSrgb(
+                calibration, neutral, blend, fallback.gains,
             )
             val kelvin = ColorScience.cctForBlend(calibration, neutral, blend)
             Log.i(
@@ -102,6 +96,18 @@ data class ColorProfile(
                 ),
             )
             return ColorProfile(gains = fallback.gains, matrix = matrix.m)
+        }
+
+        /** The selected scene white in camera coordinates, shared by JPEG and DNG. */
+        fun cameraNeutral(result: TotalCaptureResult?, gains: FloatArray): FloatArray {
+            val reported = result?.get(CaptureResult.SENSOR_NEUTRAL_COLOR_POINT)
+                ?.let { floatArrayOf(it[0].toFloat(), it[1].toFloat(), it[2].toFloat()) }
+            if (reported != null && reported.all { it > 0f }) {
+                val green = reported[1]
+                return floatArrayOf(reported[0] / green, 1f, reported[2] / green)
+            }
+            val green = (gains[1] + gains[2]) * 0.5f
+            return floatArrayOf(green / gains[0], 1f, green / gains[3])
         }
 
         /**

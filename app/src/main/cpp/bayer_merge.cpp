@@ -55,6 +55,11 @@ struct Accumulator {
 
     float noiseVar[kNoiseBins] = {0};
     bool noiseReady = false;
+    // Optional Camera2 model, converted to DN before JNI. Site-order slope,
+    // offset, black (4 each). Absent metadata preserves the empirical path.
+    float referenceNoise[12] = {};
+    float alternateNoise[12] = {};
+    bool metadataNoise = false;
 
     double contributionSum = 0.0;
     long long contributionCount = 0;
@@ -128,6 +133,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nLumaProxy(
     const int hh = acc->height / 2;
     std::vector<int8_t> tmp(static_cast<size_t>(hw) * hh);
     const float range = static_cast<float>(acc->range()) * 4.0f * gainScale;
+    const int cellBlack = acc->blackAt(0, 0) + acc->blackAt(1, 0) +
+                          acc->blackAt(0, 1) + acc->blackAt(1, 1);
 
     parallelBands(hh, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
@@ -137,8 +144,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nLumaProxy(
                         sampleAt(base, rowStride, sx + 1, sy) +
                         sampleAt(base, rowStride, sx, sy + 1) +
                         sampleAt(base, rowStride, sx + 1, sy + 1);
-                int blk = acc->blackAt(sx, sy) * 4;
-                float norm = std::clamp((s - blk) / range, 0.0f, 1.0f);
+                // This guide sums a complete CFA cell, including both greens.
+                float norm = std::clamp((s - cellBlack) / range, 0.0f, 1.0f);
                 tmp[static_cast<size_t>(y) * hw + x] =
                         static_cast<int8_t>(static_cast<int>(norm * 255.0f) & 0xFF);
             }
@@ -233,6 +240,18 @@ static void estimateNoise(Accumulator* acc, const uint8_t* base, int rowStride,
 }
 
 JNIEXPORT void JNICALL
+Java_dev_multiframe_camera_pipeline_NativeMerge_nSetNoiseModels(
+        JNIEnv* env, jobject, jlong handle, jfloatArray reference, jfloatArray alternate) {
+    auto* acc = reinterpret_cast<Accumulator*>(handle);
+    acc->metadataNoise = reference && alternate && env->GetArrayLength(reference) == 12 &&
+                        env->GetArrayLength(alternate) == 12;
+    if (acc->metadataNoise) {
+        env->GetFloatArrayRegion(reference, 0, 12, acc->referenceNoise);
+        env->GetFloatArrayRegion(alternate, 0, 12, acc->alternateNoise);
+    }
+}
+
+JNIEXPORT void JNICALL
 Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
         JNIEnv* env, jobject, jlong handle, jobject buffer, jint rowStride,
         jintArray jdx, jintArray jdy, jint tilesX, jint tilesY,
@@ -247,7 +266,17 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
     env->GetIntArrayRegion(jdy, 0, tiles, dy.data());
 
     const float invGain = 1.0f / gainScale;
-    if (!acc->noiseReady) estimateNoise(acc, base, rowStride, dx.data(), dy.data(), tilesX, tilesY, invGain);
+    if (!acc->metadataNoise && !acc->noiseReady)
+        estimateNoise(acc, base, rowStride, dx.data(), dy.data(), tilesX, tilesY, invGain);
+    const bool metadataNoise = acc->metadataNoise;
+    const float* referenceModel = acc->referenceNoise;
+    const float* alternateModel = acc->alternateNoise;
+    const float invGainSquared = invGain * invGain;
+    const float toleranceSquared = acc->noiseTolerance * acc->noiseTolerance;
+    const float minVariance = acc->minNoiseSigma * acc->minNoiseSigma;
+    auto variance = [](const float* model, int site, float raw) {
+        return model[site] * std::max(raw - model[8 + site], 0.0f) + model[4 + site];
+    };
 
     const int w = acc->width, h = acc->height;
 
@@ -448,7 +477,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                         // Values above white clamp to the top bin, which is
                         // what binOf did with them, so the last entry answers
                         // for them.
-                        const float n2 = noise[static_cast<size_t>(std::min<int>(refRaw, white))];
+                        const float empiricalN2 = noise[static_cast<size_t>(std::min<int>(refRaw, white))];
                         const float far = farXTable[x];
                         float acc = 0.0f;
                         float accW = 0.0f;
@@ -461,7 +490,15 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                             const float altV = static_cast<float>(rawAlt) * invGain + pedestalRow[x];
                             const float d = altV - refV;
                             const float d2 = d * d;
-                            const float wgt = (d2 <= n2) ? 1.0f : n2 / d2;
+                            const int site = (y & 1) * 2 + (x & 1);
+                            // Existing tolerance is in single-frame sigma:
+                            // estimateNoise divides residual MAD by sqrt(2).
+                            // Keep that contract, using half the propagated
+                            // pair variance (equal exposures -> same sigma).
+                            const float n2 = metadataNoise ? toleranceSquared * std::max(minVariance,
+                                0.5f * (variance(referenceModel, site, refV) +
+                                        variance(alternateModel, site, rawAlt) * invGainSquared)) : empiricalN2;
+                            const float wgt = (d2 <= n2) ? 1.0f : (d2 < 4.0f * n2 ? (4.0f * n2 - d2) / (3.0f * d2) : 0.0f);
                             const float win =
                                 taps[t].wy * (taps[t].farColumn ? far : 1.0f - far);
                             const float ww = wgt * win;
@@ -513,6 +550,17 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                     const bool checkSat = invGain < 1.0f;
                     const uint32x4_t vWhite32 = vdupq_n_u32(static_cast<uint32_t>(white));
                     const float32x4_t zero = vdupq_n_f32(0.0f);
+                    auto siteVector = [&](const float* values) {
+                        float32x2_t pair = vld1_f32(values + (y & 1) * 2);
+                        if (cursor & 1) pair = vrev64_f32(pair);
+                        return vcombine_f32(pair, pair);
+                    };
+                    const float32x4_t refSlope = siteVector(acc->referenceNoise);
+                    const float32x4_t refOffset = siteVector(acc->referenceNoise + 4);
+                    const float32x4_t refBlack = siteVector(acc->referenceNoise + 8);
+                    const float32x4_t altSlope = siteVector(acc->alternateNoise);
+                    const float32x4_t altOffset = siteVector(acc->alternateNoise + 4);
+                    const float32x4_t altBlack = siteVector(acc->alternateNoise + 8);
                     for (; cursor + 4 <= core1; cursor += 4) {
                         const int x = cursor;
                         const float32x4_t refV =
@@ -527,6 +575,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                             noise + std::min<int>(refRow[x + 2], white), n2, 2);
                         n2 = vld1q_lane_f32(
                             noise + std::min<int>(refRow[x + 3], white), n2, 3);
+                        const float32x4_t refVariance = vmlaq_f32(refOffset,
+                            vmaxq_f32(zero, vsubq_f32(refV, refBlack)), refSlope);
 
                         const float32x4_t far = vld1q_f32(farXTable + x);
                         const float32x4_t near = vsubq_f32(one, far);
@@ -546,8 +596,18 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nAddFrame(
                                 vmlaq_f32(pedestalV, vcvtq_f32_u32(rawU32), vInvGain);
                             const float32x4_t d = vsubq_f32(altV, refV);
                             const float32x4_t d2 = vmulq_f32(d, d);
+                            if (metadataNoise) {
+                                const float32x4_t altVariance = vmlaq_f32(altOffset,
+                                    vmaxq_f32(zero, vsubq_f32(vcvtq_f32_u32(rawU32), altBlack)), altSlope);
+                                n2 = vmulq_n_f32(vmaxq_f32(vdupq_n_f32(minVariance),
+                                    vmulq_n_f32(vmlaq_n_f32(refVariance, altVariance, invGainSquared), 0.5f)),
+                                    toleranceSquared);
+                            }
                             const float32x4_t wgt = vbslq_f32(
-                                vcleq_f32(d2, n2), one, vdivq_f32(n2, d2));
+                                vcleq_f32(d2, n2), one,
+                                vmaxq_f32(zero, vdivq_f32(
+                                    vsubq_f32(vmulq_n_f32(n2, 4.0f), d2),
+                                    vmulq_n_f32(vmaxq_f32(d2, vdupq_n_f32(1e-12f)), 3.0f))));
                             float32x4_t ww = vmulq_f32(
                                 wgt, vmulq_n_f32(taps[t].farColumn ? far : near,
                                                  taps[t].wy));
@@ -606,7 +666,10 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nFinish(
         for (int y = y0; y < y1; ++y) {
             for (int x = 0; x < w; ++x) {
                 size_t i = static_cast<size_t>(y) * w + x;
-                int v = static_cast<int>(acc->sum[i] / acc->weight[i]);
+                // Quantise to the closest sensor code. Truncation subtracts
+                // almost half a DN from a multi-frame mean, creating a black
+                // pedestal error that WB amplifies unequally by colour.
+                int v = static_cast<int>(acc->sum[i] / acc->weight[i] + 0.5f);
                 v = std::clamp(v, 0, ceiling);
                 dst[i * 2] = static_cast<uint8_t>(v & 0xFF);
                 dst[i * 2 + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
@@ -645,6 +708,14 @@ JNIEXPORT jfloat JNICALL
 Java_dev_multiframe_camera_pipeline_NativeMerge_nEstimatedSigma(
         JNIEnv*, jobject, jlong handle) {
     auto* acc = reinterpret_cast<Accumulator*>(handle);
+    if (acc && acc->metadataNoise) {
+        float sum = 0.0f;
+        for (int site = 0; site < 4; ++site)
+            sum += acc->referenceNoise[site] *
+                std::max(acc->white * 0.5f - acc->referenceNoise[8 + site], 0.0f) +
+                acc->referenceNoise[4 + site];
+        return std::sqrt(sum * 0.25f);
+    }
     if (acc == nullptr || !acc->noiseReady || acc->noiseTolerance <= 0.0f) return 0.0f;
     const float variance = acc->noiseVar[kNoiseBins / 2];
     if (variance <= 0.0f) return 0.0f;
@@ -1267,7 +1338,7 @@ void demosaicAndTone(const float* plane, int width, int height,
                      float localToneStrength = 0.0f,
                      float shadowLift = 0.0f,
                      float shadowLiftMax = 0.0f,
-                     const uint16_t* raw = nullptr, const int* black = nullptr, int white = 0) {
+                     const uint16_t* raw = nullptr, const int* black = nullptr, int white = 0, const float* wb = nullptr) {
     const int w1 = width;
     const int w2 = width * 2;
 
@@ -1361,7 +1432,7 @@ void demosaicAndTone(const float* plane, int width, int height,
                 }
 
                 if constexpr (Ablation == kToneFull) {
-                    neutraliseSaturation(r, g, b, cfaSaturation(raw, width, height, x, y, black, white));
+                    neutraliseSaturation(r, g, b, cfaSaturation(raw, width, height, x, y, black, white, wb));
                 }
                 // RGBA_8888 is byte order R,G,B,A in memory.
                 if constexpr (Ablation == kToneNoDisplayChain) {
@@ -1877,7 +1948,7 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
     tDemosaic = nowMicros();
     demosaicAndTone<kToneFull>(plane.data(), width, height, dstBase, stride,
                                cfa, m, tone, display, shoulder, nullptr, gridPtr, localTone,
-                               shadowLift, shadowLiftMax, src, black, white);
+                               shadowLift, shadowLiftMax, src, black, white, wb);
 
     const int64_t tEnd = nowMicros();
     LOGI("develop: prepass %lldms, local tone grid %lldms, demosaic+tone %lldms, total %lldms",

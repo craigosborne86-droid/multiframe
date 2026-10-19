@@ -253,14 +253,16 @@ private:
     bool Compose(int x, int y, float* rgb) const;
 
     long accumulateFull(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
-                        const double* h, const Mask& mask, const Seam* seam = nullptr);
+                        const double* h, const Mask& mask, const Seam* seam = nullptr,
+                        float gain = 1.0f);
     void accumulateLevel(Level& level, int tileWidth, int tileHeight,
                          const double* inverse, const Mask& mask,
                          const float* pyramid, int pyramidWidth, int pyramidHeight,
                          const Seam* seam = nullptr);
     /** Cuts the seam between the new tile and the canvas; false where the tile overlaps nothing. */
     bool cutSeam(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
-                 const double* h, const double* inverse, const Mask& detail, Seam& out) const;
+                 const double* h, const double* inverse, const Mask& detail, Seam& out,
+                 float gain = 1.0f) const;
 
     uint16_t* data_ = nullptr;
     size_t bytes_ = 0;

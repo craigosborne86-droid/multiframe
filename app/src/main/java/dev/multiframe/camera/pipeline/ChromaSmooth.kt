@@ -212,11 +212,12 @@ object ChromaSmooth {
                 tap(j0 * hw + i1, tx * (1f - ty))
                 tap(j1 * hw + i0, (1f - tx) * ty)
                 tap(j1 * hw + i1, tx * ty)
-                if (sumW <= 1e-6f) continue
-                val sCb = sumCb / sumW
-                val sCr = sumCr / sumW
-                val smoothedCb = ownCb + (sCb - ownCb) * params.amount
-                val smoothedCr = ownCr + (sCr - ownCr) * params.amount
+                if (sumW <= 0f) continue
+                // Weak support must fade, not switch a foreign chroma on at 1e-6.
+                // One code of luma noise otherwise causes a large colour jump.
+                val denominator = maxOf(sumW, 0.01f)
+                val smoothedCb = ownCb + (sumCb - ownCb * sumW) / denominator * params.amount
+                val smoothedCr = ownCr + (sumCr - ownCr * sumW) / denominator * params.amount
                 pixels[index] = pack(p, l, smoothedCb, smoothedCr)
             }
         }

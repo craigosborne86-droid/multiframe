@@ -13,6 +13,16 @@ import kotlin.random.Random
  */
 class HotPixelsTest {
 
+    @Test fun belowBlackNeighboursDoNotEraseValidShadowSamples() {
+        val sensor = SensorProfile.DEFAULT
+        val black = sensor.blackAt(4, 4)
+        val raw = ShortArray(81) { 0 }
+        raw[4 * 9 + 4] = (black + 5).toShort()
+        val frame = BayerFrame(9, 9, raw)
+        HotPixels.suppressInFrame(frame, sensor)
+        assertThat(frame.data[4 * 9 + 4].toInt()).isEqualTo(black + 5)
+    }
+
     private val width = 64
     private val height = 48
 

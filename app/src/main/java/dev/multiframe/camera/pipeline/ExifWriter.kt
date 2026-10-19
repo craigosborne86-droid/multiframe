@@ -188,9 +188,23 @@ object ExifWriter {
 
     /** Writes the metadata onto an already-saved image. */
     fun write(context: Context, uri: Uri, metadata: CaptureMetadata): Boolean = try {
+        // Decode only the JPEG header. The 2x and native maximum-resolution
+        // paths write pixels without a Java Bitmap, so their actual dimensions
+        // must be read from the encoded output rather than inferred from the
+        // sensor's default (often binned) characteristics.
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use {
+            android.graphics.BitmapFactory.decodeStream(it, null, bounds)
+        }
         context.contentResolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
             val exif = ExifInterface(descriptor.fileDescriptor)
             apply(exif, metadata)
+            if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                exif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, bounds.outWidth.toString())
+                exif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, bounds.outHeight.toString())
+                exif.setAttribute(ExifInterface.TAG_PIXEL_X_DIMENSION, bounds.outWidth.toString())
+                exif.setAttribute(ExifInterface.TAG_PIXEL_Y_DIMENSION, bounds.outHeight.toString())
+            }
             exif.saveAttributes()
             true
         } ?: false

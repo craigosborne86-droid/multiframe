@@ -422,14 +422,12 @@ void smooth(uint8_t* base, int width, int height, size_t stride,
                         tap(yB0, cbB0, crB0, vmulq_f32(vOneMinusTx, vTy));
                         tap(yB1, cbB1, crB1, vmulq_f32(vTx, vTy));
 
-                        // A lane with no tap of like brightness keeps its own
-                        // chroma: its smoothed value is set to its own.
-                        const uint32x4_t none = vcleq_f32(sumW, vdupq_n_f32(1e-6f));
-                        const float32x4_t safeW = vbslq_f32(none, vdupq_n_f32(1.0f), sumW);
-                        const float32x4_t sCb = vbslq_f32(none, ownCb, vdivq_f32(sumCb, safeW));
-                        const float32x4_t sCr = vbslq_f32(none, ownCr, vdivq_f32(sumCr, safeW));
-                        const float32x4_t cb = vmlaq_f32(ownCb, vsubq_f32(sCb, ownCb), vAmount);
-                        const float32x4_t cr = vmlaq_f32(ownCr, vsubq_f32(sCr, ownCr), vAmount);
+                        // Fade weak support continuously toward the pixel's own chroma.
+                        const float32x4_t denominator = vmaxq_f32(sumW, vdupq_n_f32(0.01f));
+                        const float32x4_t cb = vmlaq_f32(ownCb,
+                            vdivq_f32(vsubq_f32(sumCb, vmulq_f32(ownCb, sumW)), denominator), vAmount);
+                        const float32x4_t cr = vmlaq_f32(ownCr,
+                            vdivq_f32(vsubq_f32(sumCr, vmulq_f32(ownCr, sumW)), denominator), vAmount);
                         const float32x4_t red = vaddq_f32(vL, cr);
                         const float32x4_t blue = vaddq_f32(vL, cb);
                         const float32x4_t green = vmulq_f32(vsubq_f32(vsubq_f32(vL, vmulq_f32(vWr, red)), vmulq_f32(vWb, blue)), vInvG);
@@ -477,9 +475,10 @@ void smooth(uint8_t* base, int width, int height, size_t stride,
                     tap(yA, cbA, crA, i1h, tx * (1.0f - ty));
                     tap(yB, cbB, crB, i0h, (1.0f - tx) * ty);
                     tap(yB, cbB, crB, i1h, tx * ty);
-                    if (sumW <= 1e-6f) return;
-                    const float cb = ownCb + (sumCb / sumW - ownCb) * amount;
-                    const float cr = ownCr + (sumCr / sumW - ownCr) * amount;
+                    if (sumW <= 0.0f) return;
+                    const float denominator = std::max(sumW, 0.01f);
+                    const float cb = ownCb + (sumCb - ownCb * sumW) / denominator * amount;
+                    const float cr = ownCr + (sumCr - ownCr * sumW) / denominator * amount;
                     const float red = l + cr;
                     const float blue = l + cb;
                     const float green = (l - 0.2126f * red - 0.0722f * blue) / 0.7152f;

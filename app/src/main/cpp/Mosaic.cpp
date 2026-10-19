@@ -359,7 +359,8 @@ constexpr int64_t kSeamInfinity = INT64_C(1) << 40;
  * -- `MosaicBlendDeviceTest` holds it there.
  */
 bool MosaicCanvas::cutSeam(const uint8_t* rgba, int tileWidth, int tileHeight, int tileStride,
-                           const double* h, const double* inverse, const Mask& detail, Seam& out) const {
+                           const double* h, const double* inverse, const Mask& detail, Seam& out,
+                           float gain) const {
     out.present = false;
     if (data_ == nullptr || rgba == nullptr || detail.power <= 0.0f) return false;
 
@@ -445,7 +446,7 @@ bool MosaicCanvas::cutSeam(const uint8_t* rgba, int tileWidth, int tileHeight, i
                     const uint16_t* q = data_ + (static_cast<size_t>(qy) * width_ + qx) * kChannels;
                     if (q[3] == 0) continue;
                     const float canvasLuma = (0.2126f * q[0] + 0.7152f * q[1] + 0.0722f * q[2]) / 257.0f;
-                    sum += std::min(std::fabs(tileLuma(rgba, tileWidth, tileHeight, tileStride, tx, ty) - canvasLuma), kSeamDiffCap);
+                    sum += std::min(std::fabs(tileLuma(rgba, tileWidth, tileHeight, tileStride, tx, ty) * gain - canvasLuma), kSeamDiffCap);
                     ++taps;
                 }
             }
@@ -518,7 +519,7 @@ long MosaicCanvas::AddTile(const uint8_t* rgba, int tileWidth, int tileHeight,
 
 long MosaicCanvas::accumulateFull(const uint8_t* rgba, int tileWidth, int tileHeight,
                                   int tileStride, const double* h, const Mask& mask,
-                                  const Seam* seam) {
+                                  const Seam* seam, float gain) {
     if (data_ == nullptr || flattened_) return 0;
     if (seam != nullptr && !seam->present) seam = nullptr;
     if (rgba == nullptr || tileWidth <= 0 || tileHeight <= 0) return 0;
@@ -628,7 +629,7 @@ long MosaicCanvas::accumulateFull(const uint8_t* rgba, int tileWidth, int tileHe
             }
 
             for (int c = 0; c < 3; ++c) {
-                const float sample = acc[c] * (0.25f * 257.0f);
+                const float sample = acc[c] * (0.25f * 257.0f * gain);
 
                 // Running weighted mean: no separate sum to overflow, and the
                 // canvas stays at eight bytes per pixel instead of sixteen.
@@ -696,6 +697,8 @@ long MosaicCanvas::accumulateFull(const uint8_t* rgba, int tileWidth, int tileHe
  */
 long MosaicCanvas::AddTileBands(const uint8_t* rgba, int tileWidth, int tileHeight,
                                 int tileStride, const double* h, const float* feathers) {
+    if (data_ == nullptr || flattened_ || rgba == nullptr || h == nullptr ||
+        tileWidth <= 0 || tileHeight <= 0 || tileStride < tileWidth * 4) return 0;
     if (bands_ <= 1 || feathers == nullptr) {
         return AddTile(rgba, tileWidth, tileHeight, tileStride, h, feathers != nullptr ? feathers[0] : 64.0f);
     }
@@ -713,12 +716,46 @@ long MosaicCanvas::AddTileBands(const uint8_t* rgba, int tileWidth, int tileHeig
     double inverse[9];
     if (!invert3x3(h, inverse)) return 0;
 
+    // Brown–Lowe gain compensation: compare the new tile with pixels already
+    // covered by the mosaic, then use the median overlap ratio. The capture
+    // locks white balance, so one exposure scalar preserves chromaticity; the
+    // median ignores a moving subject occupying a minority of the overlap.
+    // No extra tile-sized copy is made: the scalar is applied during sampling
+    // and while constructing the Gaussian levels below.
+    std::vector<float> ratios;
+    const int stepX = std::max(1, tileWidth / 32);
+    const int stepY = std::max(1, tileHeight / 32);
+    for (int sy = stepY / 2; sy < tileHeight; sy += stepY) {
+        for (int sx = stepX / 2; sx < tileWidth; sx += stepX) {
+            double cx, cy;
+            if (!project(h, sx + 0.5, sy + 0.5, cx, cy)) continue;
+            const int x = static_cast<int>(std::floor(cx));
+            const int y = static_cast<int>(std::floor(cy));
+            if (x < 0 || y < 0 || x >= width_ || y >= height_) continue;
+            float canvas[3];
+            if (!Compose(x, y, canvas)) continue;
+            const uint8_t* px = rgba + static_cast<size_t>(sy) * tileStride + sx * 4;
+            const float tileY = 0.2126f * px[0] + 0.7152f * px[1] + 0.0722f * px[2];
+            const float canvasY = (0.2126f * canvas[0] + 0.7152f * canvas[1] +
+                                   0.0722f * canvas[2]) / 257.0f;
+            if (tileY > 8.0f && tileY < 245.0f && canvasY > 8.0f && canvasY < 245.0f) {
+                ratios.push_back(canvasY / tileY);
+            }
+        }
+    }
+    float gain = 1.0f;
+    if (ratios.size() >= 32) {
+        const auto mid = ratios.begin() + ratios.size() / 2;
+        std::nth_element(ratios.begin(), mid, ratios.end());
+        gain = std::clamp(*mid, 0.5f, 2.0f);
+    }
+
     // Where this tile takes over from the canvas in the detail band, decided
     // before anything is written: the cut reads the canvas as it stands.
     Seam seam;
-    cutSeam(rgba, tileWidth, tileHeight, tileStride, h, inverse, masks[0], seam);
+    cutSeam(rgba, tileWidth, tileHeight, tileStride, h, inverse, masks[0], seam, gain);
 
-    const long touched = accumulateFull(rgba, tileWidth, tileHeight, tileStride, h, masks[0], &seam);
+    const long touched = accumulateFull(rgba, tileWidth, tileHeight, tileStride, h, masks[0], &seam, gain);
     if (touched == 0) return 0;
 
     // The tile's Gaussian levels: box averages of four by four, then of those.
@@ -741,7 +778,7 @@ long MosaicCanvas::AddTileBands(const uint8_t* rgba, int tileWidth, int tileHeig
             }
             float* out = g1.data() + (static_cast<size_t>(j) * w1 + i) * 3;
             const float inv = 1.0f / (kLevelScale * kLevelScale);
-            out[0] = sum[0] * inv; out[1] = sum[1] * inv; out[2] = sum[2] * inv;
+            out[0] = sum[0] * inv * gain; out[1] = sum[1] * inv * gain; out[2] = sum[2] * inv * gain;
         }
     }
     accumulateLevel(wide_[0], tileWidth, tileHeight, inverse, masks[1], g1.data(), w1, h1);

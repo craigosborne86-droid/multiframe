@@ -3,6 +3,7 @@ package dev.multiframe.camera.pipeline
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.sqrt
+import kotlin.math.roundToInt
 
 /**
  * The result of a sub-pixel accumulation: full colour at twice the sensor's
@@ -75,9 +76,10 @@ class SubPixelResult(
  * scale; robustness weighting so a sample that disagrees with the reference
  * contributes little; and the reference frame's guaranteed contribution, so no
  * cell is composed entirely of rejected samples. The robustness comparison is
- * made at the *integer*-aligned reference position, exactly as the ordinary
- * merge makes it, which keeps the two samples on the same colour plane. The
- * fraction is spent on placement alone.
+ * made against the reference interpolated at the fractional physical position
+ * on the sample's own CFA lattice, with its interpolation uncertainty. Samples
+ * are exposure-normalised above their site's black pedestal before comparison
+ * and placement. The ordinary native Bayer merger retains even sensor shifts.
  *
  * ### This is the reference
  *
@@ -213,7 +215,8 @@ class SubPixelAccumulator(
                 // A clipped high-ISO sample carries no information about the
                 // scene above the clip; the reference has it.
                 if (invGain < 1f && rawAlt >= profile.whiteLevel.toFloat()) continue
-                val altV = rawAlt * invGain
+                // Exposure scales light above black, never the pedestal itself.
+                val altV = rawAlt * invGain + profile.blackAt(ax, ay) * (1f - invGain)
 
                 // The robustness comparison, against the reference *at the
                 // fractional position*, interpolated on this sample's own colour
@@ -235,7 +238,7 @@ class SubPixelAccumulator(
                 // sample that reads the step is kept.
                 val unc = referenceSample.uncertainty
                 val n2 = nv[binOf(refV)] + unc * unc
-                val r = if (d2 <= n2) 1f else n2 / d2
+                val r = if (d2 <= n2) 1f else if (d2 < 4f * n2) (4f * n2 - d2) / (3f * d2) else 0f
 
                 // Placement on the canvas: twice the reference-frame position.
                 val u = 2f * fx
@@ -429,6 +432,8 @@ class SubPixelAccumulator(
             }
         }
 
+        halfPixelBoxPrefilter(rgb)
+
         val mean = if (contributionCount > 0) (contributionSum / contributionCount).toFloat() else 0f
         return SubPixelResult(
             width, height, rgb,
@@ -442,6 +447,24 @@ class SubPixelAccumulator(
                 if (interiorCells > 0) (interiorByChannel[c].toDouble() / interiorCells).toFloat() else 0f
             },
         )
+    }
+
+    /** Reference for the native in-place 1:6:1 half-pixel box integration. */
+    private fun halfPixelBoxPrefilter(rgb: FloatArray) {
+        val source = IntArray(rgb.size) { rgb[it].roundToInt().coerceIn(0, 65535) }
+        val horizontal = IntArray(source.size)
+        for (y in 0 until height) for (x in 0 until width) for (c in 0 until 3) {
+            val i = (y * width + x) * 3 + c
+            val left = source[(y * width + (x - 1).coerceAtLeast(0)) * 3 + c]
+            val right = source[(y * width + (x + 1).coerceAtMost(width - 1)) * 3 + c]
+            horizontal[i] = (left + 6 * source[i] + right + 4) shr 3
+        }
+        for (y in 0 until height) for (x in 0 until width) for (c in 0 until 3) {
+            val i = (y * width + x) * 3 + c
+            val above = horizontal[((y - 1).coerceAtLeast(0) * width + x) * 3 + c]
+            val below = horizontal[((y + 1).coerceAtMost(height - 1) * width + x) * 3 + c]
+            rgb[i] = ((above + 6 * horizontal[i] + below + 4) shr 3).toFloat()
+        }
     }
 
     /**
@@ -507,7 +530,7 @@ class SubPixelAccumulator(
                         // tolerance for the whole frame.
                         if (referenceSample.uncertainty <= FLAT_FOR_NOISE) {
                             val refV = referenceSample.value
-                            val altV = rawAlt.toFloat() * invGain
+                            val altV = rawAlt.toFloat() * invGain + profile.blackAt(ax, ay) * (1f - invGain)
                             val b = binOf(refV)
                             if (samples[b].size < 3000) samples[b].add(abs(altV - refV))
                         }

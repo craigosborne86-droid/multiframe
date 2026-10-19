@@ -29,6 +29,30 @@ class BayerMergerTest {
         return sqrt(s / n)
     }
 
+    @Test fun sixteenStaticFramesContributeToShadowIntegration() {
+        val clean = TestBayer.scene(w, h)
+        val frames = (0 until 16).map { TestBayer.addNoise(clean, 10f, seed = 900 + it) }
+        val (merged, stats) = accumulate(frames)
+        val ratio = rms(merged, clean) / rms(frames.first(), clean)
+        println("16-frame RMS ratio=$ratio ideal=0.25 contribution=${stats.meanContribution}")
+        assertThat(stats.framesMerged).isEqualTo(16)
+        assertThat(stats.meanContribution).isGreaterThan(0.9f)
+        assertThat(ratio).isLessThan(0.30)
+    }
+
+    @Test fun displacedSpireHasZeroContributionOutsideNoiseEnvelope() {
+        val reference = BayerFrame(w, h, ShortArray(w * h) { 800 })
+        val moved = reference.data.copyOf()
+        for (y in 30 until 100) for (x in 80 until 86) moved[y * w + x] = 200
+        val acc = BayerAccumulator(w, h, TestBayer.PROFILE, BayerMergeParams(minNoiseSigma = 20f))
+        acc.setReference(reference)
+        val field = AlignmentField(3, 2, IntArray(6), IntArray(6))
+        repeat(15) { acc.add(BayerFrame(w, h, moved), field) }
+        val (merged, stats) = acc.finish()
+        for (y in 30 until 100) for (x in 80 until 86) assertThat(merged.at(x, y)).isEqualTo(800)
+        assertThat(stats.meanContribution).isGreaterThan(0.95f)
+    }
+
     // The failure mode unique to raw merging: an odd alignment offset lands red
     // samples on green ones. Colour separation is the canary.
     @Test
@@ -363,7 +387,17 @@ class BayerMergerTest {
             }
         }
         println("DCG highlight rejection: worst deviation in bright pixels = $worstHighlight")
-        assertThat(worstHighlight).isLessThan(20)
+        // Two noisy low-gain samples cannot guarantee a <20-code maximum
+        // across thousands of pixels. Bound by four input sigmas instead.
+        assertThat(worstHighlight).isLessThan(32)
+        val lowOnly = BayerAccumulator(w, h, TestBayer.PROFILE)
+        lowOnly.setReference(TestBayer.addNoise(clean, 8f, seed = 330))
+        lowOnly.add(TestBayer.addNoise(clean, 8f, seed = 331))
+        val baseline = lowOnly.finish().first
+        for (y in inset until h - inset) for (x in inset until w - inset) {
+            if (clean.at(x, y) > white * 0.6)
+                assertThat(abs(merged.at(x, y) - baseline.at(x, y))).isAtMost(1)
+        }
     }
 
     @Test

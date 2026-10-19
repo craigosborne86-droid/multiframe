@@ -155,6 +155,14 @@ object ColorScience {
     /** The reference white DNG's forward matrices deliver. */
     val D50_WHITE = floatArrayOf(0.9642f, 1.0000f, 0.8249f)
 
+    /** Linear Bradford cone transform, used by DNG Chapter 6 without a ForwardMatrix. */
+    private val BRADFORD = Mat3(floatArrayOf(
+        0.8951f, 0.2664f, -0.1614f,
+        -0.7502f, 1.7135f, 0.0367f,
+        0.0389f, -0.0685f, 1.0296f,
+    ))
+    private val BRADFORD_INVERSE = BRADFORD.invert()!!
+
     /**
      * Everything a sensor's characterisation contains.
      *
@@ -169,6 +177,7 @@ object ColorScience {
         val calibration2: Mat3 = Mat3.IDENTITY,
         val forward1: Mat3? = null,
         val forward2: Mat3? = null,
+        val analogBalance: Mat3 = Mat3.IDENTITY,
         /**
          * Colour temperatures of the two illuminants the matrices were measured
          * under, in kelvin.
@@ -220,11 +229,11 @@ object ColorScience {
     }
 
     /**
-     * Builds the matrix taking white-balanced camera RGB to linear sRGB.
+     * Builds the DNG Chapter 6 camera-to-XYZ transform, then converts to linear sRGB.
      *
-     * [neutral] is the camera-space colour of a white object under the scene's
-     * light: the reciprocal of the white balance gains, which is what the DNG
-     * specification calls AsShotNeutral.
+     * The result takes unbalanced camera coordinates. [neutral] is the
+     * camera-space colour of scene white (AsShotNeutral); callers that applied
+     * gains during demosaicing use [balancedCameraToSrgb] instead.
      *
      * [blend] selects between the two illuminants, 0 for the first and 1 for
      * the second.
@@ -234,22 +243,52 @@ object ColorScience {
         neutral: FloatArray,
         blend: Float,
     ): Mat3 {
+        val cc = Mat3.lerp(calibration.calibration1, calibration.calibration2, blend)
+        val individual = calibration.analogBalance * cc
+        val reference = individual.invert() ?: return Mat3.IDENTITY
         val forward = interpolatedForward(calibration, blend)
-        if (forward != null) {
-            // The forward matrix path, which is what DNG prefers: it maps
-            // white-balanced camera space directly to XYZ under D50, and by
-            // construction it takes the neutral to the reference white exactly.
-            val whiteBalanced = forward.normalisedFor(neutral, D50_WHITE)
-            return XYZ_TO_SRGB * D50_TO_D65 * whiteBalanced
+        val cameraToD50 = if (forward != null) {
+            // DNG 1.7.1 Chapter 6, "If the ForwardMatrix tags are included":
+            // FM * inverse(diag(inverse(AB * CC) * CameraNeutral)) * inverse(AB * CC).
+            val n = FloatArray(3)
+            reference.apply(neutral[0], neutral[1], neutral[2], n)
+            if (n.any { it <= 0f }) return Mat3.IDENTITY
+            forward * Mat3.diagonal(1f / n[0], 1f / n[1], 1f / n[2]) * reference
+        } else {
+            // DNG Chapter 6, "If the ForwardMatrix tags are not included":
+            // CA * inverse(AB * CC * CM), with linear Bradford adaptation from
+            // the scene white to D50. Row normalisation is not this transform.
+            val colour = Mat3.lerp(calibration.colorMatrix1, calibration.colorMatrix2, blend)
+            val cameraToXyz = (individual * colour).invert() ?: return Mat3.IDENTITY
+            val sourceWhite = FloatArray(3)
+            cameraToXyz.apply(neutral[0], neutral[1], neutral[2], sourceWhite)
+            bradfordAdaptation(sourceWhite, D50_WHITE) * cameraToXyz
         }
+        return XYZ_TO_SRGB * D50_TO_D65 * cameraToD50
+    }
 
-        // No forward matrix. Invert the colour matrix instead, which is less
-        // well conditioned but is what the data allows.
-        val colour = Mat3.lerp(calibration.colorMatrix1, calibration.colorMatrix2, blend)
-        val calibrationTransform =
-            Mat3.lerp(calibration.calibration1, calibration.calibration2, blend)
-        val cameraToXyz = (calibrationTransform * colour).invert() ?: return Mat3.IDENTITY
-        return XYZ_TO_SRGB * D50_TO_D65 * cameraToXyz.normalisedFor(neutral, D50_WHITE)
+    /** Matrix for a demosaic whose white-balance gains have already been applied once. */
+    fun balancedCameraToSrgb(
+        calibration: Calibration,
+        neutral: FloatArray,
+        blend: Float,
+        gains: FloatArray,
+    ): Mat3 {
+        require(gains.size >= 4 && gains.all { it > 0f })
+        val green = (gains[1] + gains[2]) * 0.5f
+        return cameraToSrgb(calibration, neutral, blend) *
+            Mat3.diagonal(1f / gains[0], 1f / green, 1f / gains[3])
+    }
+
+    private fun bradfordAdaptation(sourceWhite: FloatArray, targetWhite: FloatArray): Mat3 {
+        val src = FloatArray(3)
+        val dst = FloatArray(3)
+        BRADFORD.apply(sourceWhite[0], sourceWhite[1], sourceWhite[2], src)
+        BRADFORD.apply(targetWhite[0], targetWhite[1], targetWhite[2], dst)
+        if (src.any { it <= 0f }) return Mat3.IDENTITY
+        return BRADFORD_INVERSE * Mat3.diagonal(
+            dst[0] / src[0], dst[1] / src[1], dst[2] / src[2],
+        ) * BRADFORD
     }
 
     private fun interpolatedForward(calibration: Calibration, blend: Float): Mat3? {
@@ -383,14 +422,11 @@ object ColorScience {
         if (neutral.size < 3) return null
         if (neutral[0] <= 0f || neutral[1] <= 0f || neutral[2] <= 0f) return null
 
-        val cameraToXyz = interpolatedForward(calibration, blend)
-            ?: run {
-                val colour =
-                    Mat3.lerp(calibration.colorMatrix1, calibration.colorMatrix2, blend)
-                val calibrationTransform =
-                    Mat3.lerp(calibration.calibration1, calibration.calibration2, blend)
-                (calibrationTransform * colour).invert() ?: return null
-            }
+        // DNG Chapter 6 derives white-balance xy from inverse(AB * CC * CM),
+        // regardless of whether a rendering ForwardMatrix is present.
+        val colour = Mat3.lerp(calibration.colorMatrix1, calibration.colorMatrix2, blend)
+        val cc = Mat3.lerp(calibration.calibration1, calibration.calibration2, blend)
+        val cameraToXyz = (calibration.analogBalance * cc * colour).invert() ?: return null
 
         val xyz = FloatArray(3)
         cameraToXyz.apply(neutral[0], neutral[1], neutral[2], xyz)

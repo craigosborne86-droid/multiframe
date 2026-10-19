@@ -32,17 +32,17 @@ class ColorScienceTest {
     /** Forward matrices map white-balanced camera space to XYZ under D50. */
     private val forwardDaylight = Mat3(
         floatArrayOf(
-            0.62f, 0.24f, 0.10f,
+            0.6242f, 0.24f, 0.10f,
             0.28f, 0.68f, 0.04f,
-            0.02f, 0.06f, 0.74f,
+            0.0249f, 0.06f, 0.74f,
         )
     )
 
     private val forwardTungsten = Mat3(
         floatArrayOf(
-            0.58f, 0.26f, 0.12f,
+            0.5842f, 0.26f, 0.12f,
             0.26f, 0.70f, 0.04f,
-            0.03f, 0.05f, 0.74f,
+            0.0349f, 0.05f, 0.74f,
         )
     )
 
@@ -113,6 +113,24 @@ class ColorScienceTest {
 
         assertThat(white[0]).isWithin(0.02f).of(white[1])
         assertThat(white[1]).isWithin(0.02f).of(white[2])
+    }
+
+    @Test
+    fun `white balance is applied once even when calibration mixes camera channels`() {
+        val neutral = floatArrayOf(0.55f, 1f, 0.62f)
+        val gains = floatArrayOf(1f / neutral[0], 1f, 1f, 1f / neutral[2])
+        val crossChannelCalibration = calibration.copy(
+            calibration1 = Mat3(floatArrayOf(1f, .03f, 0f, 0f, 1f, .02f, 0f, 0f, 1f)),
+            calibration2 = Mat3(floatArrayOf(1f, .03f, 0f, 0f, 1f, .02f, 0f, 0f, 1f)),
+        )
+        val raw = floatArrayOf(.26f, .34f, .41f)
+        val whiteBalanced = floatArrayOf(raw[0] * gains[0], raw[1], raw[2] * gains[3])
+        val expected = applied(ColorScience.cameraToSrgb(crossChannelCalibration, neutral, .5f), raw[0], raw[1], raw[2])
+        val actual = applied(
+            ColorScience.balancedCameraToSrgb(crossChannelCalibration, neutral, .5f, gains),
+            whiteBalanced[0], whiteBalanced[1], whiteBalanced[2],
+        )
+        for (i in 0..2) assertThat(actual[i]).isWithin(1e-5f).of(expected[i])
     }
 
     // ------------------------------------------------------------------

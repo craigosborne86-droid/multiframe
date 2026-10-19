@@ -367,15 +367,15 @@ object RawDeveloper {
         val bitmap = android.graphics.Bitmap.createBitmap(
             w, h, android.graphics.Bitmap.Config.ARGB_8888,
         )
-        correctDefects(frame, sensor, params)
         val gain = resolveGain(frame, sensor, color, params)
+        val clipFrame = correctDefects(frame, sensor, params)
         val resolved = params.withGain(gain)
         val grid = if (resolved.localTone > 0f || resolved.shadowLift > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
         val band = IntArray(w * bandRows)
         var y = 0
         while (y < h) {
             val rows = min(bandRows, h - y)
-            developBand(frame, sensor, color, resolved, y, rows, band, shading, grid)
+            developBand(frame, sensor, color, resolved, y, rows, band, shading, grid, clipFrame)
             bitmap.setPixels(band, 0, w, 0, y, w, rows)
             y += rows
         }
@@ -412,11 +412,12 @@ object RawDeveloper {
         out: IntArray,
         shading: ShadingMap?,
         grid: BilateralGrid? = null,
+        clipFrame: BayerFrame = frame,
     ) {
         val w = frame.width
         val h = frame.height
         parallelRows(rows) { rStart, rEnd ->
-            renderRows(frame, sensor, color, params, w, h, yOffset + rStart, yOffset + rEnd, out, yOffset, shading, grid)
+            renderRows(frame, sensor, color, params, w, h, yOffset + rStart, yOffset + rEnd, out, yOffset, shading, grid, clipFrame = clipFrame)
         }
     }
 
@@ -432,15 +433,17 @@ object RawDeveloper {
         shading: ShadingMap? = null,
         /** Reference-only ablation for the offline bench. Production always enables this. */
         recoverSensorSaturation: Boolean = true,
+        observer: DevelopObserver? = null,
     ): IntArray {
         val w = frame.width
         val h = frame.height
         val out = IntArray(w * h)
-        correctDefects(frame, sensor, params)
+        // NativeMerge meters the untouched CFA before its fused prepass.
         val resolved = params.withGain(resolveGain(frame, sensor, color, params))
+        val clipFrame = correctDefects(frame, sensor, params)
         val grid = if (resolved.localTone > 0f || resolved.shadowLift > 0f) BilateralGrid.fromFrame(frame, sensor, color, resolved, shading) else null
         parallelRows(h) { yStart, yEnd ->
-            renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading, grid, recoverSensorSaturation)
+            renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading, grid, recoverSensorSaturation, clipFrame, observer)
         }
         // Geometry before anything that reads a neighbourhood. Both of the
         // passes below decide what a pixel is from the pixels around it, and
@@ -450,12 +453,16 @@ object RawDeveloper {
         // It also removes most of the work Defringe would otherwise have: a
         // fringe that has been put back where it belongs is not a fringe.
         resolved.optics?.takeIf { it.hasWork }?.let { Optics.apply(out, w, h, it) }
+        observer?.display(DevelopObserver.DisplayStage.PRE_CHROMA, out, w, h)
         // The colour speckle, before anything reads chroma.
         if (resolved.chroma.enabled) ChromaSmooth.apply(out, w, h, resolved.chroma)
+        observer?.display(DevelopObserver.DisplayStage.POST_CHROMA, out, w, h)
 
         // Defringe next: sharpening a fringe would make it worse.
         if (resolved.defringe.enabled) Defringe.apply(out, w, h, resolved.defringe)
+        observer?.display(DevelopObserver.DisplayStage.POST_DEFRINGE, out, w, h)
         if (resolved.sharpen.enabled) Sharpen.apply(out, w, h, resolved.sharpen)
+        observer?.display(DevelopObserver.DisplayStage.POST_SHARPEN, out, w, h)
         return out
     }
 
@@ -474,6 +481,8 @@ object RawDeveloper {
         shading: ShadingMap?,
         grid: BilateralGrid? = null,
         recoverSensorSaturation: Boolean = true,
+        clipFrame: BayerFrame = frame,
+        observer: DevelopObserver? = null,
     ) {
         val m = color.matrix
         val rgb = FloatArray(3)
@@ -484,6 +493,7 @@ object RawDeveloper {
                 // measured at this site is kept exactly, and only the two
                 // missing colours are interpolated.
                 Demosaic.pixel(frame, sensor, color, x, y, rgb, shading)
+                observer?.linear(DevelopObserver.LinearStage.BALANCED_DEMOSAIC, x, y, rgb)
                 val r0 = rgb[0]
                 val g0 = rgb[1]
                 val b0 = rgb[2]
@@ -491,6 +501,7 @@ object RawDeveloper {
                 rgb[0] = (m[0] * r0 + m[1] * g0 + m[2] * b0) * params.exposureGain
                 rgb[1] = (m[3] * r0 + m[4] * g0 + m[5] * b0) * params.exposureGain
                 rgb[2] = (m[6] * r0 + m[7] * g0 + m[8] * b0) * params.exposureGain
+                observer?.linear(DevelopObserver.LinearStage.MATRIX, x, y, rgb)
                 // The matrix's overshoot on a spectral colour, brought in: §3.1 step 6a.
                 ToneCurve.compressPurity(rgb, params.purityThreshold, params.purityCeiling)
                 // The local operator, before the global curve: REFERENCE §3.5.
@@ -501,8 +512,10 @@ object RawDeveloper {
                     )
                     rgb[0] *= k; rgb[1] *= k; rgb[2] *= k
                 }
+                observer?.linear(DevelopObserver.LinearStage.PRE_TONE, x, y, rgb)
                 ToneCurve.renderLinear(rgb, params)
-                if (recoverSensorSaturation) SensorSaturation.neutralise(rgb, SensorSaturation.cfaWeight(frame, sensor, x, y))
+                if (recoverSensorSaturation) SensorSaturation.neutralise(rgb, SensorSaturation.cfaWeight(clipFrame, sensor, x, y, color))
+                observer?.linear(DevelopObserver.LinearStage.POST_TONE, x, y, rgb)
 
                 out[(y - rowBase) * w + x] = (0xFF shl 24) or
                     (encode(rgb[0], params) shl 16) or
@@ -515,16 +528,18 @@ object RawDeveloper {
     /**
      * Replaces defective sensor sites, in place on the frame.
      *
-     * Before exposure is measured, so a stuck-bright site cannot drag the
-     * highlight percentile and darken the whole picture on its own.
+     * Keep the already-needed source copy as the pre-defect clipping evidence.
+     * Exposure, like NativeMerge, is measured before this prepass.
      */
     private fun correctDefects(
         frame: BayerFrame,
         sensor: SensorProfile,
         params: DevelopParams,
-    ) {
-        if (params.hotPixelThreshold <= 0f) return
-        HotPixels.suppressInFrame(frame, sensor, params.hotPixelThreshold)
+    ): BayerFrame {
+        if (params.hotPixelThreshold <= 0f) return frame
+        val source = frame.data.copyOf()
+        HotPixels.suppressInFrame(frame, sensor, params.hotPixelThreshold, source)
+        return BayerFrame(frame.width, frame.height, source)
     }
 
     /** Gamma encode, then the display-domain contrast stage. */

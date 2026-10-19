@@ -179,10 +179,12 @@ void developRow(const uint16_t* src, int width, int y, const Params& p, const fl
             r *= k; g *= k; b *= k;
         }
         renderLinear(r, g, b, p.tone, shoulder);
-        float clipped = 1.0f;
-        for (int c = 0; c < 3; ++c) clipped = std::min(clipped,
-            (static_cast<float>(s[c]) - p.black[c]) / std::max(1.0f, p.white - p.black[c]));
-        neutraliseSaturation(r, g, b, saturationWeight(clipped));
+        const float32x4_t sensorCodes = { static_cast<float>(s[0]), static_cast<float>(s[1]),
+            static_cast<float>(s[2]), static_cast<float>(s[2]) };
+        const float32x4_t blacks = { p.black[0], p.black[1], p.black[2], p.black[2] };
+        const float32x4_t gains = { p.wb[0], p.wb[1], p.wb[2], p.wb[2] };
+        const float32x4_t ranges = vmaxq_f32(vsubq_f32(vdupq_n_f32(p.white), blacks), vdupq_n_f32(1.0f));
+        neutraliseSaturation(r, g, b, saturationEvidence(vdivq_f32(vsubq_f32(sensorCodes, blacks), ranges), gains));
 
         uint8_t* d = dst + static_cast<size_t>(x) * 3;
         d[0] = display(r);
@@ -210,14 +212,17 @@ inline uint8_t shiftChannel(int value, float shift) {
  * computes luma for its own rows plus one above and below, and the plane is
  * never larger than a band.
  *
- * Every neighbour a pixel reads comes from that band-local luma, computed
- * from the untouched image before the band writes anything, so writing in
- * place is safe for the same reason it is in nSharpen.
+ * A neighbor band may finish writing before this band reads its halo. Snapshot
+ * the two outside rows for every band before starting any workers; each worker
+ * then reads its own untouched interior and those immutable halos. Storage is
+ * two rows per band, rather than a whole-image float plane.
  */
 void sharpenRgb8(uint8_t* base, int width, int height, size_t stride,
                  float amount, float threshold, float maxShift) {
     if (amount <= 0.0f || width < 3 || height < 3) return;
 
+    // Indexed by band start. Only actual band starts allocate two luma rows.
+    std::vector<std::vector<float>> halos(static_cast<size_t>(height));
     parallelBands(height, [&](int y0, int y1) {
         const int from = std::max(y0, 1);
         const int to = std::min(y1, height - 1);
@@ -227,8 +232,13 @@ void sharpenRgb8(uint8_t* base, int width, int height, size_t stride,
         const int lumaRows = (to - from) + 2;
         std::vector<float> luma(static_cast<size_t>(lumaRows) * width);
         for (int j = 0; j < lumaRows; ++j) {
-            const uint8_t* row = base + static_cast<size_t>(from - 1 + j) * stride;
             float* l = luma.data() + static_cast<size_t>(j) * width;
+            if (j == 0 || j == lumaRows - 1) {
+                const float* saved = halos[y0].data() + (j == 0 ? 0 : width);
+                std::copy(saved, saved + width, l);
+                continue;
+            }
+            const uint8_t* row = base + static_cast<size_t>(from - 1 + j) * stride;
             for (int x = 0; x < width; ++x) {
                 const uint8_t* q = row + static_cast<size_t>(x) * 3;
                 l[x] = lumaOf(q[0], q[1], q[2]);
@@ -299,6 +309,21 @@ void sharpenRgb8(uint8_t* base, int width, int height, size_t stride,
                 q[0] = shiftChannel(q[0], shift);
                 q[1] = shiftChannel(q[1], shift);
                 q[2] = shiftChannel(q[2], shift);
+            }
+        }
+    }, [&](int y0, int y1) {
+        const int from = std::max(y0, 1);
+        const int to = std::min(y1, height - 1);
+        if (from >= to) return;
+        auto& saved = halos[y0];
+        saved.resize(static_cast<size_t>(width) * 2);
+        for (int edge = 0; edge < 2; ++edge) {
+            const int y = edge == 0 ? from - 1 : to;
+            const uint8_t* row = base + static_cast<size_t>(y) * stride;
+            float* l = saved.data() + static_cast<size_t>(edge) * width;
+            for (int x = 0; x < width; ++x) {
+                const uint8_t* q = row + static_cast<size_t>(x) * 3;
+                l[x] = lumaOf(q[0], q[1], q[2]);
             }
         }
     });
@@ -420,7 +445,7 @@ bool developToRgb8(uint16_t* rgb16, int width, int height, const Params& params,
 }
 
 bool developToJpeg(uint16_t* rgb16, int width, int height, const Params& p, int quality,
-                   const std::function<bool(const unsigned char*, size_t)>& sink, Stats* stats) {
+                   const std::function<bool(const unsigned char*, size_t)>& sink, Stats* stats, const float* crop) {
     if (width <= 0 || height <= 0) return false;
     const size_t stride = static_cast<size_t>(width) * 3;
     const size_t bytes = stride * static_cast<size_t>(height);
@@ -437,7 +462,11 @@ bool developToJpeg(uint16_t* rgb16, int width, int height, const Params& p, int 
     bool ok = false;
     if (developed) {
         const int64_t tEncode = nowMicros();
-        ok = jpeg::encode(out, width, height, stride, 3, quality, 0, sink);
+        const int x = crop ? std::clamp(static_cast<int>(crop[0] * width), 0, width - 1) : 0;
+        const int y = crop ? std::clamp(static_cast<int>(crop[1] * height), 0, height - 1) : 0;
+        const int right = crop ? std::clamp(static_cast<int>(crop[2] * width), x + 1, width) : width;
+        const int bottom = crop ? std::clamp(static_cast<int>(crop[3] * height), y + 1, height) : height;
+        ok = jpeg::encode(out + y * stride + x * 3, right - x, bottom - y, stride, 3, quality, 0, sink);
         local.encodeMicros = nowMicros() - tEncode;
         LOGI("linear develop encode %lldms, %s", static_cast<long long>(local.encodeMicros / 1000),
              ok ? "ok" : "failed");

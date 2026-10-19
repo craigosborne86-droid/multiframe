@@ -50,6 +50,8 @@ class BayerAccumulator(
     private var refPyramid: List<Plane>? = null
     private var released = false
     private var noiseVar: FloatArray? = null
+    private var referenceNoise: RawNoiseModel? = null
+    private var usingMetadataNoise = false
 
     private var merged = 0
     private var contributionSum = 0.0
@@ -72,9 +74,10 @@ class BayerAccumulator(
     private val winFarX = raisedCosine(tileW)
     private val winFarY = raisedCosine(tileH)
 
-    fun setReference(frame: BayerFrame) {
+    fun setReference(frame: BayerFrame, noise: RawNoiseModel? = null) {
         require(frame.width == width && frame.height == height)
         reference = frame
+        referenceNoise = noise
         refPyramid = Aligner.buildPyramid(lumaProxy(frame))
         for (i in sum.indices) {
             sum[i] = (frame.data[i].toInt() and 0xFFFF).toFloat()
@@ -134,7 +137,7 @@ class BayerAccumulator(
      * weight and the pixel falls back on the reference. The failure is less
      * denoising in that band, not a ghost -- and never a seam.
      */
-    fun add(frame: BayerFrame, field: AlignmentField, gainScale: Float = 1f) {
+    fun add(frame: BayerFrame, field: AlignmentField, gainScale: Float = 1f, noise: RawNoiseModel? = null) {
         val ref = reference ?: error("setReference first")
         require(frame.width == width && frame.height == height)
         require(field.tilesX == tilesX && field.tilesY == tilesY) {
@@ -142,8 +145,10 @@ class BayerAccumulator(
         }
 
         val invGain = 1f / gainScale
-        if (noiseVar == null) noiseVar = estimateNoise(ref, frame, field, invGain)
-        val nv = noiseVar!!
+        val refNoise = referenceNoise
+        usingMetadataNoise = refNoise != null && noise != null
+        if (!usingMetadataNoise && noiseVar == null) noiseVar = estimateNoise(ref, frame, field, invGain)
+        val nv = noiseVar
 
         // A frame at another gain is brought to the reference's scale by
         // dividing its light -- the codes above black -- and not its codes.
@@ -155,7 +160,7 @@ class BayerAccumulator(
         // alternate reads as raw / g + black * (1 - 1/g), which is raw
         // itself when g is one. Per CFA site; the taps keep parity, so the
         // alternate's site is the reference pixel's.
-        val pedestal = FloatArray(4) { profile.blackLevel.getOrElse(it) { 0 } * (1f - invGain) }
+        val pedestal = FloatArray(4) { profile.blackAt(it and 1, it shr 1) * (1f - invGain) }
 
         var localContribution = 0.0
 
@@ -179,7 +184,7 @@ class BayerAccumulator(
                 val wxA = 1f - wxB
 
                 val refV = (ref.data[rowBase + x].toInt() and 0xFFFF).toFloat()
-                val n2 = nv[binOf(refV)]
+                val empiricalN2 = nv?.get(binOf(refV)) ?: 0f
 
                 var acc = 0f
                 var accW = 0f
@@ -205,7 +210,13 @@ class BayerAccumulator(
                         val altV = rawAlt * invGain + pedestal[(y and 1) * 2 + (x and 1)]
                         val d = altV - refV
                         val d2 = d * d
-                        val w = if (d2 <= n2) 1f else n2 / d2
+                        // Preserve the existing single-frame-sigma tolerance:
+                        // residual variance / 2 equals it for equal-noise frames.
+                        val n2 = if (usingMetadataNoise) params.noiseTolerance * params.noiseTolerance *
+                            maxOf(params.minNoiseSigma * params.minNoiseSigma,
+                                0.5f * RawNoiseModel.residualVariance(refNoise!!, noise!!,
+                                    (y and 1) * 2 + (x and 1), refV, rawAlt, gainScale)) else empiricalN2
+                        val w = if (d2 <= n2) 1f else if (d2 < 4f * n2) (4f * n2 - d2) / (3f * d2) else 0f
 
                         acc += altV * w * win
                         accW += w * win
@@ -248,14 +259,18 @@ class BayerAccumulator(
         val out = ShortArray(width * height)
         val ceiling = profile.whiteLevel
         for (i in out.indices) {
-            val v = (sum[i] / weight[i]).toInt().coerceIn(0, ceiling)
+            // Match native's nearest-code resolve; truncation biases the
+            // reconstructed pedestal downward by almost half a sensor DN.
+            val v = (sum[i] / weight[i] + 0.5f).toInt().coerceIn(0, ceiling)
             out[i] = v.toShort()
         }
         val stats = BayerMergeStats(
             framesMerged = merged,
             meanContribution = if (contributionCount == 0L) 0f
             else (contributionSum / contributionCount).toFloat(),
-            estimatedSigmaAtMid = noiseVar?.let {
+            estimatedSigmaAtMid = if (usingMetadataNoise) sqrt((0..3).sumOf {
+                referenceNoise!!.variance(it, profile.whiteLevel * 0.5f).toDouble()
+            }.toFloat() / 4f) else noiseVar?.let {
                 sqrt(it[NOISE_BINS / 2].toDouble()).toFloat() / params.noiseTolerance
             } ?: 0f,
         )
@@ -272,6 +287,8 @@ class BayerAccumulator(
         val h = height / 2
         val out = ByteArray(w * h)
         val range = profile.range.toFloat()
+        val cellBlack = profile.blackAt(0, 0) + profile.blackAt(1, 0) +
+            profile.blackAt(0, 1) + profile.blackAt(1, 1)
         for (y in 0 until h) {
             val r0 = (y * 2) * width
             val r1 = r0 + width
@@ -281,8 +298,7 @@ class BayerAccumulator(
                     (frame.data[r0 + c + 1].toInt() and 0xFFFF) +
                     (frame.data[r1 + c].toInt() and 0xFFFF) +
                     (frame.data[r1 + c + 1].toInt() and 0xFFFF)
-                val black = profile.blackAt(c, y * 2) * 4
-                val norm = ((s - black) / (range * 4f * gainScale)).coerceIn(0f, 1f)
+                val norm = ((s - cellBlack) / (range * 4f * gainScale)).coerceIn(0f, 1f)
                 out[y * w + x] = (norm * 255f).toInt().toByte()
             }
         }
@@ -319,7 +335,7 @@ class BayerAccumulator(
                     if (rawAlt >= profile.whiteLevel) { x += SAMPLE_STRIDE; continue }
                     val refV = (ref.data[y * width + x].toInt() and 0xFFFF).toFloat()
                     val altV = rawAlt.toFloat() * invGain +
-                        profile.blackLevel.getOrElse((y and 1) * 2 + (x and 1)) { 0 } * (1f - invGain)
+                        profile.blackAt(x, y) * (1f - invGain)
                     val b = binOf(refV)
                     if (samples[b].size < 3000) samples[b].add(abs(altV - refV))
                 }

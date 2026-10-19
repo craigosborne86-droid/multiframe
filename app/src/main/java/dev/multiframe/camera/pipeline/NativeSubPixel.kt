@@ -44,6 +44,9 @@ class NativeSubPixel private constructor(
     fun addFrame(buffer: ByteBuffer, strideBytes: Int, field: AlignmentField, gainScale: Float = 1f): Boolean {
         check(handle != 0L) { "closed" }
         require(buffer.isDirect) { "frames must be direct buffers" }
+        val tilesX = maxOf(1, (sensorWidth / 2) / SubPixelAccumulator.TILE_TARGET)
+        val tilesY = maxOf(1, (sensorHeight / 2) / SubPixelAccumulator.TILE_TARGET)
+        if (field.tilesX != tilesX || field.tilesY != tilesY) return false
         return nAddFrame(handle, buffer, strideBytes, field.dx, field.dy, field.fracDx, field.fracDy, gainScale)
     }
 
@@ -120,9 +123,10 @@ class NativeSubPixel private constructor(
         params: DevelopParams = DevelopParams(),
         shading: ShadingMap? = null,
         quality: Int = 95,
+        crop: RenderCrop = RenderCrop(),
     ): DevelopStats? {
         check(handle != 0L) { "closed" }
-        val grid = shading?.rgbGrid()
+        val grid = shading?.rgbGrid(profile.cfaPattern)
         val stats = runCatching {
             nDevelopToJpeg(
                 handle, fd,
@@ -130,6 +134,7 @@ class NativeSubPixel private constructor(
                 LinearDeveloper.channelGains(color), color.matrix,
                 grid, shading?.columns ?: 0, shading?.rows ?: 0,
                 toneArray(params), sharpenArray(params), quality,
+                floatArrayOf(crop.left, crop.top, crop.right, crop.bottom),
             )
         }.onFailure { Log.w(TAG, "linear develop failed", it) }.getOrNull() ?: return null
         return DevelopStats(stats[0], stats[1], stats[2], stats[3], stats[4])
@@ -146,7 +151,7 @@ class NativeSubPixel private constructor(
         shading: ShadingMap? = null,
     ): ByteArray? {
         check(handle != 0L) { "closed" }
-        val grid = shading?.rgbGrid()
+        val grid = shading?.rgbGrid(profile.cfaPattern)
         return runCatching {
             nDevelopToArray(
                 handle,
@@ -190,7 +195,7 @@ class NativeSubPixel private constructor(
     private external fun nDevelopToJpeg(
         h: Long, fd: Int, black: FloatArray, white: Int, wb: FloatArray, matrix: FloatArray,
         shading: FloatArray?, shadingColumns: Int, shadingRows: Int,
-        tone: FloatArray, sharpen: FloatArray, quality: Int,
+        tone: FloatArray, sharpen: FloatArray, quality: Int, crop: FloatArray,
     ): FloatArray?
     private external fun nDevelopToArray(
         h: Long, black: FloatArray, white: Int, wb: FloatArray, matrix: FloatArray,
@@ -228,7 +233,7 @@ class NativeSubPixel private constructor(
             hotPixelThreshold: Float = HotPixels.DEFAULT_THRESHOLD,
         ): NativeSubPixel? {
             if (!NativeMerge.isAvailable()) return null
-            val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+            val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
             // nCreate is an instance method on the JNI side, as NativeMerge's
             // is; a zero-handle instance reaches it and allocates nothing.
             val h = try {

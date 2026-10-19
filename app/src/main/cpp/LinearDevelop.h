@@ -101,7 +101,7 @@ bool developToRgb8(uint16_t* rgb16, int width, int height, const Params& p,
  * unmaps before returning; the canvas is consumed as above.
  */
 bool developToJpeg(uint16_t* rgb16, int width, int height, const Params& p, int quality,
-                   const std::function<bool(const unsigned char*, size_t)>& sink, Stats* stats);
+                   const std::function<bool(const unsigned char*, size_t)>& sink, Stats* stats, const float* crop = nullptr);
 
 }  // namespace linear
 }  // namespace multiframe

@@ -348,7 +348,7 @@ class BilateralGrid private constructor(
             val invRange = 1f / max(1f, profile.whiteLevel - lo)
             val wb = LinearDeveloper.channelGains(color)
             val m = color.matrix
-            val shadingGrid = shading?.rgbGrid()
+            val shadingGrid = shading?.rgbGrid(profile.cfaPattern)
             val sensorW = width / 2
             val sensorH = height / 2
             var by = 0

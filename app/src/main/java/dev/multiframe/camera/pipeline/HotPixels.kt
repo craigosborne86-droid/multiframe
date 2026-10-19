@@ -101,6 +101,7 @@ object HotPixels {
         frame: BayerFrame,
         sensor: SensorProfile,
         threshold: Float = DEFAULT_THRESHOLD,
+        source: ShortArray = frame.data.copyOf(),
     ): Int {
         val width = frame.width
         val height = frame.height
@@ -112,15 +113,17 @@ object HotPixels {
 
         // Read from a copy so a corrected site never becomes a neighbour's
         // reference, which would let one defect propagate along a row.
-        val source = data.copyOf()
         for (y in 2 until height - 2) {
             val row = y * width
             for (x in 2 until width - 2) {
-                val here = source[row + x].toInt() and 0xFFFF
-                val a = source[row + x - 2].toInt() and 0xFFFF
-                val b = source[row + x + 2].toInt() and 0xFFFF
-                val c = source[row - 2 * width + x].toInt() and 0xFFFF
-                val d = source[row + 2 * width + x].toInt() and 0xFFFF
+                // Native applyPrepass compares black-subtracted, clamped samples.
+                // A below-black neighbour is zero light, not a negative outlier.
+                val floor = sensor.blackAt(x, y)
+                val here = (source[row + x].toInt() and 0xFFFF).coerceAtLeast(floor)
+                val a = (source[row + x - 2].toInt() and 0xFFFF).coerceAtLeast(floor)
+                val b = (source[row + x + 2].toInt() and 0xFFFF).coerceAtLeast(floor)
+                val c = (source[row - 2 * width + x].toInt() and 0xFFFF).coerceAtLeast(floor)
+                val d = (source[row + 2 * width + x].toInt() and 0xFFFF).coerceAtLeast(floor)
 
                 val highest = max(max(a, b), max(c, d))
                 val lowest = min(min(a, b), min(c, d))

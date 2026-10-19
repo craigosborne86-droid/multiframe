@@ -45,7 +45,7 @@ object LinearDeveloper {
         val count = IntArray(3)
         for (site in 0 until 4) {
             val c = profile.cfaPattern.getOrElse(site) { 1 }.coerceIn(0, 2)
-            out[c] += profile.blackLevel.getOrElse(site) { 0 }.toFloat()
+            out[c] += profile.blackAt(site and 1, site shr 1).toFloat()
             count[c]++
         }
         for (c in 0 until 3) if (count[c] > 0) out[c] /= count[c]
@@ -130,7 +130,7 @@ object LinearDeveloper {
         val invRange = 1f / max(1f, profile.whiteLevel - lo)
         val wb = channelGains(color)
         val m = color.matrix
-        val grid = shading?.rgbGrid()
+        val grid = shading?.rgbGrid(profile.cfaPattern)
         val sensorW = width / 2
         val sensorH = height / 2
         val localGrid = if (resolved.localTone > 0f || resolved.shadowLift > 0f) {
@@ -170,7 +170,7 @@ object LinearDeveloper {
                         local[0] *= k; local[1] *= k; local[2] *= k
                     }
                     ToneCurve.renderLinear(local, resolved)
-                    SensorSaturation.neutralise(local, SensorSaturation.canvasWeight(rgb16, i, black, profile.whiteLevel))
+                    SensorSaturation.neutralise(local, SensorSaturation.canvasWeight(rgb16, i, black, profile.whiteLevel, wb))
                     out[y * width + x] = (0xFF shl 24) or
                         (encode(local[0], resolved) shl 16) or
                         (encode(local[1], resolved) shl 8) or

@@ -17,8 +17,9 @@ import android.hardware.camera2.TotalCaptureResult
  *
  * ### Why the app has to do it
  *
- * The ISP corrects this for JPEG output, but **raw is defined as uncorrected**.
- * A raw-first pipeline therefore inherits the problem: the burst merge, the
+ * Camera2 reports the correction still required by RAW, even if the HAL has
+ * already applied some shading correction (SENSOR_INFO_LENS_SHADING_APPLIED).
+ * A raw-first pipeline therefore inherits the remaining falloff: the burst merge, the
  * demosaic and the tone curve all operate on data that is a stop and a half
  * down in the corners. The DNG is right to stay uncorrected, since converters
  * apply the map themselves from metadata, but the JPEG this app develops has to
@@ -57,8 +58,8 @@ class ShadingMap(
     fun gainAt(x: Int, y: Int, width: Int, height: Int, channel: Int): Float {
         if (width <= 1 || height <= 1) return 1f
 
-        // Cell centres sit at the middle of each cell, so a pixel maps to the
-        // grid offset by half a cell.
+        // Camera2's first/last map entries coincide with the active array's
+        // first/last pixels; interpolate over that full sensor extent.
         val fx = (x.toFloat() / (width - 1)) * (columns - 1)
         val fy = (y.toFloat() / (height - 1)) * (rows - 1)
 
@@ -86,18 +87,19 @@ class ShadingMap(
      * The map with three gains per cell rather than four, for an image whose
      * pixels are colours rather than sites.
      *
-     * The camera reports the four channels in the order red, green on even
-     * rows, green on odd rows, blue. The sub-pixel canvas has folded both greens
+     * Internally the map is in CFA-site order. The sub-pixel canvas has folded both greens
      * into one channel, so the green gain is their mean -- they differ by the
      * sensor's green imbalance, which is a fraction of a percent and well below
      * what shading correction is for.
      */
-    fun rgbGrid(): FloatArray {
+    fun rgbGrid(cfaPattern: IntArray): FloatArray {
+        requireBayer(cfaPattern)
         val out = FloatArray(columns * rows * 3)
         for (cell in 0 until columns * rows) {
-            out[cell * 3] = gains[cell * 4]
-            out[cell * 3 + 1] = 0.5f * (gains[cell * 4 + 1] + gains[cell * 4 + 2])
-            out[cell * 3 + 2] = gains[cell * 4 + 3]
+            for (site in 0 until 4) {
+                val color = cfaPattern[site]
+                out[cell * 3 + color] += gains[cell * 4 + site] * if (color == 1) 0.5f else 1f
+            }
         }
         return out
     }
@@ -114,6 +116,30 @@ class ShadingMap(
         }
 
     companion object {
+        private fun requireBayer(cfa: IntArray) {
+            require(cfa.size == 4 && cfa.count { it == 0 } == 1 &&
+                cfa.count { it == 1 } == 2 && cfa.count { it == 2 } == 1 &&
+                cfa.take(2).count { it == 1 } == 1) { "expected a 2x2 Bayer CFA" }
+        }
+
+        /** Camera2 LensShadingMap#getGainFactor defines colour order independently
+         * of the sensor CFA: R, green on even rows, green on odd rows, B.
+         * Convert once at the API boundary; DNG GainMap opcodes already use site order.
+         */
+        fun fromRggb(columns: Int, rows: Int, rggb: FloatArray, cfaPattern: IntArray): ShadingMap {
+            requireBayer(cfaPattern)
+            require(columns > 0 && rows > 0 && rggb.size == columns * rows * 4)
+            val sites = FloatArray(rggb.size) { i ->
+                val site = i % 4
+                val channel = when (cfaPattern[site]) {
+                    0 -> 0
+                    2 -> 3
+                    else -> if (site < 2) 1 else 2
+                }
+                rggb[i / 4 * 4 + channel]
+            }
+            return ShadingMap(columns, rows, sites)
+        }
         /**
          * [gainAt] on a three-channel grid from [rgbGrid]. The same arithmetic
          * as the four-channel version, and the reference the native linear
@@ -150,7 +176,7 @@ class ShadingMap(
          * Camera2 spec, and a device without it should render an uncorrected
          * frame rather than a wrongly corrected one.
          */
-        fun from(result: TotalCaptureResult?): ShadingMap? {
+        fun from(result: TotalCaptureResult?, profile: SensorProfile): ShadingMap? {
             val map = result?.get(CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP)
                 ?: return null
             val columns = map.columnCount
@@ -166,7 +192,7 @@ class ShadingMap(
                     }
                 }
             }
-            return ShadingMap(columns, rows, gains)
+            return fromRggb(columns, rows, gains, profile.cfaPattern)
         }
     }
 }

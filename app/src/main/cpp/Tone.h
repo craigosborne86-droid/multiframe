@@ -18,6 +18,7 @@
 #pragma once
 
 #include <algorithm>
+#include <arm_neon.h>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -53,7 +54,8 @@ inline int64_t nowMicros() {
     return static_cast<int64_t>(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
 }
 
-inline void parallelBands(int height, const std::function<void(int, int)>& body) {
+inline void parallelBands(int height, const std::function<void(int, int)>& body,
+                          const std::function<void(int, int)>& prepare = {}) {
     const unsigned hw = std::thread::hardware_concurrency();
     int threads = static_cast<int>(std::max(2u, hw));
     threads = std::min(threads, std::max(1, height));
@@ -66,6 +68,15 @@ inline void parallelBands(int height, const std::function<void(int, int)>& body)
                             (height + threads * kBandsPerThread - 1) /
                                 (threads * kBandsPerThread));
     const int bands = (height + bandRows - 1) / bandRows;
+
+    // In-place neighborhood passes can retain immutable band halos before
+    // any worker writes. Preparation uses exactly the worker partition.
+    if (prepare) {
+        for (int index = 0; index < bands; ++index) {
+            const int start = index * bandRows;
+            prepare(start, std::min(start + bandRows, height));
+        }
+    }
 
     std::atomic<int> nextBand{0};
     std::vector<std::thread> pool;
@@ -176,10 +187,16 @@ struct Rgb {
     float r, g, b;
 };
 
-// Sensor clip evidence. Kept independent of WB, shading and display gamut.
+// Physical clipping is measured before shading or colour conversion.
+// WB only tests whether the companion channels are near white.
 inline float saturationWeight(float minChannel) {
     const float t = std::clamp((minChannel - 0.70f) / (1.0f - 0.70f), 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
+}
+inline float saturationEvidence(float32x4_t levels, float32x4_t wb) {
+    const float t = std::clamp((vmaxvq_f32(levels) - 0.90f) / 0.10f, 0.0f, 1.0f);
+    const float nearWhite = saturationWeight(vminvq_f32(vmulq_f32(levels, wb)));
+    return std::max(saturationWeight(vminvq_f32(levels)), t * t * (3.0f - 2.0f * t) * nearWhite);
 }
 inline void neutraliseSaturation(float& r, float& g, float& b, float weight) {
     r += (1.0f - r) * weight;
@@ -187,17 +204,20 @@ inline void neutraliseSaturation(float& r, float& g, float& b, float weight) {
     b += (1.0f - b) * weight;
 }
 inline float cfaSaturation(const uint16_t* raw, int width, int height,
-                           int x, int y, const int* black, int white) {
+                           int x, int y, const int* black, int white, const float* wb) {
     if (raw == nullptr || width < 2 || height < 2) return 0.0f;
     x = std::min(x, width - 2); y = std::min(y, height - 2);
-    float level = 1.0f;
-    for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
-        const int pedestal = black[((y + dy) & 1) * 2 + ((x + dx) & 1)];
-        const float v = (static_cast<float>(raw[static_cast<size_t>(y + dy) * width + x + dx]) - pedestal) /
-                        std::max(1, white - pedestal);
-        level = std::min(level, v);
-    }
-    return saturationWeight(level);
+    const size_t top = static_cast<size_t>(y) * width + x;
+    const int site = (y & 1) * 2 + (x & 1);
+    // Four measured CFA sites, normalised together before a horizontal min.
+    // Scalar lane gathers avoid reading across the last row's allocation.
+    const float32x4_t samples = { static_cast<float>(raw[top]), static_cast<float>(raw[top + 1]),
+        static_cast<float>(raw[top + width]), static_cast<float>(raw[top + width + 1]) };
+    const float32x4_t pedestals = { static_cast<float>(black[site]), static_cast<float>(black[site ^ 1]),
+        static_cast<float>(black[site ^ 2]), static_cast<float>(black[site ^ 3]) };
+    const float32x4_t ranges = vmaxq_f32(vsubq_f32(vdupq_n_f32(static_cast<float>(white)), pedestals), vdupq_n_f32(1.0f));
+    const float32x4_t gains = { wb[site], wb[site ^ 1], wb[site ^ 2], wb[site ^ 3] };
+    return saturationEvidence(vdivq_f32(vsubq_f32(samples, pedestals), ranges), gains);
 }
 
 struct ToneParams {
