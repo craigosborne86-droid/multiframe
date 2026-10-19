@@ -88,8 +88,17 @@ class HardwareProbeDeviceTest {
                 val maxPixel = ch.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION)
                 report.appendLine("  maximum-resolution active array ${maxActive?.width()} x ${maxActive?.height()}, pixel array ${maxPixel?.width} x ${maxPixel?.height}")
                 report.appendLine("  RAW_SENSOR sizes (maximum-resolution mode): ${maxRaw.joinToString { size -> "${size.width}x${size.height} @${minFrameMs(maxMap!!, size)}ms" }}")
+                assertThat(profile.supportsNativeHighRes).isEqualTo(maxRaw.isNotEmpty() && profile.supportsRaw)
+                assertThat(profile.maxResolutionDimensions).isEqualTo(
+                    maxRaw.maxByOrNull { it.width.toLong() * it.height }
+                        ?.let { FrameSize(it.width, it.height) }
+                )
                 val maxYuv = maxMap?.getOutputSizes(ImageFormat.YUV_420_888)?.maxByOrNull { it.width.toLong() * it.height }
                 report.appendLine("  largest YUV in maximum-resolution mode: ${maxYuv?.width}x${maxYuv?.height}")
+            }
+            if (!ultra) {
+                assertThat(profile.supportsNativeHighRes).isFalse()
+                assertThat(profile.maxResolutionDimensions).isNull()
             }
             val physical = ch.physicalCameraIds
             if (physical.isNotEmpty()) report.appendLine("  physical members: ${physical.joinToString()}")

@@ -677,13 +677,37 @@ class RawRingTest {
             stamp += frameIntervalNs
         }
 
-        val snapshot = pool.lockNewest(RawRingBudget.burstForDepth(32))
+        val lockStartNs = System.nanoTime()
+        val snapshot = pool.lockNewest(FrameCountPolicy.MAX_FRAMES)
+        val lockMicros = (System.nanoTime() - lockStartNs) / 1_000
         try {
-            assertThat(snapshot.count).isEqualTo(28)
+            assertThat(snapshot.count).isEqualTo(FrameCountPolicy.MAX_FRAMES)
+            assertThat(pool.lockedCount()).isEqualTo(FrameCountPolicy.MAX_FRAMES)
+            assertThat(pool.readyCount()).isEqualTo(RawRingBudget.WRITE_HEADROOM)
+
+            // Feed full-size RAW frames at sensor cadence while the merge owns
+            // all 28 selected frames. The four remaining slots must keep
+            // accepting and recycling frames, not merely exist on paper.
+            val copyMicros = LongArray(90)
+            val startNs = System.nanoTime()
+            repeat(copyMicros.size) { index ->
+                val beforePushNs = System.nanoTime()
+                assertThat(pool.push(source, fullWidth * 2, stamp, (32 + index).toLong())).isAtLeast(0)
+                copyMicros[index] = (System.nanoTime() - beforePushNs) / 1_000
+                stamp += frameIntervalNs
+                val remainingNs = startNs + (index + 1) * frameIntervalNs - System.nanoTime()
+                if (remainingNs > 0) TimeUnit.NANOSECONDS.sleep(remainingNs)
+            }
+            assertThat(snapshot.heldCount).isEqualTo(FrameCountPolicy.MAX_FRAMES)
+            assertThat(pool.readyCount()).isEqualTo(RawRingBudget.WRITE_HEADROOM)
+            val stats = pool.stats()
+            assertThat(stats.droppedNoSlot).isEqualTo(0)
+            assertThat(stats.droppedWhileLocked).isEqualTo(0)
+            Log.i(TAG, "28 held / 30fps: lock ${lockMicros}us, push mean %.0fus max ${copyMicros.max()}us, $stats".format(copyMicros.average()))
         } finally {
             snapshot.close()
         }
-        assertThat(pool.stats().droppedNoSlot).isEqualTo(0)
+        assertThat(pool.lockedCount()).isEqualTo(0)
     }
 
     @Test

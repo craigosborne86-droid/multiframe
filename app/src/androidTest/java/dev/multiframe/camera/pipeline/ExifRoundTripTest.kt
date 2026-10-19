@@ -120,6 +120,10 @@ class ExifRoundTripTest {
             assertThat(focal).isEqualTo("690/100")
             assertThat(exif.getAttribute(ExifInterface.TAG_SOFTWARE))
                 .isEqualTo(ExifWriter.SOFTWARE)
+            assertThat(exif.getAttributeInt(ExifInterface.TAG_IMAGE_WIDTH, -1)).isEqualTo(32)
+            assertThat(exif.getAttributeInt(ExifInterface.TAG_IMAGE_LENGTH, -1)).isEqualTo(32)
+            assertThat(exif.getAttributeInt(ExifInterface.TAG_PIXEL_X_DIMENSION, -1)).isEqualTo(32)
+            assertThat(exif.getAttributeInt(ExifInterface.TAG_PIXEL_Y_DIMENSION, -1)).isEqualTo(32)
         }
         context.contentResolver.delete(uri, null, null)
     }

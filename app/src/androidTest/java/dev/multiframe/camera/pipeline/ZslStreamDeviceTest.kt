@@ -1,16 +1,25 @@
 package dev.multiframe.camera.pipeline
 
 import android.content.Context
+import android.content.ContentUris
+import android.app.KeyguardManager
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraManager
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.PowerManager
+import android.os.SystemClock
+import android.provider.MediaStore
 import android.util.Log
+import android.view.WindowManager
+import androidx.activity.ComponentActivity
+import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
 import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
@@ -18,6 +27,13 @@ import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 private const val TAG = "ZslStream"
 
@@ -38,8 +54,12 @@ private const val TAG = "ZslStream"
 class ZslStreamDeviceTest {
 
     @get:Rule
-    val cameraPermission: GrantPermissionRule =
-        GrantPermissionRule.grant(android.Manifest.permission.CAMERA)
+    val cameraPermission = org.junit.rules.TestRule { base, description ->
+        // An already-authorized camera test needs no UiAutomation connection.
+        // This also lets headless checks coexist with a connected inspector.
+        if (context.checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) base
+        else GrantPermissionRule.grant(android.Manifest.permission.CAMERA).apply(base, description)
+    }
 
     private val context: Context
         get() = InstrumentationRegistry.getInstrumentation().targetContext
@@ -48,8 +68,10 @@ class ZslStreamDeviceTest {
         get() = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
     private var stream: ZslRawStream? = null
+    private var testCaps: CameraCapabilities? = null
     private var previewReader: ImageReader? = null
     private var previewThread: HandlerThread? = null
+    private var sustainedForeground: ActivityScenario<ComponentActivity>? = null
 
     @After
     fun release() {
@@ -59,12 +81,14 @@ class ZslStreamDeviceTest {
         previewReader = null
         previewThread?.quitSafely()
         previewThread = null
+        sustainedForeground?.close()
+        sustainedForeground = null
     }
 
     /** Opens the stream on the main rear lens, or returns null if it cannot. */
-    private fun openStream(ringDepth: Int = 12): ZslRawStream? = runBlocking {
+    private fun openStream(ringDepth: Int = 12, lensOverride: Lens? = null): ZslRawStream? = runBlocking {
         val lenses = LensCatalog.enumerate(manager)
-        val lens = LensCatalog.default(lenses) ?: return@runBlocking null
+        val lens = lensOverride ?: LensCatalog.default(lenses) ?: return@runBlocking null
         val characteristics = manager.getCameraCharacteristics(lens.cameraId)
 
         val decision = ZslPolicy.evaluate(
@@ -98,7 +122,8 @@ class ZslStreamDeviceTest {
             evMin = 0, evMax = 0, evStep = 0f,
             sensorOrientation = 90, supportsRaw = true,
             supportedOutputFormats = emptySet(),
-        )
+        ).forLens(characteristics)
+        testCaps = caps
 
         withTimeoutOrNull(20_000) {
             ZslRawStream.open(
@@ -125,6 +150,126 @@ class ZslStreamDeviceTest {
     }
 
     // ------------------------------------------------------------------
+
+    @Test fun tapSubmitsAvailableSensorRegionsAndTriggers() = runBlocking {
+        val s = openStream()
+        assumeTrue("RAW stream unavailable", s != null)
+        stream = s
+        val caps = requireNotNull(testCaps)
+        val ch = s!!.characteristics
+        assumeTrue("AF metering unavailable", (ch.get(android.hardware.camera2.CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0)
+        val aeRegionsAvailable = (ch.get(android.hardware.camera2.CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0
+        assumeTrue("autofocus unavailable", caps.autoAfMode() != null)
+        assertThat(waitForFrames(s, 4)).isTrue()
+
+        val active = requireNotNull(ch.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE))
+        val expected = TouchFocus.regionAt(.2f, .7f, caps.sensorOrientation, SensorRect.from(active))
+        assertThat(s.focusAt(.2f, .7f, ManualSettings(), caps)).isTrue()
+        val result = kotlinx.coroutines.withTimeout(5_000) {
+            while (s.latestTapTriggerResult() == null) kotlinx.coroutines.delay(20)
+            requireNotNull(s.latestTapTriggerResult())
+        }
+        val request = result.request
+        val af = requireNotNull(request.get(android.hardware.camera2.CaptureRequest.CONTROL_AF_REGIONS)).single()
+        val ae = request.get(android.hardware.camera2.CaptureRequest.CONTROL_AE_REGIONS)?.singleOrNull()
+        assertThat(af.x).isEqualTo(expected.left)
+        assertThat(af.y).isEqualTo(expected.top)
+        assertThat(af.width).isEqualTo(expected.width)
+        assertThat(af.height).isEqualTo(expected.height)
+        if (aeRegionsAvailable) assertThat(ae).isEqualTo(af)
+        else assertThat(ae).isNull()
+        assertThat(request.get(android.hardware.camera2.CaptureRequest.CONTROL_AF_TRIGGER))
+            .isEqualTo(android.hardware.camera2.CameraMetadata.CONTROL_AF_TRIGGER_START)
+        if (aeRegionsAvailable) {
+            assertThat(request.get(android.hardware.camera2.CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER))
+                .isEqualTo(android.hardware.camera2.CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+        }
+        assertThat(request.get(android.hardware.camera2.CaptureRequest.CONTROL_AE_MODE))
+            .isEqualTo(android.hardware.camera2.CameraMetadata.CONTROL_AE_MODE_ON)
+
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (s.latestResult()?.request?.get(android.hardware.camera2.CaptureRequest.CONTROL_AF_REGIONS)
+                    ?.firstOrNull() != af) kotlinx.coroutines.delay(20)
+        }
+
+        // A second tap must restart AF rather than leaving the first tap's
+        // locked state and metering rectangle in force.
+        val secondExpected = TouchFocus.regionAt(.8f, .3f, caps.sensorOrientation, SensorRect.from(active))
+        assertThat(s.focusAt(.8f, .3f, ManualSettings(), caps)).isTrue()
+        val second = kotlinx.coroutines.withTimeout(5_000) {
+            while (s.latestTapTriggerResult() == null) kotlinx.coroutines.delay(20)
+            requireNotNull(s.latestTapTriggerResult())
+        }
+        assertThat(second.frameNumber).isGreaterThan(result.frameNumber)
+        val secondAf = requireNotNull(second.request.get(android.hardware.camera2.CaptureRequest.CONTROL_AF_REGIONS)).single()
+        assertThat(secondAf.x).isEqualTo(secondExpected.left)
+        assertThat(secondAf.y).isEqualTo(secondExpected.top)
+        assertThat(second.request.get(android.hardware.camera2.CaptureRequest.CONTROL_AF_TRIGGER))
+            .isEqualTo(android.hardware.camera2.CameraMetadata.CONTROL_AF_TRIGGER_START)
+        assertThat(s.stats().captureFailures).isEqualTo(0)
+    }
+
+    @Test fun longManualExposureLeavesPreviewFluidAndOnlyStillRequestsExposeLong() = runBlocking {
+        val s = openStream() ?: error("RAW stream could not open")
+        stream = s
+        val caps = requireNotNull(testCaps)
+        assumeTrue(caps.hasManualSensor)
+        val manual = ManualSettings(manualExposure = true, iso = 400, exposureTimeNs = 6_000_000_000L)
+        s.applySettings(manual, caps)
+        kotlinx.coroutines.delay(1200)
+        s.resetStats()
+        kotlinx.coroutines.delay(1500)
+        val fps = s.stats().ring.measuredFps
+        assertThat(fps).isGreaterThan(20.0)
+        assertThat(requireNotNull(s.latestExposure()).second).isAtMost(34_000_000L)
+        InstrumentationRegistry.getInstrumentation().sendStatus(0, android.os.Bundle().apply {
+            putString("stream", "6s manual setting: preview ${fps} fps, actual exposure ${s.latestExposure()}\n")
+        })
+        val pending = async(kotlinx.coroutines.Dispatchers.IO) {
+            s.captureStillBurst(manual.copy(exposureTimeNs = 1_000_000_000L), caps, 2)
+        }
+        kotlinx.coroutines.delay(200)
+        s.applySettings(manual.copy(iso = 800), caps)
+        val shot = pending.await()
+        shot.use {
+            assertThat(it.count).isEqualTo(2)
+            for (result in it.burst.results) {
+                assertThat(requireNotNull(result).get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME))
+                    .isAtLeast(990_000_000L)
+                assertThat(result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)).isEqualTo(400)
+            }
+        }
+        kotlinx.coroutines.delay(700)
+        assertThat(requireNotNull(s.latestExposure()).second).isAtMost(34_000_000L)
+    }
+
+    @Test fun mainAndTeleZoomSessionsUseConsistentRawFraming() = runBlocking {
+        val lenses = LensCatalog.rear(LensCatalog.enumerate(manager)).filter { it.supportsRaw }
+        val main = requireNotNull(LensCatalog.default(lenses))
+        val tele = lenses.maxByOrNull { it.zoomFactor } ?: main
+        for (lens in listOf(main, tele).distinctBy { it.cameraId }) {
+            val s = openStream(lensOverride = lens) ?: error("RAW stream failed for ${lens.cameraId}")
+            stream = s
+            val caps = requireNotNull(testCaps)
+            s.setZoom(2f, ManualSettings(), caps)
+            kotlinx.coroutines.withTimeout(10000) {
+                while (s.readyFrames() < 4) kotlinx.coroutines.delay(30)
+            }
+            s.snapshot(4).use { burst ->
+                assertThat(burst.count).isEqualTo(4)
+                for (result in burst.results) {
+                    assertThat(requireNotNull(result).request.get(android.hardware.camera2.CaptureRequest.CONTROL_ZOOM_RATIO))
+                        .isEqualTo(2f)
+                }
+                val result = requireNotNull(burst.results.first())
+                val crop = if (android.os.Build.VERSION.SDK_INT >= 34) result.get(android.hardware.camera2.CaptureResult.SCALER_RAW_CROP_REGION) else null
+                val evidence = "zoom reset lens=${lens.cameraId} optical=${lens.zoomFactor} crop=$crop render=${RenderCrop.from(s.characteristics, result)}"
+                Log.i(TAG, evidence)
+                InstrumentationRegistry.getInstrumentation().sendStatus(0, android.os.Bundle().apply { putString("stream", evidence + "\n") })
+            }
+            release()
+        }
+    }
 
     @Test
     fun rawFramesActuallyStreamAtSensorRate() {
@@ -178,6 +323,236 @@ class ZslStreamDeviceTest {
     }
 
     @Test
+    fun twentyEightFrameBurstKeepsTheRealRawStreamWritingDuringMerge() {
+        val s = openStream(ringDepth = RawRingBudget.MAX_CAPACITY)
+            ?: error("RAW stream could not open with a 32-slot ring")
+        stream = s
+        assertThat(s.ringCapacity).isEqualTo(RawRingBudget.MAX_CAPACITY)
+        assertThat(s.maxBurst).isEqualTo(FrameCountPolicy.MAX_FRAMES)
+        val readyDeadline = System.currentTimeMillis() + 20_000
+        while (s.readyFrames() < FrameCountPolicy.MAX_FRAMES && System.currentTimeMillis() < readyDeadline) {
+            Thread.sleep(50)
+        }
+        assertThat(s.readyFrames()).isAtLeast(FrameCountPolicy.MAX_FRAMES)
+
+        val power = context.getSystemService(android.os.PowerManager::class.java)
+        val thermalBefore = power.currentThermalStatus
+        s.resetStats()
+        val shot = ZslCapture.take(s, FrameCountPolicy.MAX_FRAMES)
+        shot.use {
+            assertThat(it.count).isEqualTo(FrameCountPolicy.MAX_FRAMES)
+            assertThat(s.lockedFrames()).isEqualTo(FrameCountPolicy.MAX_FRAMES)
+            assertThat(s.ringCapacity - s.lockedFrames()).isEqualTo(RawRingBudget.WRITE_HEADROOM)
+
+            // Keep every captured slot locked while the live sensor continues
+            // delivering frames, then perform the real 28-frame alignment and
+            // native merge. No JPEG or DNG is written to the user's gallery.
+            Thread.sleep(3_000)
+            val profile = SensorProfile.from(s.characteristics)
+            val mergeStart = System.nanoTime()
+            val mergedCount = requireNotNull(NativeMerge.create(s.config.width, s.config.height, profile)).use { merger ->
+                val stride = it.burst.frames.rowStride
+                val reference = requireNotNull(it.burst.frames.buffer(0))
+                merger.setReference(reference, stride)
+                val pyramid = Aligner.buildPyramid(merger.lumaProxy(reference, stride))
+                val tilesX = maxOf(1, merger.proxyWidth / 32)
+                val tilesY = maxOf(1, merger.proxyHeight / 32)
+                for (index in 1 until it.count) {
+                    val frame = requireNotNull(it.burst.frames.buffer(index))
+                    val field = Aligner.align(
+                        pyramid, Aligner.buildPyramid(merger.lumaProxy(frame, stride)), tilesX, tilesY,
+                    )
+                    merger.addFrame(frame, stride, field)
+                }
+                merger.finish().second.framesMerged
+            }
+            val mergeMillis = (System.nanoTime() - mergeStart) / 1_000_000
+            val ring = s.stats().ring
+            Log.i(TAG, "28 real RAW frames: handover ${shot.handoverMicros}us, merge ${mergeMillis}ms, " +
+                "thermal $thermalBefore -> ${power.currentThermalStatus}, $ring")
+            assertThat(mergedCount).isEqualTo(FrameCountPolicy.MAX_FRAMES)
+            assertThat(ring.pushed).isGreaterThan(10)
+            assertThat(ring.droppedNoSlot).isEqualTo(0)
+            assertThat(ring.droppedWhileLocked).isEqualTo(0)
+            assertThat(s.ringCapacity - s.lockedFrames()).isEqualTo(RawRingBudget.WRITE_HEADROOM)
+        }
+        assertThat(s.lockedFrames()).isEqualTo(0)
+    }
+
+    /**
+     * Explicit opt-in: 96 real 28-frame shots, five seconds apart, over eight
+     * minutes. A one-second sampler records the platform's thermal status even
+     * while alignment or JPEG encoding occupies the test thread. The images
+     * use the full production merge, develop, JPEG and DNG path. Test-tagged
+     * outputs are removed from MediaStore after each shot and on exit.
+     */
+    @Test
+    fun sustainedTwentyEightFrameThermalSession() {
+        assumeTrue("pass -e sustained28 true to run the eight-minute session",
+            InstrumentationRegistry.getArguments().getString("sustained28") == "true")
+        val power = context.getSystemService(PowerManager::class.java)
+        val keyguard = context.getSystemService(KeyguardManager::class.java)
+        check(power.isInteractive && !keyguard.isKeyguardLocked && !keyguard.isDeviceLocked) {
+            "Unlock the phone before the sustained capture"
+        }
+        val foreground = ActivityScenario.launch(ComponentActivity::class.java)
+        sustainedForeground = foreground
+        foreground.onActivity { it.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+        val focusDeadline = SystemClock.elapsedRealtime() + 20_000
+        var focused = false
+        while (!focused && SystemClock.elapsedRealtime() < focusDeadline) {
+            foreground.onActivity { focused = it.hasWindowFocus() }
+            if (!focused) Thread.sleep(25)
+        }
+        check(focused && power.isInteractive && !keyguard.isKeyguardLocked && !keyguard.isDeviceLocked) {
+            "Sustained capture needs a focused, unlocked foreground Activity"
+        }
+        // A unique tag lets cleanup identify only media written by this run.
+        // A broad "sustained28" search would delete earlier gallery images.
+        val runTag = "sustained28_${UUID.randomUUID().toString().replace("-", "")}"
+        val evidenceRoot = File(context.getExternalFilesDir(null), "iq-forensics/$runTag").apply { check(mkdirs()) }
+        fun record(line: String) {
+            File(evidenceRoot, "shots.log").appendText("$line\n")
+            Log.i(TAG, line)
+        }
+        record("SUSTAINED28 RUN tag=$runTag evidence=${evidenceRoot.absolutePath}")
+        val s = openStream(ringDepth = RawRingBudget.MAX_CAPACITY)
+            ?: error("RAW stream could not open with a 32-slot ring")
+        stream = s
+        assertThat(s.maxBurst).isEqualTo(FrameCountPolicy.MAX_FRAMES)
+        val readyDeadline = SystemClock.elapsedRealtime() + 20_000
+        while (s.readyFrames() < FrameCountPolicy.MAX_FRAMES && SystemClock.elapsedRealtime() < readyDeadline) {
+            Thread.sleep(50)
+        }
+        assertThat(s.readyFrames()).isAtLeast(FrameCountPolicy.MAX_FRAMES)
+
+        val started = SystemClock.elapsedRealtime()
+        val sampling = AtomicBoolean(true)
+        val maxThermal = AtomicInteger(power.currentThermalStatus)
+        val firstNonNormalMs = AtomicLong(-1)
+        val firstModerateMs = AtomicLong(-1)
+        val samplerFailure = AtomicReference<String?>(null)
+        val sampler = thread(name = "sustained-28-thermal") {
+            try {
+                File(evidenceRoot, "telemetry.csv").bufferedWriter().use { out ->
+                    out.appendLine("elapsedMs,thermalStatus,batteryDeciC,vmRssKb,vmHwmKb,nativeAllocatedBytes")
+                    while (sampling.get()) {
+                        val elapsed = SystemClock.elapsedRealtime() - started
+                        val status = power.currentThermalStatus
+                        maxThermal.updateAndGet { maxOf(it, status) }
+                        if (status > PowerManager.THERMAL_STATUS_NONE) firstNonNormalMs.compareAndSet(-1, elapsed)
+                        if (status >= PowerManager.THERMAL_STATUS_MODERATE) firstModerateMs.compareAndSet(-1, elapsed)
+                        val battery = context.registerReceiver(null,
+                            android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+                            ?.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
+                        val process = File("/proc/self/status").readLines()
+                        fun kb(key: String) = process.firstOrNull { it.startsWith("$key:") }
+                            ?.split(Regex("\\s+"))?.getOrNull(1) ?: ""
+                        out.appendLine("$elapsed,$status,$battery,${kb("VmRSS")},${kb("VmHWM")},${android.os.Debug.getNativeHeapAllocatedSize()}")
+                        out.flush()
+                        Log.i(TAG, "SUSTAINED28 SAMPLE elapsedMs=$elapsed thermal=$status batteryDeciC=$battery")
+                        Thread.sleep(1_000)
+                    }
+                }
+            } catch (e: Exception) {
+                samplerFailure.set(e.toString())
+                Log.e(TAG, "SUSTAINED28 telemetry failed", e)
+            }
+        }
+
+        var completed = 0
+        var failures = 0
+        var criticalStop = false
+        val arguments = InstrumentationRegistry.getArguments()
+        val shotCount = arguments.getString("sustained28Shots")?.toIntOrNull()?.coerceIn(1, 96) ?: 96
+        val intervalMs = arguments.getString("sustained28IntervalMs")?.toLongOrNull()
+            ?.coerceIn(1_000L, 5_000L) ?: 5_000L
+        s.resetStats()
+        try {
+            for (index in 0 until shotCount) {
+                val due = started + index * intervalMs
+                val waitMs = due - SystemClock.elapsedRealtime()
+                if (waitMs > 0) Thread.sleep(waitMs)
+                val shotStart = SystemClock.elapsedRealtime()
+                foreground.onActivity { focused = it.hasWindowFocus() }
+                check(focused && power.isInteractive && !keyguard.isKeyguardLocked && !keyguard.isDeviceLocked) {
+                    "Foreground focus or unlocked screen lost during sustained capture"
+                }
+                if (power.currentThermalStatus >= PowerManager.THERMAL_STATUS_CRITICAL) {
+                    criticalStop = true
+                    record("SUSTAINED28 STOP critical thermal at ${shotStart - started}ms")
+                    break
+                }
+                val lateMs = (shotStart - due).coerceAtLeast(0)
+                val ready = s.readyFrames()
+                val shot = ZslCapture.take(s, FrameCountPolicy.MAX_FRAMES)
+                if (shot.count != FrameCountPolicy.MAX_FRAMES) {
+                    failures++
+                    shot.close()
+                    record("SUSTAINED28 FAIL shot=$index reason=short count=${shot.count} ready=$ready lateMs=$lateMs")
+                    continue
+                }
+                try {
+                    val result = runBlocking {
+                        ZslCapture.develop(context, s, shot, rotationDegrees = 0,
+                            outputTag = runTag, writeDng = true)
+                    }
+                    val ring = s.stats().ring
+                    val elapsed = SystemClock.elapsedRealtime() - started
+                    record("SUSTAINED28 SHOT index=$index elapsedMs=$elapsed lateMs=$lateMs " +
+                        "handoverUs=${shot.handoverMicros} mergeMs=${result.mergeMillis} " +
+                        "developMs=${result.developMillis} dngMs=${result.writeMillis} totalMs=${SystemClock.elapsedRealtime() - shotStart} " +
+                        "merged=${result.stats?.framesMerged ?: 0} jpeg=${result.savedJpeg != null} dng=${result.savedDng != null} " +
+                        "pushed=${ring.pushed} fps=${"%.1f".format(ring.measuredFps)} " +
+                        "dropped=${ring.droppedNoSlot} heldOff=${ring.droppedWhileLocked} gaps=${ring.cameraGaps} " +
+                        "thermal=${power.currentThermalStatus}")
+                    if (result.stats?.framesMerged == FrameCountPolicy.MAX_FRAMES &&
+                        result.savedJpeg != null && result.savedDng != null) completed++ else failures++
+                } catch (e: Exception) {
+                    failures++
+                    Log.e(TAG, "SUSTAINED28 FAIL shot=$index reason=pipeline", e)
+                    record("SUSTAINED28 FAIL shot=$index reason=pipeline error=${e.javaClass.simpleName}")
+                } finally {
+                    shot.close()
+                    deleteSustainedOutputs(runTag)
+                }
+            }
+        } finally {
+            sampling.set(false)
+            sampler.join(2_000)
+            deleteSustainedOutputs(runTag)
+            val ring = s.stats().ring
+            val summary = "SUSTAINED28 SUMMARY planned=$shotCount intervalMs=$intervalMs completed=$completed failures=$failures criticalStop=$criticalStop " +
+                "elapsedMs=${SystemClock.elapsedRealtime() - started} maxThermal=${maxThermal.get()} " +
+                "firstNonNormalMs=${firstNonNormalMs.get()} firstModerateMs=${firstModerateMs.get()} " +
+                "pushed=${ring.pushed} dropped=${ring.droppedNoSlot} heldOff=${ring.droppedWhileLocked} gaps=${ring.cameraGaps} " +
+                "telemetryError=${samplerFailure.get() ?: "none"}"
+            record(summary)
+            File(evidenceRoot, "summary.txt").writeText("$summary\n")
+        }
+        if (criticalStop) record("SUSTAINED28 NOT ACCEPTED: critical thermal stopped before $shotCount shots")
+        check(samplerFailure.get() == null) { "Sustained telemetry failed: ${samplerFailure.get()}" }
+        assertThat(completed + failures).isGreaterThan(0)
+        assertThat(failures).isEqualTo(0)
+        if (!criticalStop) assertThat(completed).isEqualTo(shotCount)
+    }
+
+    private fun deleteSustainedOutputs(runTag: String) {
+        val resolver = context.contentResolver
+        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME)
+        resolver.query(collection, projection,
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%$runTag%"), null)?.use { rows ->
+            val idColumn = rows.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val nameColumn = rows.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+            while (rows.moveToNext()) {
+                if (!rows.getString(nameColumn).contains("_${runTag}_")) continue
+                resolver.delete(ContentUris.withAppendedId(collection, rows.getLong(idColumn)), null, null)
+            }
+        }
+    }
+
+    @Test
     fun aBurstFromTheRingMergesIntoAPicture() {
         // The whole path, on real sensor data: lock, align, merge, develop.
         val s = openStream() ?: return
@@ -208,7 +583,7 @@ class ZslStreamDeviceTest {
                 }
                 val (merged, mergeStats) = m.finish()
                 val colour = ColorProfile.calibrated(s.characteristics, burst.referenceResult)
-                val bitmap = m.develop(merged, colour, shading = ShadingMap.from(burst.referenceResult))
+                val bitmap = m.develop(merged, colour, shading = ShadingMap.from(burst.referenceResult, profile))
                 assertThat(bitmap).isNotNull()
                 assertThat(bitmap!!.width).isEqualTo(s.config.width)
                 bitmap.recycle()

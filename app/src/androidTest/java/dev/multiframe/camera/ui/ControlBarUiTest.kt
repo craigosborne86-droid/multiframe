@@ -1,202 +1,141 @@
 package dev.multiframe.camera.ui
 
-import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.unit.dp
 import com.google.common.truth.Truth.assertThat
-import dev.multiframe.camera.pipeline.CaptureMode
 import dev.multiframe.camera.pipeline.SuperResMachine.Phase
+import dev.multiframe.camera.pipeline.CaptureMode
 import org.junit.Rule
 import org.junit.Test
 
-/**
- * The controls, rendered: the settings chips, the mode carousel, the chrome
- * opener and the action strip.
- *
- * [ControlBarTest] covers which controls exist and what state they are in,
- * which needs no device. This covers the part that does: that a spec reaches
- * the screen, that touching it reports the id the screen dispatches on, and
- * that a control the state says is disabled cannot be fired anyway.
- *
- * The last one is the point. The separation between settings and actions is
- * enforced by functions that cannot return each other's kinds, but the
- * *enabling* is a flag, and a flag that the renderer ignored would let a tap
- * take a photograph in the middle of another one.
- */
+/** Active Revision 05 controls; the final ActionStrip test is compatibility-only. */
 class ControlBarUiTest {
+    @get:Rule val compose = createComposeRule()
 
-    @get:Rule
-    val compose = createComposeRule()
-
-    private val capable = ControlBarState(
-        streamOffered = true,
-        manualOffered = true,
-        superResOffered = true,
-    )
-
-    private fun showSettings(state: ControlBarState): MutableList<String> {
-        val fired = mutableListOf<String>()
+    @Test fun revision05PhotoNightChangesOnlyWhenEnabled() {
+        var selected by mutableStateOf(CaptureMode.PHOTO)
+        var enabled by mutableStateOf(true)
+        val selections = mutableListOf<CaptureMode>()
         compose.setContent {
-            MultiframeTheme {
-                SettingsChips(ControlBar.settings(state), onControl = { fired.add(it) })
-            }
+            Revision05ConsoleFixture(mode = selected, enabled = enabled, onMode = {
+                selections += it; selected = it
+            })
         }
         compose.assumeRendered()
-        return fired
+        compose.onNodeWithTag("rangefinder-mode-photo").assertIsSelected()
+        compose.onNodeWithTag("rangefinder-mode-night").performTouchInput { click() }
+        compose.onNodeWithTag("rangefinder-mode-night").assertIsSelected()
+        compose.onNodeWithTag("mechanical-mode-2").assertDoesNotExist()
+        assertThat(selections).containsExactly(CaptureMode.NIGHT)
+
+        enabled = false
+        compose.waitForIdle()
+        compose.onNodeWithTag("rangefinder-mode-photo").assertIsNotEnabled()
+        compose.onNodeWithTag("rangefinder-mode-photo").performTouchInput { click() }
+        assertThat(selected).isEqualTo(CaptureMode.NIGHT)
+        assertThat(selections).containsExactly(CaptureMode.NIGHT)
     }
 
-    private fun showCarousel(state: ControlBarState): MutableList<String> {
-        val fired = mutableListOf<String>()
+    @Test fun mechanicalUtilityHonoursBusyAndReportsItsState() {
+        var active by mutableStateOf(false)
+        var enabled by mutableStateOf(false)
+        var taps = 0
         compose.setContent {
-            MultiframeTheme {
-                ModeCarousel(ControlBar.carousel(state), onControl = { fired.add(it) })
-            }
+            Revision05ConsoleFixture(torch = active, enabled = enabled,
+                onTorch = { taps++; active = !active })
         }
         compose.assumeRendered()
-        return fired
+        val torch = compose.onNodeWithTag("rangefinder-torch")
+        torch.assertIsNotEnabled().performTouchInput { click() }
+        assertThat(taps).isEqualTo(0)
+        enabled = true
+        compose.waitForIdle()
+        torch.assertIsEnabled().performTouchInput { click() }
+        torch.assertIsSelected().assertContentDescriptionEquals("Torch: Light")
+        assertThat(taps).isEqualTo(1)
     }
 
-    private fun showActions(state: ControlBarState): MutableList<String> {
-        val fired = mutableListOf<String>()
+    @Test fun mechanicalProSwitchReportsItsEngagedState() {
+        var engaged by mutableStateOf(false)
+        var taps = 0
         compose.setContent {
-            MultiframeTheme {
-                ActionStrip(ControlBar.actions(state), onControl = { fired.add(it) })
-            }
+            Revision05ConsoleFixture(open = engaged, onPro = { taps++; engaged = !engaged })
         }
         compose.assumeRendered()
-        return fired
+        val pro = compose.onNodeWithTag("rangefinder-pro")
+        pro.assertIsNotSelected().assertContentDescriptionEquals("Pro controls: Pro")
+        pro.performTouchInput { click() }
+        pro.assertIsSelected().assertContentDescriptionEquals("Pro controls: Hide Pro")
+        compose.onNodeWithTag("persistent-shutter").assertIsDisplayed()
+        assertThat(taps).isEqualTo(1)
     }
 
-    @Test
-    fun touchingASettingReportsTheIdTheScreenDispatchesOn() {
-        val fired = showSettings(capable)
-        compose.onNodeWithContentDescription("DNG ON").performClick()
-        compose.onNodeWithContentDescription("GUIDES OFF").performClick()
-        compose.onNodeWithContentDescription("HISTOGRAM OFF").performClick()
-        assertThat(fired).containsExactly(ControlBar.DNG, ControlBar.GUIDES, ControlBar.HISTOGRAM).inOrder()
+    @Test fun activeServiceManualDispatchesDngGuidesAndHistogram() {
+        val fired = mutableListOf<String>()
+        val state = ControlBarState(streamOffered = true, manualOffered = true,
+            superResOffered = true)
+        compose.setContent {
+            SettingsScreen(chips = ControlBar.settings(state), onControl = { fired += it },
+                onDismiss = {}, panel = {})
+        }
+        compose.assumeRendered()
+        compose.onNodeWithContentDescription("DNG ON").performScrollTo().performTouchInput { click() }
+        compose.onNodeWithContentDescription("Composition grid OFF").performScrollTo().performTouchInput { click() }
+        compose.onNodeWithContentDescription("Preview RGB histogram OFF").performScrollTo().performTouchInput { click() }
+        assertThat(fired).containsExactly(ControlBar.DNG, ControlBar.GUIDES,
+            ControlBar.HISTOGRAM).inOrder()
     }
 
-    @Test
-    fun aValueIsShownBesideItsLabelRatherThanInsideIt() {
-        showSettings(capable.copy(burstFrames = 12))
-        // Two separate texts, which is what lets the value be set in the accent
-        // and the label not be.
-        compose.onNodeWithText("FRAMES").assertIsDisplayed()
-        compose.onNodeWithText("12").assertIsDisplayed()
-    }
-
-    /**
-     * A capture in flight must not be reconfigurable, and the renderer has to
-     * honour that rather than merely dimming it.
-     */
-    @Test
-    fun aDisabledSettingCannotBeFired() {
-        val fired = showSettings(capable.copy(busy = true))
-        compose.onNodeWithContentDescription("DNG ON").assertIsNotEnabled()
-        compose.onNodeWithContentDescription("DNG ON").performClick()
+    @Test fun busyServiceManualBlocksCaptureSettingsButKeepsGuidesLive() {
+        val fired = mutableListOf<String>()
+        val state = ControlBarState(streamOffered = true, manualOffered = true,
+            superResOffered = true, busy = true)
+        compose.setContent {
+            SettingsScreen(chips = ControlBar.settings(state), onControl = { fired += it },
+                onDismiss = {}, panel = {})
+        }
+        compose.assumeRendered()
+        compose.onNodeWithContentDescription("DNG ON").performScrollTo().performTouchInput { click() }
         assertThat(fired).isEmpty()
-    }
-
-    @Test
-    fun theGuidesStayLiveWhileACaptureRuns() {
-        val fired = showSettings(capable.copy(busy = true))
-        compose.onNodeWithContentDescription("GUIDES OFF").performClick()
+        compose.onNodeWithContentDescription("Composition grid OFF").performScrollTo().performTouchInput { click() }
         assertThat(fired).containsExactly(ControlBar.GUIDES)
     }
 
-    /** The settings screen wraps its chips; every one is on screen without scrolling. */
-    @Test
-    fun everySettingIsOnScreenAtOnce() {
-        showSettings(capable)
-        for (spec in ControlBar.settings(capable)) {
-            compose.onNodeWithContentDescription(spec.value?.let { "${spec.label} $it" } ?: spec.label).assertIsDisplayed()
+    @Test fun revision05SafeTopCornerOpensSettings() {
+        var opened = 0
+        compose.setContent {
+            Revision05ConsoleFixture(onSettingsOpen = { opened++ })
         }
+        compose.assumeRendered()
+        compose.onNodeWithTag("titanium-labs-button").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Open Settings: Settings")
+            .assertIsDisplayed().performTouchInput { click() }
+        assertThat(opened).isEqualTo(1)
     }
 
-    // --- the carousel -----------------------------------------------------------
-
-    @Test
-    fun theCarouselShowsEveryModeAndReportsTheOneTouched() {
-        val fired = showCarousel(capable)
-        compose.onNodeWithContentDescription("AUTO").assertIsDisplayed().assertIsSelected()
-        compose.onNodeWithContentDescription("NIGHT").assertIsDisplayed()
-        compose.onNodeWithContentDescription("SUPER RES").performScrollTo().performClick()
-        assertThat(fired).containsExactly(ControlBar.modeId(CaptureMode.SUPER_RES))
-        assertThat(ControlBar.modeOf(fired.single())).isEqualTo(CaptureMode.SUPER_RES)
-    }
-
-    @Test
-    fun theCarouselIsHeldWhileSuperResRuns() {
-        val fired = showCarousel(capable.copy(mode = "SUPER RES", superRes = Phase.RUNNING))
-        compose.onNodeWithContentDescription("AUTO").assertIsNotEnabled()
-        compose.onNodeWithContentDescription("AUTO").performClick()
-        assertThat(fired).isEmpty()
-    }
-
-    @Test
-    fun autoCarriesWhatItSettledOn() {
-        showCarousel(capable.copy(resolvedMode = "NIGHT"))
-        compose.onNodeWithContentDescription("AUTO NIGHT").assertIsDisplayed()
-    }
-
-    // --- the actions ------------------------------------------------------------
-
-    /** The shutter bar is clean: nothing squared sits over the shutter unless a Super Res is running. */
-    @Test
-    fun theShutterBarIsEmptyUnlessASuperResIsRunning() {
-        showActions(capable.copy(burstFrames = 4))
-        compose.onNodeWithContentDescription("RAW ×4").assertDoesNotExist()
-        compose.onNodeWithContentDescription("DNG").assertDoesNotExist()
-        compose.onNodeWithContentDescription("STOP").assertDoesNotExist()
-    }
-
-    @Test
-    fun aRunningSuperResCanStillBeStopped() {
-        val fired = showActions(capable.copy(busy = true, superRes = Phase.RUNNING))
-        compose.onNodeWithContentDescription("STOP").performClick()
+    @Test fun runningSuperResStopRemainsActionableButStoppingDoesNot() {
+        var phase by mutableStateOf(Phase.RUNNING)
+        val fired = mutableListOf<String>()
+        val state = ControlBarState(streamOffered = true, manualOffered = true,
+            superResOffered = true, busy = true)
+        compose.setContent {
+            ActionStrip(ControlBar.actions(state.copy(superRes = phase)), onControl = { fired += it })
+        }
+        compose.assumeRendered()
+        compose.onNodeWithContentDescription("STOP").assertIsDisplayed().performTouchInput { click() }
         assertThat(fired).containsExactly(ControlBar.STOP)
-    }
-
-    @Test
-    fun aStopAlreadyLandingTakesNoSecondTap() {
-        val fired = showActions(capable.copy(busy = true, superRes = Phase.STOPPING))
+        phase = Phase.STOPPING
+        compose.waitForIdle()
         compose.onNodeWithContentDescription("STOPPING").assertIsNotEnabled()
-        compose.onNodeWithContentDescription("STOPPING").performClick()
-        assertThat(fired).isEmpty()
-    }
-
-    // --- the chrome ---------------------------------------------------------------
-
-    @Test
-    fun theSettingsOpenerIsTheOnlyControlOverThePictureAndReportsItself() {
-        val fired = mutableListOf<String>()
-        compose.setContent {
-            MultiframeTheme {
-                ChromeOpeners(ControlBar.chrome(capable), onControl = { fired.add(it) })
-            }
-        }
-        compose.assumeRendered()
-        compose.onNodeWithContentDescription("SETTINGS").assertIsDisplayed().performClick()
-        assertThat(fired).containsExactly(ControlBar.SETTINGS)
-        compose.onNodeWithContentDescription("INFO").assertDoesNotExist()
-        compose.onNodeWithContentDescription("PRO").assertDoesNotExist()
-    }
-
-    @Test
-    fun theProOpenerRendersBesideTheShutterAndReportsItself() {
-        val fired = mutableListOf<String>()
-        compose.setContent {
-            MultiframeTheme {
-                ChromeOpeners(ControlBar.pro(capable), onControl = { fired.add(it) })
-            }
-        }
-        compose.assumeRendered()
-        compose.onNodeWithContentDescription("PRO").assertIsDisplayed().performClick()
-        assertThat(fired).containsExactly(ControlBar.PRO)
+            .performTouchInput { click() }
+        assertThat(fired).containsExactly(ControlBar.STOP)
     }
 }

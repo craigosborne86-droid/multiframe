@@ -47,13 +47,18 @@ class HandLayoutTest {
     }
 
     @Test
-    fun aChipInATurnedHandIsTallAndItsWordsStayInside() {
-        val spec = ControlSpec(id = "histogram", label = "HISTOGRAM", kind = ControlKind.Cycle, active = true, enabled = true)
+    fun anInstrumentControlInATurnedHandIsTallAndItsWordsStayInside() {
         compose.setContent {
             Box(Modifier.fillMaxSize()) {
-                Box(Modifier.testTag("upright")) { ControlChip(spec) {} }
+                Box(Modifier.testTag("upright")) {
+                    MechanicalUtility("HISTOGRAM", "Show histogram", tag = "upright-control") {}
+                }
                 CompositionLocalProvider(LocalHandRotation provides 90) {
-                    Box(Modifier.testTag("turned")) { ControlChip(spec) {} }
+                    Box(Modifier.testTag("turned")) {
+                        UprightInHand {
+                            MechanicalUtility("HISTOGRAM", "Show histogram", tag = "turned-control") {}
+                        }
+                    }
                 }
             }
         }
@@ -69,8 +74,8 @@ class HandLayoutTest {
         assertThat(uprightW).isGreaterThan(uprightH)
         assertThat(turnedH).isGreaterThan(turnedW)
         assertThat(turnedH).isGreaterThan(uprightH)
-        compose.onAllNodesWithContentDescription("HISTOGRAM").assertCountEquals(2)
-        compose.onAllNodesWithContentDescription("HISTOGRAM")[1].assertIsDisplayed()
+        compose.onAllNodesWithContentDescription("Show histogram").assertCountEquals(2)
+        compose.onAllNodesWithContentDescription("Show histogram")[1].assertIsDisplayed()
     }
 
     @Test

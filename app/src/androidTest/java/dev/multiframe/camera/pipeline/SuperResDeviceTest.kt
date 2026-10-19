@@ -3,17 +3,25 @@ package dev.multiframe.camera.pipeline
 import android.graphics.BitmapFactory
 import android.util.Log
 import android.media.ExifInterface
+import android.os.PowerManager
+import android.os.SharedMemory
+import android.os.SystemClock
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
+import org.junit.After
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.random.Random
+import kotlin.concurrent.thread
 
 private const val TAG = "SuperResDevice"
 
@@ -40,11 +48,27 @@ private const val TAG = "SuperResDevice"
 @RunWith(AndroidJUnit4::class)
 class SuperResDeviceTest {
 
+    private val mappedFrames = ArrayList<Pair<SharedMemory, ByteBuffer>>()
+    private val telemetryRunning = AtomicBoolean(false)
+    private var telemetryThread: Thread? = null
+
+    @After
+    fun releaseMappedFrames() {
+        telemetryRunning.set(false)
+        telemetryThread?.join(2_000)
+        telemetryThread = null
+        mappedFrames.forEach { (memory, buffer) ->
+            SharedMemory.unmap(buffer)
+            memory.close()
+        }
+        mappedFrames.clear()
+    }
+
     private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
 
     private val sensorW = 4080
     private val sensorH = 3072
-    private val frames = 8
+    private val frames = 16
 
     private val profile = SensorProfile(
         blackLevel = intArrayOf(64, 64, 64, 64),
@@ -113,7 +137,12 @@ class SuperResDeviceTest {
     }
 
     private fun frame(sx: Float, sy: Float, seed: Int): ByteBuffer {
-        val buf = ByteBuffer.allocateDirect(sensorW * sensorH * 2).order(ByteOrder.LITTLE_ENDIAN)
+        // Production RAW slots are mmap-backed. allocateDirect accounts the
+        // bytes against Android's 256 MB managed-heap ceiling and would make
+        // a 16-frame test fail before the native accumulator even starts.
+        val memory = SharedMemory.create("sr-frame-$seed", sensorW * sensorH * 2)
+        val buf = memory.mapReadWrite().order(ByteOrder.LITTLE_ENDIAN)
+        mappedFrames.add(memory to buf)
         val shorts = buf.asShortBuffer()
         val rnd = Random(seed)
         val t = tables(sx, sy)
@@ -137,11 +166,45 @@ class SuperResDeviceTest {
         }
     } catch (e: Exception) { -1 }
 
+    private fun startEvidenceTelemetry(dir: File) {
+        val power = context.getSystemService(PowerManager::class.java)
+        telemetryRunning.set(true)
+        telemetryThread = thread(name = "sr-evidence-telemetry") {
+            File(dir, "telemetry.csv").bufferedWriter().use { out ->
+                out.appendLine("elapsedMs,thermalStatus,vmRssKb,vmHwmKb,nativeAllocatedBytes")
+                while (telemetryRunning.get()) {
+                    val status = File("/proc/self/status").readLines()
+                    fun kb(key: String) = status.firstOrNull { it.startsWith("$key:") }
+                        ?.split(Regex("\\s+"))?.getOrNull(1) ?: ""
+                    out.appendLine("${SystemClock.elapsedRealtime()},${power.currentThermalStatus},${kb("VmRSS")},${kb("VmHWM")},${android.os.Debug.getNativeHeapAllocatedSize()}")
+                    out.flush()
+                    Thread.sleep(1_000)
+                }
+            }
+        }
+    }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val block = ByteArray(1 shl 20)
+            while (true) { val count = input.read(block); if (count < 0) break; digest.update(block, 0, count) }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
     @Test
-    fun aFullSizeBurstBecomesATwoXJpeg() {
+    fun aSixteenFrameBurstBecomesATwoXJpeg() {
         assertThat(NativeMerge.isAvailable()).isTrue()
         assertThat(MemoryBudget.canHoldCanvas(sensorW, sensorH)).isTrue()
         DeviceKind.warnIfNotAPhone(TAG)
+
+        val preserve = InstrumentationRegistry.getArguments().getString("srEvidence") == "true"
+        val outputDir = if (preserve) File(context.getExternalFilesDir(null), "sr-evidence-${System.currentTimeMillis()}").apply {
+            check(mkdirs())
+            startEvidenceTelemetry(this)
+        } else context.cacheDir
+        val out = File(outputDir, "superres_test.jpg")
 
         val rssStart = rssMb()
         val tFrames = System.currentTimeMillis()
@@ -208,7 +271,6 @@ class SuperResDeviceTest {
         val tAcc = System.currentTimeMillis()
         val canvas = NativeSubPixel.create(sensorW, sensorH, profile)
         assertThat(canvas).isNotNull()
-        val out = File(context.cacheDir, "superres_test.jpg")
         var developStats: NativeSubPixel.DevelopStats? = null
         var accMillis = 0L
         var jpegMillis = 0L
@@ -226,6 +288,7 @@ class SuperResDeviceTest {
                 r.interiorHolesPerChannel[2] * 100, r.interiorHoleFraction * 100, r.meanContribution, rssPeak))
             assertThat(r.width).isEqualTo(sensorW * 2)
             assertThat(r.height).isEqualTo(sensorH * 2)
+            assertThat(r.framesMerged).isEqualTo(frames)
             // Prediction and measurement agree on green within a point, and
             // the burst is one the path accepts.
             assertThat(abs(r.interiorHolesPerChannel[1] - prediction.perChannel[1])).isLessThan(0.01f)
@@ -245,6 +308,7 @@ class SuperResDeviceTest {
             rssPeak = maxOf(rssPeak, rssMb())
         }
         assertThat(developStats).isNotNull()
+        if (preserve) assertThat(developStats!!.sharpenMillis).isGreaterThan(0f)
         Log.i(TAG, ("developed: gain %.2f, exposure %.0fms, develop %.0fms, sharpen %.0fms, encode %.0fms; " +
             "%dms wall, file %.1f MB, rss after %d MB").format(
             developStats!!.exposureGain, developStats!!.exposureMillis, developStats!!.developMillis,
@@ -287,7 +351,8 @@ class SuperResDeviceTest {
         Log.i(TAG, ("2x path at %dx%d -> %dx%d: align %dms, accumulate %dms, develop+encode %dms; " +
             "rss start %d MB, peak seen %d MB").format(
             sensorW, sensorH, sensorW * 2, sensorH * 2, alignMillis, accMillis, jpegMillis, rssStart, rssPeak))
-        out.delete()
+        if (preserve) Log.i(TAG, "SR EVIDENCE ${outputDir.absolutePath} jpegSha256=${sha256(out)}")
+        else out.delete()
     }
 
     /**

@@ -35,6 +35,13 @@ class SeptemberDevelopParityTest {
             val bitmap = NativeMerge.create(w, h, dng.sensor)!!.use { it.develop(buf, dng.color, params, shading = dng.shading) }!!
             val actual = IntArray(w * h)
             bitmap.getPixels(actual, 0, w, 0, 0, w, h)
+            if (dng.iso > 800) {
+                val cfg = params.copy(chroma = params.chroma.copy(amount = 0f), sharpen = params.sharpen.copy(amount = 0f))
+                val ref = RawDeveloper.develop(BayerFrame(w, h, original.copyOf()), dng.sensor, dng.color, cfg, dng.shading)
+                val bm = NativeMerge.create(w, h, dng.sensor)!!.use { it.develop(buf, dng.color, cfg, shading = dng.shading) }!!
+                val nat = IntArray(w*h); bm.getPixels(nat, 0, w, 0, 0, w, h); bm.recycle()
+                compare(ref, nat, file.name + " core")
+            }
             compare(expected, actual, file.name + " develop")
             val optics = Optics.Params(distortion = BenchLenses.modelFor(whole, w, h), lensId = null)
             // One measured CA model for both implementations; this tests the gather, not estimator noise.
@@ -70,25 +77,36 @@ class SeptemberDevelopParityTest {
     }
 
     @Test fun clippedSourceIsWhiteInBothNativeDevelops() {
-        val profile = SensorProfile.DEFAULT
-        val frame = BayerFrame(32, 32, ShortArray(1024) { profile.whiteLevel.toShort() })
-        val buf = ByteBuffer.allocateDirect(2048).order(ByteOrder.nativeOrder())
-        buf.asShortBuffer().put(frame.data)
-        val colour = ColorProfile(floatArrayOf(2.2f, 1f, 1f, 1.7f),
-            floatArrayOf(1.6f, -.5f, -.1f, -.2f, 1.5f, -.3f, .1f, -.5f, 1.4f))
-        val params = DevelopParams(exposureGain = 1f, localTone = .15f, shadowLift = 1f)
-        NativeMerge.create(32, 32, profile)!!.use { merger ->
-            val bitmap = merger.develop(buf, colour, params)!!
-            assertThat(bitmap.getPixel(16, 16)).isEqualTo(-1)
-            bitmap.recycle()
-        }
-        NativeSubPixel.create(32, 32, profile)!!.use { canvas ->
-            assertThat(canvas.setReference(buf, 64)).isTrue()
-            val result = canvas.finish()!!
-            result.rgb16.asShortBuffer().put(ShortArray(result.width * result.height * 3) { profile.whiteLevel.toShort() })
-            val out = canvas.developToArray(profile, colour, params)!!
-            val centre = (32 * result.width + 32) * 3
-            for (c in 0..2) assertThat(out[centre + c].toInt() and 255).isEqualTo(255)
+        for (levels in listOf(floatArrayOf(1f, 1f, 1f), floatArrayOf(.75f, 1f, .66f))) {
+            val profile = SensorProfile.DEFAULT
+            val frame = BayerFrame(32, 32, ShortArray(1024) { i ->
+                val x = i % 32; val y = i / 32
+                val black = profile.blackAt(x, y)
+                val c = profile.cfaPattern[(y and 1) * 2 + (x and 1)]
+                (black + levels[c] * (profile.whiteLevel - black)).toInt().toShort()
+            })
+            val buf = ByteBuffer.allocateDirect(2048).order(ByteOrder.nativeOrder())
+            buf.asShortBuffer().put(frame.data)
+            val colour = ColorProfile(floatArrayOf(2.2f, 1f, 1f, 1.7f),
+                floatArrayOf(1.6f, -.5f, -.1f, -.2f, 1.5f, -.3f, .1f, -.5f, 1.4f))
+            val params = DevelopParams(exposureGain = 1f, localTone = .15f, shadowLift = 1f)
+            NativeMerge.create(32, 32, profile)!!.use { merger ->
+                val bitmap = merger.develop(buf, colour, params)!!
+                assertThat(bitmap.getPixel(16, 16)).isEqualTo(-1)
+                bitmap.recycle()
+            }
+            NativeSubPixel.create(32, 32, profile)!!.use { canvas ->
+                assertThat(canvas.setReference(buf, 64)).isTrue()
+                val result = canvas.finish()!!
+                val black = LinearDeveloper.channelBlack(profile)
+                result.rgb16.asShortBuffer().put(ShortArray(result.width * result.height * 3) { i ->
+                    val c = i % 3
+                    (black[c] + levels[c] * (profile.whiteLevel - black[c])).toInt().toShort()
+                })
+                val out = canvas.developToArray(profile, colour, params)!!
+                val centre = (32 * result.width + 32) * 3
+                for (c in 0..2) assertThat(out[centre + c].toInt() and 255).isEqualTo(255)
+            }
         }
     }
 }
