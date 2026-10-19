@@ -327,9 +327,10 @@ class CaptureScreenEmulatorIntegrationTest {
         openPro()
         compose.onNodeWithTag("rangefinder-pro").assertIsSelected()
         assertThat(CaptureUiInspection.manual).isEqualTo(initial)
-        val manualButton = compose.onNodeWithTag("revision05-manual").assertIsDisplayed()
-        val supported = !manualButton.fetchSemanticsNode().config.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled)
+        val manualButton = compose.onNodeWithTag("revision05-manual")
+        val supported = compose.onAllNodesWithTag("revision05-manual").fetchSemanticsNodes().isNotEmpty()
         if (supported) {
+            manualButton.assertIsDisplayed()
             manualButton.performClick()
             compose.waitUntil(5_000) { latestResult()?.request?.get(CaptureRequest.CONTROL_AE_MODE) == CaptureRequest.CONTROL_AE_MODE_OFF }
             val manual = CaptureUiInspection.manual!!
@@ -339,7 +340,7 @@ class CaptureScreenEmulatorIntegrationTest {
             assertThat(request.get(CaptureRequest.SENSOR_SENSITIVITY)).isEqualTo(manual.iso)
             assertThat(request.get(CaptureRequest.SENSOR_EXPOSURE_TIME)).isEqualTo(PreviewExposure.time(manual.exposureTimeNs))
         } else {
-            manualButton.assertIsNotEnabled()
+            manualButton.assertDoesNotExist()
             assertThat(CaptureUiInspection.manual).isEqualTo(initial)
             report("NOT TESTED manual sensor actuation: virtual HAL unsupported; explicit manual/auto builder gate is separate")
         }

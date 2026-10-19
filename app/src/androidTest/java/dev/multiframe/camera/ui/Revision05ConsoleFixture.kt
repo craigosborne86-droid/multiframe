@@ -41,6 +41,8 @@ internal fun Revision05ConsoleFixture(
             gallery = { InstrumentButton("Gallery", "Open gallery", false, true, "fixture-gallery", {}) },
             panel = { if (tab == RangefinderTab.COLOR) WhiteBalancePanel(settings, caps, onSettings)
                 else Revision05ManualPanel(settings, caps, 8, FrameCountPolicy.MAX_FRAMES,
-                tab, onTab, onSettings, {}, false) }, selectedTab = tab, onTab = onTab)
+                tab, onTab, onSettings, {}, false) }, selectedTab = tab, onTab = onTab,
+            exposureAvailable = caps?.let { it.hasManualSensor || it.supportsExposureCompensation } == true,
+            focusAvailable = caps?.hasManualFocus == true)
     }
 }

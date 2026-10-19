@@ -81,7 +81,7 @@ class Revision05DockUiTest {
         } }
         ui.onNodeWithTag("revision05-kelvin").assertDoesNotExist()
         ui.onNodeWithTag("revision05-wb-mode").performClick()
-        ui.onNodeWithTag("revision05-wb-manual").performScrollTo().assertIsNotEnabled()
+        ui.onNodeWithTag("revision05-wb-manual").assertDoesNotExist()
         ui.onNodeWithTag("revision05-wb-preset-5").performScrollTo().performClick()
         assertEquals(5, settings.awbMode)
         assertFalse(settings.manualExposure)

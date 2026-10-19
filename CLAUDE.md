@@ -136,9 +136,11 @@ picture, the sensor saw it in the scene."
 
 ### Compose UI
 
-- **Design tokens live in `Theme.kt`.** Colors are `Ink.*` tokens. Typography
-  is `Type.*` styles. Do not write raw `Color(0xFF...)` or `fontSize = 13.sp`
-  in composables — use the tokens.
+- **Design tokens live in `TitaniumTokens.kt`.** It is the one palette, type
+  scale and geometry of the Titanium Rangefinder interface. `Ink.*` and
+  `Type.*` in `Theme.kt` are aliases of it for older call sites; never give
+  an alias a value of its own. Do not write raw `Color(0xFF...)` or
+  `fontSize = 13.sp` in composables — use the tokens.
 - **Haptics are dispatched through the `Haptics` object in `Theme.kt`.** Do not
   call `performHapticFeedback` directly. Every haptic feedback point is
   catalogued in `docs/REFERENCE.md` section 1.3.
@@ -146,25 +148,39 @@ picture, the sensor saw it in the scene."
   would introduce motion blur.
 - **`contentDescription` on every interactive element.** Minimum touch target
   48dp. This is a floor, not a goal.
-- **Shape distinguishes function.** Settings are pills (`RoundedCornerShape
-  (24.dp)`). Actions that write files are squared (`RoundedCornerShape(8.dp)`).
-  Lenses are circles. Do not introduce a fourth shape language.
+- **One shape language: the milled plate.** Controls, settings rows and file
+  actions are plates (`RoundedCornerShape(TitaniumTokens.RadiusPlate)`, 4dp;
+  `RadiusSmall`, 2dp, for inset segments). The shutter is the only circle.
+  Function is told by the label and its place in the console, not by shape.
+  Do not introduce pills or a second radius scale.
 
-## Palette Rules (The Ink System)
+## Palette Rules (Titanium Rangefinder)
 
 1. **Nothing coloured sits on top of the photograph.** The three documented
-   exceptions are `Ink.Level` (green level gauge), `Ink.Clipping` (red
-   highlight warning) and `Ink.Peaking` (cyan focus peaking while manual
-   focus is engaged). All are transient states about the photograph, not the
-   interface.
-2. **Selection is shown by weight, not hue.** Active = `Bone` fill. Inactive =
-   `Pane` background + `Hairline` border.
-3. **`Amber` is spent only on numerical readings and live values.** Not on
-   labels, backgrounds, borders, or icons.
+   exceptions are `Ink.Level` (green level gauge), `Ink.Clipping`
+   (`TitaniumTokens.ClippingRed`, the highlight warning) and `Ink.Peaking`
+   (cyan focus peaking while manual focus is engaged). All are transient
+   states about the photograph, not the interface. Focus brackets, the focus
+   target and the loupe frame are telemetry white; cyan is peaking's alone.
+   Two further marks are tolerated because the user asks for them: the
+   preview RGB histogram (opt-in, the `RGB` button) and the Labs Brenizer
+   sweep marker (`Confirm` when steady).
+2. **`Amber` belongs to the console, never the photograph.** It marks the
+   selected control (an underline and the label's weight) and every live
+   reading. It is not a fill, a background or an icon. Inactive controls are
+   `TelemetryWhite` on the plate finish with a `HairlineBorder`.
+3. **`ClippingRed`, `Danger` and `Amber` are three colours.** The highlight
+   warning must never be aliased to a reading or a destructive action;
+   `ThemeTest` holds them apart.
 4. **`Danger` and `Confirm` are never on the viewfinder** during normal
-   operation. They exist for gallery actions and Super Res tile guidance only.
+   operation. They exist for Lightbox actions, onboarding and Labs sweep
+   guidance only.
 5. A value that is a live reading gets `Amber`. The word for "no reading" (e.g.,
-   "OFF") gets `Muted`.
+   "OFF") gets `TelemetryDim`.
+6. **A control the camera cannot use is absent, not greyed.** This includes
+   lens stops the camera cannot reach, manual modes, white-balance modes and
+   Pro tabs (see Hardware Assumptions). Greying is only for a control that is
+   momentarily busy — a capture in flight — never for a capability.
 
 ## Hardware Assumptions — Verify, Never Assume
 
@@ -254,8 +270,8 @@ the code comment should be updated.
 - **Do not add cloud features.** No network permission, no upload, no sync.
 - **Do not skip haptics.** Every state change in the UI has a defined haptic
   response. See `docs/REFERENCE.md` section 1.3.
-- **Do not use raw color/size literals in composables.** Use `Ink.*` and
-  `Type.*` tokens.
+- **Do not use raw color/size literals in composables.** Use `TitaniumTokens`
+  (or its `Ink.*`/`Type.*` aliases).
 - **Do not assume hardware features exist.** Gate on `CameraCapabilities` and
   `LensProfile`. Hide controls for unavailable features.
 - **Do not reorder pipeline steps** without updating `docs/REFERENCE.md` with

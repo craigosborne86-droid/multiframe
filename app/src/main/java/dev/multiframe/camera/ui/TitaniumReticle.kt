@@ -108,18 +108,19 @@ fun TitaniumReticle(
                 }.semantics { contentDescription = "Drag focus target" }
                 .testTag("rangefinder-focus-target")) {
                 val mid = Offset(size.width / 2f, size.height / 2f)
-                val cyan = TitaniumTokens.SignalCyan.copy(alpha = .58f)
-                drawCircle(cyan, 13.dp.toPx(), mid, style = Stroke(1.dp.toPx()))
+                // Cyan is peaking's alone.
+                val mark = TitaniumTokens.TelemetryWhite.copy(alpha = .58f)
+                drawCircle(mark, 13.dp.toPx(), mid, style = Stroke(1.dp.toPx()))
                 val span = 21.dp.toPx()
-                drawLine(cyan, Offset(mid.x - span, mid.y), Offset(mid.x - 16.dp.toPx(), mid.y), 1.dp.toPx())
-                drawLine(cyan, Offset(mid.x + 16.dp.toPx(), mid.y), Offset(mid.x + span, mid.y), 1.dp.toPx())
+                drawLine(mark, Offset(mid.x - span, mid.y), Offset(mid.x - 16.dp.toPx(), mid.y), 1.dp.toPx())
+                drawLine(mark, Offset(mid.x + 16.dp.toPx(), mid.y), Offset(mid.x + span, mid.y), 1.dp.toPx())
             }
             if (focusAssistOpen) {
                 // Keep the loupe opposite the bounded landscape manual panel.
                 Box(Modifier.align(if (focusInsetOnLeft) Alignment.TopStart else Alignment.TopEnd)
                     .offset(x = if (focusInsetOnLeft) 8.dp else (-8).dp, y = topClearance + 8.dp)
                     .size(TitaniumTokens.FocusInsetWidth, TitaniumTokens.FocusInsetHeight)
-                    .border(TitaniumTokens.Hairline, TitaniumTokens.SignalCyan,
+                    .border(TitaniumTokens.Hairline, TitaniumTokens.TelemetryWhite,
                         RoundedCornerShape(TitaniumTokens.RadiusSmall))
                     .onGloballyPositioned { onFocusInsetBounds(it.boundsInRoot()) }
                     .testTag("rangefinder-focus-inset"))
@@ -128,7 +129,7 @@ fun TitaniumReticle(
     }
 }
 
-/** Minimalist tap-to-focus reticle: optical amber precision corner brackets with center crosshairs. */
+/** Minimalist tap-to-focus reticle: telemetry-white precision corner brackets with center crosshairs. */
 @Composable
 fun TitaniumFocusPointReticle(
     point: Offset,
@@ -150,27 +151,28 @@ fun TitaniumFocusPointReticle(
             .testTag("rangefinder-tap-focus-reticle"),
     ) {
         Canvas(Modifier.fillMaxSize()) {
-            val amber = TitaniumTokens.OpticalAmber
+            // Nothing amber sits on the photograph.
+            val mark = TitaniumTokens.TelemetryWhite
             val arm = 8.dp.toPx()
             val stroke = 1.dp.toPx()
             // Corner brackets
-            drawLine(amber, Offset(0f, 0f), Offset(arm, 0f), stroke)
-            drawLine(amber, Offset(0f, 0f), Offset(0f, arm), stroke)
-            drawLine(amber, Offset(size.width, 0f), Offset(size.width - arm, 0f), stroke)
-            drawLine(amber, Offset(size.width, 0f), Offset(size.width, arm), stroke)
-            drawLine(amber, Offset(0f, size.height), Offset(arm, size.height), stroke)
-            drawLine(amber, Offset(0f, size.height), Offset(0f, size.height - arm), stroke)
-            drawLine(amber, Offset(size.width, size.height), Offset(size.width - arm, size.height), stroke)
-            drawLine(amber, Offset(size.width, size.height), Offset(size.width, size.height - arm), stroke)
+            drawLine(mark, Offset(0f, 0f), Offset(arm, 0f), stroke)
+            drawLine(mark, Offset(0f, 0f), Offset(0f, arm), stroke)
+            drawLine(mark, Offset(size.width, 0f), Offset(size.width - arm, 0f), stroke)
+            drawLine(mark, Offset(size.width, 0f), Offset(size.width, arm), stroke)
+            drawLine(mark, Offset(0f, size.height), Offset(arm, size.height), stroke)
+            drawLine(mark, Offset(0f, size.height), Offset(0f, size.height - arm), stroke)
+            drawLine(mark, Offset(size.width, size.height), Offset(size.width - arm, size.height), stroke)
+            drawLine(mark, Offset(size.width, size.height), Offset(size.width, size.height - arm), stroke)
             // Center precision cross with gap
             val cx = size.width / 2f
             val cy = size.height / 2f
             val gap = 4.dp.toPx()
             val crossArm = 4.dp.toPx()
-            drawLine(amber, Offset(cx - gap - crossArm, cy), Offset(cx - gap, cy), stroke)
-            drawLine(amber, Offset(cx + gap, cy), Offset(cx + gap + crossArm, cy), stroke)
-            drawLine(amber, Offset(cx, cy - gap - crossArm), Offset(cx, cy - gap), stroke)
-            drawLine(amber, Offset(cx, cy + gap), Offset(cx, cy + gap + crossArm), stroke)
+            drawLine(mark, Offset(cx - gap - crossArm, cy), Offset(cx - gap, cy), stroke)
+            drawLine(mark, Offset(cx + gap, cy), Offset(cx + gap + crossArm, cy), stroke)
+            drawLine(mark, Offset(cx, cy - gap - crossArm), Offset(cx, cy - gap), stroke)
+            drawLine(mark, Offset(cx, cy + gap), Offset(cx, cy + gap + crossArm), stroke)
         }
     }
 }

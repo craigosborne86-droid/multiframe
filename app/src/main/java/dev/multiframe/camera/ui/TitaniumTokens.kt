@@ -23,6 +23,9 @@ object TitaniumTokens {
     val ProofVelvet = Color(0xFF060708)
     val FrameLine = Color(0xFF3A3E4D)
     val Danger = Color(0xFFE85B5B)
+    // The highlight warning on the photograph: a red no amber reading or
+    // danger action shares, so a blown sky is never mistaken for a value.
+    val ClippingRed = Color(0xFFFF2D2D)
 
     val ConsoleFinish = Brush.verticalGradient(listOf(TitaniumM6Dark.copy(alpha=.12f),PlateSurface,Chassis))
     val ControlFinish = Brush.verticalGradient(listOf(TitaniumM6.copy(alpha=.10f),PlateSurface,Chassis))

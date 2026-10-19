@@ -61,150 +61,131 @@ comment should be updated.
 
 ## 1. Design System & Joy Reference
 
-### 1.1 The Ink Color System
+### 1.1 The Titanium Rangefinder Palette
 
 #### 1.1.1 Philosophy
 
-Two rules decide the palette:
+The interface is a milled instrument: a charcoal chassis, titanium plates,
+white telemetry and one amber accent. Three rules decide the palette:
 
 1. **Nothing coloured sits on top of the photograph.** A saturated hue in
    peripheral vision shifts the user's perception of the colours in the image.
    A camera whose argument is neutral rendering cannot introduce that bias.
+   Marks on the photograph (focus brackets, focus target, loupe frame) are
+   `TelemetryWhite`.
 
-2. **Selection is shown by weight, not hue.** An active control is filled with
-   `Bone`; an inactive one sits on `Pane`. The single accent (`Amber`) is spent
-   exclusively on numerical readings and live values — the places an instrument
-   has always spent its accent.
+2. **Amber belongs to the console.** `OpticalAmber` marks the selected
+   control (a short underline and the label's weight) and every live
+   reading. It is never a fill, a background or an icon, and never on the
+   photograph.
 
-Two documented exceptions exist: `Level` (green, the level gauge) and `Clipping`
-(red, blown highlights). Both are transient states about the photograph itself,
-not about the interface.
+3. **A control the camera cannot use is absent, not greyed.** `TelemetryDim`
+   on a label means "momentarily busy" (a capture in flight), never "this
+   hardware cannot".
+
+Three documented exceptions to rule 1: `Level` (green, the level gauge),
+`Clipping` (red, blown highlights) and `Peaking` (cyan, manual focus). Each is
+a transient state about the photograph itself, not about the interface. Two
+opt-in marks are tolerated: the preview RGB histogram (the `RGB` button) and
+the Labs Brenizer sweep marker.
 
 #### 1.1.2 Palette Tokens
 
-**Core palette (existing, do not modify):**
+All values live in `TitaniumTokens.kt`. `Ink.*` in `Theme.kt` are aliases for
+older call sites and must never carry a value of their own.
 
-| Token | Hex | Alpha | Purpose |
+| Token (`TitaniumTokens`) | `Ink` alias | Hex | Purpose |
 |---|---|---|---|
-| `Ground` | `#000000` | 100% | App background, viewfinder fallback |
-| `Bone` | `#F2F0EA` | 100% | Primary text, active fill. Warm white (paper, not light leak) |
-| `Pane` | `#141A1F` | 85% | Inactive control background. Translucent over image |
-| `Hairline` | `#FFFFFF` | 15% | Control borders. Separates from dark photographs |
-| `Muted` | `#9BA1A7` | 100% | Secondary text, labels. Present, not competing |
-| `Amber` | `#FFB020` | 100% | The one accent. Values, sliders, live readings only |
-| `Panel` | `#0A0C0E` | 94% | A panel over the picture, where one is drawn. Opaque enough to read controls |
-| `OnBone` | `#0B0D0F` | 100% | Text on a Bone fill |
-| `OnBoneMuted` | `#06121F` | 80% | Secondary text on Bone fill (lens zoom label) |
-| `Edge` | `#FFFFFF` | 40% | Border of image-containing elements (thumbnail) |
+| `Chassis` | `Ground`, `OnBone` | `#0A0A0C` | App background, viewfinder fallback |
+| `PlateSurface` | `Pane`, `PaneSolid`, `Panel` | `#121316` | Control plate, panels, settings rows |
+| `HairlineBorder` | `Hairline` | `#22242B` | Plate borders and turret ruling |
+| `FrameLine` | `Edge` | `#3A3E4D` | Frame of image-containing elements |
+| `TitaniumM6` / `M6Dark` | `OnBoneMuted` (dark) | `#C8C2B8` / `#8C867C` | Plate finish gradients, pressed tint |
+| `TelemetryWhite` | `Bone`, `SheetBody` | `#E6E6EB` | Primary text; every mark on the photograph |
+| `TelemetryDim` | `Muted`, `SheetMuted` | `#7A7E8C` | Labels, units, "no reading", busy controls |
+| `OpticalAmber` | `Amber` | `#FF9E1B` | Selected control and live readings, console only |
+| `ProofVelvet` | `Sheet` | `#060708` | Opaque sheets (About, Lightbox ground) |
 
-**Readout and overlay tokens (existing, do not modify):**
+**Exception tokens (the only colour on the photograph):**
 
-| Token | Hex | Alpha | Purpose |
+| Token | `Ink` alias | Hex | Purpose |
 |---|---|---|---|
-| `Readout` | `#000000` | 80% | Behind live text that must be legible over any image |
-| `Faint` | `#000000` | 40% | Behind graphics with inherent contrast |
-| `ScrimTop` | `#000000` | 65% | Gradient ground for top control row |
-| `ScrimBottom` | `#000000` | 72% | Gradient ground for bottom controls |
+| `PhosphorGreen` | `Level` | `#00E599` | Level gauge within tolerance (0.5°) |
+| `ClippingRed` | `Clipping` | `#FF2D2D` | Blown highlight warning. Never aliased to amber or `Danger` |
+| `SignalCyan` | `Peaking` | `#00D2FF` | Focus peaking while manual focus is engaged; used for nothing else |
+| `HistogramRed/Green/Blue` | -- | `#FF9292` / `#A3E5A8` / `#9BC8FF` | Opt-in preview RGB histogram |
 
-**Guide tokens (existing, do not modify):**
+**Semantic tokens (off the viewfinder):**
 
-| Token | Hex | Alpha | Purpose |
+| Token | `Ink` alias | Hex | Purpose |
 |---|---|---|---|
-| `Guide` | `#FFFFFF` | 30% | Composition guide lines |
-| `GuideStrong` | `#FFFFFF` | 40% | Emphasized guide lines |
-| `GuideFaint` | `#FFFFFF` | 10% | Subtle reference lines |
-| `GuideMid` | `#FFFFFF` | 27% | Intermediate guides |
-| `GuideText` | `#FFFFFF` | 73% | Text drawn on the viewfinder |
-| `GuideBright` | `#FFFFFF` | 80% | Strong viewfinder annotations |
+| `Danger` | `Danger` | `#E85B5B` | Destructive actions in Lightbox and dialogs |
+| `PhosphorGreen` | `Confirm` | `#00E599` | Success in Lightbox/onboarding; Labs sweep "steady" |
 
-**Exception tokens (existing, documented exceptions to rule 1):**
-
-| Token | Hex | Purpose |
-|---|---|---|
-| `Level` | `#6FE39A` | Level gauge at rest. Appears only when level is achieved |
-| `Clipping` | `#FF6B6B` | Blown highlight indicator. Appears only when clipping |
-| `Peaking` | `#3DF2FF` | Focus peaking: the edges that are resolving, in a hue no scene has. Appears only while manual focus is engaged |
-
-**Sheet tokens (existing, for the About sheet):**
-
-| Token | Hex | Purpose |
-|---|---|---|
-| `Sheet` | `#06090C` | Sheet background (opaque, covers image) |
-| `SheetBody` | `#D4DDE6` | Body text on sheet |
-| `SheetMuted` | `#8A97A5` | Secondary text on sheet |
-| `SheetCode` | `#161C22` | Code block background on sheet |
-
-**New semantic tokens (to be added in Phase 1):**
-
-| Token | Hex | Alpha | Purpose | Rule |
-|---|---|---|---|---|
-| `BoneDim` | `#F2F0EA` | 50% | Tertiary text, disabled labels | Same warmth as Bone, reduced presence |
-| `AmberDim` | `#FFB020` | 40% | Pressed/focused state of Amber elements | Communicates interaction without full accent |
-| `Danger` | `#E85B5B` | 100% | Destructive actions outside the viewfinder (delete in gallery) | Never on the viewfinder. Only in modal/gallery contexts |
-| `Confirm` | `#5BC87A` | 100% | Success states outside the viewfinder (Super Res tile captured) | Never on the viewfinder except during active Super Res guidance |
-| `PaneSolid` | `#0F1215` | 100% | Non-overlay screen backgrounds (gallery, settings) | For screens that don't sit on the photograph |
+Geometry tokens: `RadiusPlate` 4dp (every control, settings row and file
+action), `RadiusSmall` 2dp (inset segments), `MinimumTouch` 48dp (the floor),
+`ShutterDiameter` 84dp (the only circle), `Hairline` 1dp.
 
 #### 1.1.3 Color Usage Rules
 
-1. `Amber` is the **only** accent color. It appears on: numerical readings,
-   slider thumbs, active slider fill endpoints, focus reticle, shutter ring
-   during capture. It never appears on: labels, backgrounds, borders, icons.
+1. **Selected:** amber underline, label `SemiBold` in `OpticalAmber`.
+   **Inactive:** `TelemetryWhite` label on the plate finish with a
+   `HairlineBorder`. **Busy:** `TelemetryDim` label, not clickable.
 
-2. When a control is **active/selected**: fill with `Bone`, text in `OnBone`.
-   When **inactive**: background `Pane`, border `Hairline`, text `Bone`.
+2. When a value is a **live reading** (a number the camera is reporting):
+   `OpticalAmber`. When a value is **the word for not having a reading**
+   (e.g., "OFF"): `TelemetryDim`.
 
-3. When a value is a **live reading** (a number the camera is reporting):
-   `Amber`. When a value is **the word for not having a reading** (e.g., "OFF"):
-   `Muted`. This prevents "TIMER OFF" from looking like "TIMER is running."
+3. `Danger` and `Confirm` are **never** used on the viewfinder during normal
+   operation. They appear only in Lightbox actions, onboarding, error dialogs
+   and the Labs sweep guidance.
 
-4. `Danger` and `Confirm` are **never** used on the viewfinder during normal
-   operation. They appear only in: gallery delete confirmation, Super Res tile
-   guidance (during an active capture only), and error dialogs.
+4. The exception tokens -- `Level`, `Clipping`, `Peaking` -- are the only
+   chromatic marks over the photograph outside the two opt-in marks, and
+   each is a *transient state about the photograph*: it appears when the
+   thing is true and vanishes when it stops being true. `Peaking` is drawn in
+   the preview's bounds and orientation, from the current preview frame,
+   while manual focus is engaged and at no other time.
 
-5. The three exception tokens -- `Level`, `Clipping`, `Peaking` -- are the
-   only chromatic marks permitted over the photograph, and each is a
-   *transient state about the photograph*: it appears when the thing is
-   true and vanishes when it stops being true. `Peaking` is drawn in the
-   preview's bounds and orientation, from the current preview frame, while
-   manual focus is engaged and at no other time.
+5. `ThemeTest` holds `Clipping`, `Amber`, `Danger` and `Peaking` apart. Do
+   not merge two of them to save a token.
 
 ---
 
 ### 1.2 Typography Scale
 
-#### 1.2.1 Type Tokens (as `TextStyle` objects in `Theme.kt`)
+#### 1.2.1 Type Tokens (as `TextStyle` values in `TitaniumTokens.kt`)
 
-```
-object Type {
-    val Gauge       = TextStyle(fontSize=13.sp, fontFamily=Monospace, color=Ink.Amber)
-    val GaugeLarge  = TextStyle(fontSize=26.sp, fontFamily=Monospace, color=Ink.Amber)
-    val GaugeBone   = TextStyle(fontSize=13.sp, fontFamily=Monospace, color=Ink.Bone)
-    val Label       = TextStyle(fontSize=11.sp, fontWeight=Medium, letterSpacing=0.5.sp, color=Ink.Muted)
-    val Control     = TextStyle(fontSize=12.sp, fontWeight=Medium, letterSpacing=0.4.sp, color=Ink.Bone)
-    val Section     = TextStyle(fontSize=10.sp, fontWeight=Medium, letterSpacing=1.2.sp, color=Ink.Muted)
-    val Status      = TextStyle(fontSize=12.sp, fontFamily=Monospace, color=Color.White)
-    val Countdown   = TextStyle(fontSize=76.sp, fontFamily=Monospace, color=Ink.Bone)
-    val Instruction = TextStyle(fontSize=10.sp, fontWeight=Medium, letterSpacing=1.2.sp, color=Ink.Muted)
-}
-```
+Every interface face is monospace (`TitaniumTokens.Technical`) with 1.2sp
+tracking; prose in sheets and panels uses `Readable` (sans-serif 14sp) and
+`ReadableSmall` (12sp).
+
+| Token | Size | Colour | Use |
+|---|---|---|---|
+| `Gauge` / `GaugeCompact` / `GaugeLarge` | 13 / 17 / 26sp | Amber | Live readings |
+| `GaugeBone` | 13sp | TelemetryWhite | A number that is not a live reading |
+| `SelectedValue` | 26sp | Amber | The selected control's value in a panel |
+| `Label`, `Section`, `Unit`, `Instruction` | 10–11sp | TelemetryDim | Labels, headers, units |
+| `Control`, `Action`, `Status` | 12sp | TelemetryWhite | Buttons, status line |
+| `LensFocal` / `LensZoom` | 13 / 10sp | TelemetryWhite / Dim | Turret stops |
+| `Countdown` | 76sp | TelemetryWhite | Self-timer digits |
+| `Badge` | 10sp | Amber | Output badges (SR, 50 MP) |
 
 #### 1.2.2 Usage Rules
 
-- **Monospace** is used exclusively for values the user reads as numbers:
-  ISO, shutter speed, EV, zoom factor, tile count, coverage, focus distance,
-  lens focal length, countdown digits. This is the instrument convention.
+- **Monospace** is the instrument face: readings, labels and controls alike,
+  so a console reads as one engraved plate.
 
-- **Proportional (default system font)** is used for labels, button text,
-  section headers, instructions, and all prose. Proportional text at small sizes
-  fits in tighter spaces and reads more naturally for words.
+- **Proportional** (`Readable`, `ReadableSmall`) is used for prose: panel
+  explanations, sheets, onboarding and Lightbox details.
 
 - **Never mix** a proportional label and a monospace label for the same kind of
   element. If one chip uses monospace for its value, all chips use monospace for
   their values.
 
 - The `fontSize` values in the token table are the **canonical sizes**. Do not
-  write `fontSize = 13.sp` directly in a composable — use `Type.Gauge.fontSize`
-  or apply the style directly: `Text(text = value, style = Type.Gauge)`.
+  write `fontSize = 13.sp` directly in a composable — apply the style:
+  `Text(text = value, style = TitaniumTokens.Gauge)`.
 
 ---
 
@@ -232,8 +213,8 @@ object Haptics {
 
 | Context | Trigger | Haptic Call | Rationale |
 |---|---|---|---|
-| Shutter pressed | `onClick` on shutter button | `Haptics.shutter` | Strong confirmation: a photograph was taken. On the ZSL path it fires the moment after the frames are locked (`ZslCapture.take`, microseconds into the press), so the frames it could blur are already in the ring's hand and the develop that follows is not waited on; on the sequential path it fires at the press, before the burst starts. With the self-timer it fires at the press and the frames are locked when the countdown ends |
-| Shutter pressed, ring empty | `onClick` with no frame ready | `Haptics.reject` | Nothing was taken; the status says so |
+| Shutter pressed | `onClick` on shutter button | `Haptics.mechanicalRelease` (two short impacts, `VibratorManager` waveform) | A photograph was taken. It fires only after the frames are locked (ZSL, `CaptureFeedback.afterSync`) or captured (sequential, `CaptureFeedback.afterSuspending`), never during them. The press itself is silent: the half-press haptic was removed because the ring is recording while the finger is down |
+| Shutter refused | Ring full, ring not refilled, or fewer frames ready than the press asked for | `Haptics.reject` | Nothing was taken; the status says so. A press never takes a short burst |
 | Self-timer tick | Each countdown second but the last | `Haptics.tick` | Light metronome, not distracting. The last second is silent: the frames the timer locks are exposed in it |
 | Mode toggle | GUARD, LOCAL TONE, HISTOGRAM, DNG, Labs Brenizer 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
 | Cycle value | FRAMES, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
@@ -251,7 +232,7 @@ object Haptics {
 | Error action | Tapping a disabled control, invalid state | `Haptics.reject` | Something went wrong |
 | Settings open/close | The gear over the picture; DONE or the back gesture | (none) opening, `Haptics.segment` closing from DONE | Opening a screen is its own feedback; DONE is a control and gets the detent |
 | PRO mode on/off | PRO in the console header; the back gesture | `Haptics.segment` | Changes actual AE and white-balance requests as well as the drawer |
-| Gallery delete confirmed | After confirmation dialog | `Haptics.confirm` | Acknowledge destructive action |
+| Lightbox delete confirmed | After confirmation dialog | `Haptics.confirm` | Acknowledge destructive action |
 
 #### 1.3.3 Anti-Patterns
 

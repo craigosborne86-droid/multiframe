@@ -101,6 +101,18 @@ class ThemeTest {
      * them here as distinct from the two sanctioned exceptions is the record of
      * that.
      */
+    /**
+     * The highlight warning is red. Aliased to amber during the Titanium
+     * redesign, a blown sky read as one more console value.
+     */
+    @Test
+    fun theClippingWarningIsRedAndNotAReading() {
+        assertThat(Ink.Clipping).isNotEqualTo(Ink.Amber)
+        assertThat(Ink.Clipping.red).isGreaterThan(0.9f)
+        assertThat(Ink.Clipping.green).isLessThan(0.3f)
+        assertThat(Ink.Clipping.blue).isLessThan(0.3f)
+    }
+
     @Test
     fun theSemanticColoursAreNotTheViewfinderExceptions() {
         assertThat(Ink.Danger).isNotEqualTo(Ink.Clipping)

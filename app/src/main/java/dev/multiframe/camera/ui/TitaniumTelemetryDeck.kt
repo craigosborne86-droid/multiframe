@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -19,6 +20,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -113,7 +115,8 @@ fun TitaniumResolutionSelector(
             val label = "%.0fMP".format(if (option) fullMegapixels else binnedMegapixels)
             Box(
                 modifier = Modifier
-                    .heightIn(min = 28.dp)
+                    .heightIn(min = TitaniumTokens.MinimumTouch)
+                    .widthIn(min = TitaniumTokens.MinimumTouch)
                     .background(
                         if (selected) TitaniumTokens.PlateSurface else androidx.compose.ui.graphics.Color.Transparent,
                         RoundedCornerShape(TitaniumTokens.RadiusSmall),
@@ -125,7 +128,7 @@ fun TitaniumResolutionSelector(
                             RoundedCornerShape(TitaniumTokens.RadiusSmall),
                         ) else Modifier
                     )
-                    .clickable(enabled = enabled) { onFull(option) }
+                    .clickable(enabled = enabled, role = Role.Tab) { onFull(option) }
                     .padding(horizontal = 8.dp, vertical = 2.dp)
                     .semantics { contentDescription = "Resolution $label" },
                 contentAlignment = Alignment.Center,

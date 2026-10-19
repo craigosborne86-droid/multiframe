@@ -16,8 +16,9 @@ import androidx.compose.ui.unit.sp
 
 /**
  * Titanium Rangefinder tokens transcribed from the supplied CSS reference.
- * Amber marks selected mechanical controls and readings; green confirms level;
- * cyan marks focus peaking. These are interface cues, not image processing.
+ * Amber marks selected mechanical controls and readings in the console; on
+ * the photograph only green (level), red (clipping) and cyan (peaking)
+ * appear. These are interface cues, not image processing.
  */
 /** Compatibility names for older non-capture call sites. Every value comes from TitaniumTokens. */
 object Ink {
@@ -45,7 +46,7 @@ object Ink {
     val GuideText = TitaniumTokens.TelemetryWhite.copy(alpha = .73f)
     val GuideBright = TitaniumTokens.TelemetryWhite.copy(alpha = .8f)
     val Level = TitaniumTokens.PhosphorGreen
-    val Clipping = TitaniumTokens.OpticalAmber
+    val Clipping = TitaniumTokens.ClippingRed
     val Peaking = TitaniumTokens.SignalCyan
     val Confirm = TitaniumTokens.PhosphorGreen
     val Danger = TitaniumTokens.Danger

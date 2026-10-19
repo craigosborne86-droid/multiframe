@@ -89,12 +89,12 @@ class Revision05NativeIntegrationTest {
         val manualSupported = android.hardware.camera2.CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in
             (stream!!.characteristics.get(android.hardware.camera2.CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf())
         ui.waitUntil(10_000) {
-            !ui.onNodeWithTag("revision05-manual").fetchSemanticsNode().config.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled) == manualSupported
+            ui.onAllNodesWithTag("revision05-manual").fetchSemanticsNodes().isNotEmpty() == manualSupported
         }
         if (manualSupported) {
             ui.onNodeWithTag("revision05-manual").performScrollTo().assertIsDisplayed().performClick()
             ui.waitUntil(10_000) { CaptureUiInspection.manual?.manualExposure == true }
-        } else ui.onNodeWithTag("revision05-manual").assertIsNotEnabled()
+        } else ui.onNodeWithTag("revision05-manual").assertDoesNotExist()
         val stored = CaptureUiInspection.manual!!
         click("rangefinder-pro")
         assertEquals(stored, CaptureUiInspection.manual)
@@ -177,11 +177,9 @@ class Revision05NativeIntegrationTest {
         scenario.onActivity { it.setShootingUi(true) }
         click("revision05-auto-wb")
         ui.waitForIdle()
-        val available = !ui.onNodeWithTag("revision05-wb-manual").fetchSemanticsNode().config
-            .contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled)
+        val available = ui.onAllNodesWithTag("revision05-wb-manual").fetchSemanticsNodes().isNotEmpty()
         if (!available) {
-            ui.onNodeWithTag("revision05-wb-manual").assertIsNotEnabled()
-            File(folder, "wb-hardware.txt").writeText("Calibrated manual white balance is not advertised by this sensor. UI disabled it.\n")
+            File(folder, "wb-hardware.txt").writeText("Calibrated manual white balance is not advertised by this sensor. UI hid it.\n")
             return
         }
         val stream = CaptureUiInspection.stream!!

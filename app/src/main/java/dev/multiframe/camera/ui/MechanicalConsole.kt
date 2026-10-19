@@ -123,11 +123,15 @@ fun MechanicalTurret(
         return
     }
     val labels = listOf("13mm", "24mm", "48mm", "120mm", "240mm")
+    // Only the stops this camera can reach are milled; an unreachable focal
+    // length is absent rather than greyed, and the rest share the width.
+    val stops = labels.indices.filter { available.getOrElse(it) { false } }.ifEmpty { listOf(selected.coerceIn(0, 4)) }
+    val latestStops by rememberUpdatedState(stops)
     val latestSelect by rememberUpdatedState(onSelect)
     val latestIndex by rememberUpdatedState(selected)
     val view = LocalView.current
     var width by remember { mutableIntStateOf(1) }
-    val position by animateFloatAsState(selected.toFloat(), spring(dampingRatio = .48f, stiffness = 430f),
+    val position by animateFloatAsState(stops.indexOf(selected).coerceAtLeast(0).toFloat(), spring(dampingRatio = .48f, stiffness = 430f),
         label = "milled-focal-detent")
     Box(modifier.fillMaxWidth().height(48.dp)
         .background(TitaniumTokens.PlateSurface)
@@ -139,8 +143,9 @@ fun MechanicalTurret(
                 val down = awaitFirstDown(requireUnconsumed = false)
                 var previous = latestIndex
                 fun choose(x: Float) {
-                    val next = ((x / width) * 5f).toInt().coerceIn(0, 4)
-                    if (available.getOrElse(next) { false } && next != previous) { Haptics.tick(view); previous = next; latestSelect(next) }
+                    val visible = latestStops
+                    val next = visible[((x / width) * visible.size).toInt().coerceIn(0, visible.size - 1)]
+                    if (next != previous) { Haptics.tick(view); previous = next; latestSelect(next) }
                 }
                 choose(down.position.x)
                 while (true) {
@@ -160,22 +165,23 @@ fun MechanicalTurret(
                 x += 3.dp.toPx()
             }
         }
-        Box(Modifier.fillMaxWidth(.2f).fillMaxHeight().offset {
-            IntOffset((position * width / 5f).toInt(), 0)
+        Box(Modifier.fillMaxWidth(1f / stops.size).fillMaxHeight().offset {
+            IntOffset((position * width / stops.size).toInt(), 0)
         }.border(TitaniumTokens.Hairline, TitaniumTokens.OpticalAmber)
             .background(TitaniumTokens.OpticalAmber.copy(alpha = .10f))
             .semantics { turretHighlightIndex = position }
             .testTag("rangefinder-turret-highlight"))
         Row(Modifier.fillMaxSize()) {
-            labels.forEachIndexed { index, label ->
+            stops.forEach { index ->
+                val label = labels[index]
                 Box(Modifier.weight(1f).fillMaxHeight().semantics {
                     role = Role.RadioButton
                     this.selected = index == selected
                     contentDescription = "$label lens"
-                    if (!enabled || !available.getOrElse(index) { false }) disabled()
+                    if (!enabled) disabled()
                     onClick {
-                        if (enabled && available.getOrElse(index) { false }) { Haptics.tick(view); latestSelect(index) }
-                        enabled && available.getOrElse(index) { false }
+                        if (enabled) { Haptics.tick(view); latestSelect(index) }
+                        enabled
                     }
                 }.testTag("mechanical-lens-$index"), contentAlignment = Alignment.TopCenter) {
                     Text(androidx.compose.ui.text.buildAnnotatedString {

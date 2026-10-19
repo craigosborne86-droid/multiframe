@@ -28,11 +28,12 @@ internal fun WhiteBalancePanel(settings: ManualSettings, caps: CameraCapabilitie
     val manualSupported = caps?.supportsManualWhiteBalance == true && range != null
     val actualMode = settings.whiteBalanceMode
     Row(Modifier.fillMaxWidth()) {
-        WhiteBalanceMode.entries.forEach { mode ->
+        // Only the modes this camera takes are offered; the others are absent.
+        WhiteBalanceMode.entries.filter { mode -> when(mode) {
+            WhiteBalanceMode.AUTO -> true; WhiteBalanceMode.LOCK -> caps?.supportsAwbLock == true; WhiteBalanceMode.MANUAL -> manualSupported
+        } }.forEach { mode ->
             InstrumentButton(when(mode) { WhiteBalanceMode.AUTO -> "Auto WB"; WhiteBalanceMode.LOCK -> "Lock WB"; WhiteBalanceMode.MANUAL -> "Manual WB" },
-                "White balance", actualMode == mode, when(mode) {
-                    WhiteBalanceMode.AUTO -> true; WhiteBalanceMode.LOCK -> caps?.supportsAwbLock == true; WhiteBalanceMode.MANUAL -> manualSupported
-                }, "revision05-wb-${mode.name.lowercase()}", {
+                "White balance", actualMode == mode, true, "revision05-wb-${mode.name.lowercase()}", {
                     onSettings(settings.copy(whiteBalanceMode = mode, manualColor = false,
                         awbMode = android.hardware.camera2.CameraMetadata.CONTROL_AWB_MODE_AUTO,
                         kelvin = range?.let { settings.kelvin.coerceIn(it) } ?: settings.kelvin))
@@ -52,12 +53,9 @@ internal fun WhiteBalancePanel(settings: ManualSettings, caps: CameraCapabilitie
                     manualColor = false, awbMode = mode)) }) }
         }
     }
-    if (!manualSupported) {
-        Text("This camera does not expose calibrated manual WB. Auto and supported AWB lock remain available.", style = TitaniumTokens.ReadableSmall)
-        return
-    }
+    if (!manualSupported) return
     val enabled = actualMode == WhiteBalanceMode.MANUAL
-    val supported = range!!
+    val supported = range
     Text("Sensor calibration: ${supported.first}–${supported.last} K · AE/AF unchanged.", style = TitaniumTokens.ReadableSmall)
     WhiteBalanceScale(if (enabled) "Kelvin" else "Stored Kelvin", settings.kelvin.coerceIn(supported), supported, enabled,
         "revision05-kelvin", { value -> onSettings(settings.copy(kelvin = value)) })

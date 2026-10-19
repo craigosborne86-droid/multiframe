@@ -97,15 +97,16 @@ class ControlsPanelTest {
         compose.onNodeWithTag("mechanical-tab-frames").assertIsEnabled()
     }
 
-    @Test fun unsupportedManualActionsAreTruthfulOnBasicCamera() {
+    // A control the camera cannot use is absent, not greyed (CLAUDE.md, Hardware Assumptions).
+    @Test fun unsupportedManualActionsAreAbsentOnBasicCamera() {
         showDial(basic)
-        compose.onNodeWithTag("mechanical-subtab-iso").assertIsNotEnabled()
-        compose.onNodeWithTag("mechanical-subtab-shutter").assertIsNotEnabled()
-        compose.onNodeWithText("Manual exposure unavailable on this camera").assertExists()
-        compose.onNodeWithTag("revision05-manual").assertIsNotEnabled()
-        compose.onNodeWithTag("mechanical-tab-focus").performClick()
-        compose.onNodeWithTag("revision05-focus-manual").assertIsNotEnabled()
-        compose.onNodeWithTag("revision05-focus-auto").assertIsEnabled()
+        compose.onNodeWithTag("mechanical-tab-exp").assertDoesNotExist()
+        compose.onNodeWithTag("mechanical-subtab-iso").assertDoesNotExist()
+        compose.onNodeWithTag("mechanical-subtab-shutter").assertDoesNotExist()
+        compose.onNodeWithText("Manual exposure unavailable on this camera").assertDoesNotExist()
+        compose.onNodeWithTag("revision05-manual").assertDoesNotExist()
+        compose.onNodeWithTag("mechanical-tab-focus").assertDoesNotExist()
+        compose.onNodeWithTag("revision05-focus-manual").assertDoesNotExist()
         compose.onNodeWithTag("mechanical-tab-frames").assertIsEnabled()
     }
 
@@ -127,6 +128,6 @@ class ControlsPanelTest {
         showDial(null)
         compose.onNodeWithTag("rangefinder-dial-ruler").assertDoesNotExist()
         compose.onNodeWithText("Camera controls unavailable").assertExists()
-        compose.onNodeWithTag("revision05-manual").assertIsNotEnabled()
+        compose.onNodeWithTag("revision05-manual").assertDoesNotExist()
     }
 }

@@ -46,6 +46,7 @@ internal fun Revision05Console(
     sweep: String?, onExitSweep: () -> Unit,
     turret: @Composable () -> Unit, shutter: @Composable () -> Unit, gallery: @Composable () -> Unit,
     panel: @Composable () -> Unit, selectedTab: RangefinderTab, onTab: (RangefinderTab) -> Unit,
+    exposureAvailable: Boolean = true, focusAvailable: Boolean = true,
 ) {
     val footerHeight = if (landscape) TitaniumTokens.LandscapeFooter else TitaniumTokens.PortraitFooter
     val panelVisible = showPro || showWhiteBalance || showInfo || sweep != null
@@ -62,7 +63,12 @@ internal fun Revision05Console(
                 }
                 if (showPro) Row(Modifier.fillMaxWidth().height(TitaniumTokens.MinimumTouch)) {
                     listOf("EXP" to RangefinderTab.ISO, "FOCUS" to RangefinderTab.FOCUS,
-                        "BURST" to RangefinderTab.FRAMES, "WB" to RangefinderTab.COLOR).forEach { (name, tab) ->
+                        "BURST" to RangefinderTab.FRAMES, "WB" to RangefinderTab.COLOR)
+                        .filter { (_, tab) -> when (tab) {
+                            RangefinderTab.ISO -> exposureAvailable
+                            RangefinderTab.FOCUS -> focusAvailable
+                            else -> true
+                        } }.forEach { (name, tab) ->
                         val active = if (tab == RangefinderTab.ISO)
                             selectedTab == RangefinderTab.ISO || selectedTab == RangefinderTab.SHUTTER else selectedTab == tab
                         InstrumentButton(name, when(tab) { RangefinderTab.ISO -> "Exposure controls"
@@ -92,7 +98,7 @@ internal fun Revision05Console(
                 if (landscape && showPro) Row(Modifier.fillMaxWidth().height(TitaniumTokens.MinimumTouch)) {
                     InstrumentButton("Return to Auto","Return exposure focus and burst to Auto; white balance unchanged",!manual,
                         controlsEnabled,"revision05-return-auto",onAuto,Modifier.weight(1f))
-                    InstrumentButton("Manual","Restore stored manual exposure",manual,controlsEnabled && manualAvailable,
+                    if (manualAvailable) InstrumentButton("Manual","Restore stored manual exposure",manual,controlsEnabled,
                         "revision05-manual",onManual,Modifier.weight(1f))
                 }
             } else Column(Modifier.fillMaxSize()) {
@@ -150,9 +156,10 @@ internal fun Revision05Console(
                 Row(Modifier.weight(1f),verticalAlignment=Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         proButton(Modifier.fillMaxWidth().height(TitaniumTokens.MinimumTouch))
-                        if(showPro || manual) InstrumentButton(if(manual) "Return to Auto" else "Manual",
+                        // A control the camera cannot use is absent, not greyed.
+                        if(manual || (showPro && manualAvailable)) InstrumentButton(if(manual) "Return to Auto" else "Manual",
                             if(manual) "Return exposure focus and burst to Auto; white balance unchanged" else "Restore stored manual exposure",
-                            manual,controlsEnabled && (manual || manualAvailable),
+                            manual,controlsEnabled,
                             if(manual) "revision05-return-auto" else "revision05-manual",
                             if(manual) onAuto else onManual,Modifier.fillMaxWidth().height(footerHeight - TitaniumTokens.MinimumTouch))
                         else Spacer(Modifier.height(footerHeight - TitaniumTokens.MinimumTouch))
@@ -221,17 +228,19 @@ internal fun Revision05ManualPanel(settings: ManualSettings, caps: CameraCapabil
             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
             when(tab) {
                 RangefinderTab.ISO,RangefinderTab.SHUTTER -> {
-                    InstrumentButton("ISO","Select sensitivity",tab==RangefinderTab.ISO && !ev,caps.hasManualSensor,
-                        "mechanical-subtab-iso",{ev=false;onTab(RangefinderTab.ISO)})
-                    InstrumentButton("Shutter","Select exposure duration",tab==RangefinderTab.SHUTTER,caps.hasManualSensor,
-                        "mechanical-subtab-shutter",{ev=false;onTab(RangefinderTab.SHUTTER)})
-                    if(caps.supportsExposureCompensation) InstrumentButton("EV","Exposure compensation while AE is automatic",ev,
+                    if(caps.hasManualSensor) {
+                        InstrumentButton("ISO","Select sensitivity",tab==RangefinderTab.ISO && !ev,true,
+                            "mechanical-subtab-iso",{ev=false;onTab(RangefinderTab.ISO)})
+                        InstrumentButton("Shutter","Select exposure duration",tab==RangefinderTab.SHUTTER,true,
+                            "mechanical-subtab-shutter",{ev=false;onTab(RangefinderTab.SHUTTER)})
+                    }
+                    if(caps.supportsExposureCompensation) InstrumentButton("EV","Exposure compensation while AE is automatic",ev || !caps.hasManualSensor,
                         !settings.manualExposure,"revision05-ev-select",{onTab(RangefinderTab.ISO);ev=true})
                 }
                 RangefinderTab.FOCUS -> {
                     InstrumentButton("Auto","Use continuous autofocus",!settings.manualFocus,true,"revision05-focus-auto",
                         {onSettings(settings.copy(manualFocus=false,rememberedManualFocus=false))})
-                    InstrumentButton("Manual","Use stored focus distance",settings.manualFocus,caps.hasManualFocus,"revision05-focus-manual",
+                    if(caps.hasManualFocus) InstrumentButton("Manual","Use stored focus distance",settings.manualFocus,true,"revision05-focus-manual",
                         {onSettings(settings.copy(manualFocus=true,rememberedManualFocus=true))})
                     if(focusAssistAvailable) InstrumentButton("Loupe","Magnified focus assist",focusAssistOpen,true,
                         "rangefinder-focus-assist-toggle",onFocusAssist)
@@ -241,20 +250,21 @@ internal fun Revision05ManualPanel(settings: ManualSettings, caps: CameraCapabil
             }
             Spacer(Modifier.width(8.dp))
             Text(when {
-                ev -> "%+.1f EV".format(settings.evIndex*caps.evStep)
+                ev || (!caps.hasManualSensor && caps.supportsExposureCompensation &&
+                    (tab==RangefinderTab.ISO || tab==RangefinderTab.SHUTTER)) -> "%+.1f EV".format(settings.evIndex*caps.evStep)
                 (tab==RangefinderTab.ISO || tab==RangefinderTab.SHUTTER) && !settings.manualExposure -> "Auto"
                 tab==RangefinderTab.FOCUS && !settings.manualFocus -> "Auto"
                 else -> value
             },style=TitaniumTokens.GaugeCompact,modifier=Modifier.testTag("revision05-selected-control-value"))
         }
     }
-    if(ev && !settings.manualExposure) {
+    if((ev || !caps.hasManualSensor) && !settings.manualExposure &&
+        (tab==RangefinderTab.ISO || tab==RangefinderTab.SHUTTER) && caps.supportsExposureCompensation) {
         header("")
         WhiteBalanceScale("Exposure compensation",settings.evIndex,caps.evMin..caps.evMax,true,"revision05-ev",
             {onSettings(settings.copy(evIndex=it))},showLabel=false)
     } else if((tab==RangefinderTab.ISO || tab==RangefinderTab.SHUTTER) && !caps.hasManualSensor) {
-        header("")
-        Text("Manual exposure unavailable on this camera",style=TitaniumTokens.ReadableSmall)
+        // The EXP tab is not offered on such a camera; nothing to draw.
     } else RangefinderDial(settings,caps,frames,ceiling,tab,onTab,onSettings,onFrames,
         compact=true,showTabs=false,hapticsEnabled=hapticsEnabled,docked=true,header={header(it)})
 }

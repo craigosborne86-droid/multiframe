@@ -1649,6 +1649,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
     // Camera gestures occupy precisely the photo surface, never the console.
     val photoInput = Modifier
+            .semantics { contentDescription = "Viewfinder: tap to focus and meter, pinch to zoom" }
             .pointerInput(zslStream, camera, caps, previewFrameAspect, focusAssistAvailable) {
                 detectTapGestures { localOffset ->
                     val imageBounds = previewBounds ?: return@detectTapGestures
@@ -2449,6 +2450,8 @@ MechanicalShutter(
                 },
                 selectedTab = rangefinderTab,
                 onTab = { rangefinderTab = it },
+                exposureAvailable = caps?.let { it.hasManualSensor || it.supportsExposureCompensation } == true,
+                focusAvailable = caps?.hasManualFocus == true,
             )
         }
         } // LocalHandRotation

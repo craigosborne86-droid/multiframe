@@ -52,9 +52,11 @@ internal fun CompactWhiteBalancePanel(settings: ManualSettings, caps: CameraCapa
             labelStyle=if(enabled || previewKelvin>0) TitaniumTokens.GaugeCompact else TitaniumTokens.ReadableSmall)
     }
     if(pickingMode) Row(Modifier.fillMaxWidth().height(TitaniumTokens.MinimumTouch).horizontalScroll(rememberScrollState())) {
-        WhiteBalanceMode.entries.forEach { mode ->
+        WhiteBalanceMode.entries.filter { mode -> when(mode) {
+            WhiteBalanceMode.AUTO->true;WhiteBalanceMode.LOCK->caps?.supportsAwbLock==true;else->supported
+        } }.forEach { mode ->
             InstrumentButton(when(mode) {WhiteBalanceMode.AUTO->"Auto WB";WhiteBalanceMode.LOCK->"Lock WB";else->"Manual WB"},
-                "White balance",settings.whiteBalanceMode==mode,when(mode) {WhiteBalanceMode.AUTO->true;WhiteBalanceMode.LOCK->caps?.supportsAwbLock==true;else->supported},
+                "White balance",settings.whiteBalanceMode==mode,true,
                 "revision05-wb-${mode.name.lowercase()}",{
                     onSettings(settings.copy(whiteBalanceMode=mode,manualColor=false,
                         awbMode=android.hardware.camera2.CameraMetadata.CONTROL_AWB_MODE_AUTO,
@@ -68,7 +70,7 @@ internal fun CompactWhiteBalancePanel(settings: ManualSettings, caps: CameraCapa
         WhiteBalanceScale(if(tint) "Tint" else "Kelvin",if(tint) settings.tint else settings.kelvin.coerceIn(range!!),
             if(tint) -100..100 else range!!,enabled,if(tint) "revision05-tint" else "revision05-kelvin",
             {onSettings(if(tint) settings.copy(tint=it) else settings.copy(kelvin=it))},showLabel=false)
-    } else Text("Calibrated manual WB unavailable. Auto and advertised lock/presets remain available.",style=TitaniumTokens.ReadableSmall)
+    }
     if(entry && supported) Dialog(onDismissRequest={entry=false}) {
         Column(Modifier.fillMaxWidth().background(TitaniumTokens.PlateSurface).padding(16.dp)) {
             Text(if(tint) "Tint: −100 to +100" else "Kelvin: ${range!!.first}–${range.last} K",style=TitaniumTokens.Readable)
