@@ -277,12 +277,13 @@ fun MechanicalShutter(enabled: Boolean, counting: Boolean, frames: Int,
                       modifier: Modifier = Modifier,
     captureProgress: Float? = null, onPrime: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
-    val view = LocalView.current
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) .94f else 1f, tween(120), label = "shutter-half-press")
+    // The press primes focus and metering in silence: the ring is still
+    // recording, and the frames this release locks would carry the motor.
     LaunchedEffect(pressed) {
-        if (pressed) { Haptics.halfPress(view); onPrime() }
+        if (pressed) onPrime()
     }
     Canvas(modifier.size(TitaniumTokens.ShutterDiameter)
         .graphicsLayer { scaleX = scale; scaleY = scale; alpha = if (enabled || counting) 1f else .38f }

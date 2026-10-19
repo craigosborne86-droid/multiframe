@@ -338,19 +338,33 @@ object RawBurstCapture {
         // being computed against a frame the model did not describe.
         //
         // Corrected in the orientation the model was written in, then turned.
+        // The framing is a fraction of the frame the sensor read, so it is
+        // placed on that frame before the optics take their border off, and
+        // then carried into what is left. Placed on the cropped picture it
+        // slid toward the far corner and cut twice.
+        val readWidth = bitmap.width
+        val readHeight = bitmap.height
+        var inset = LensDistortion.Inset.NONE
         opticsFor(lensProfile, bitmap)?.let { params ->
             val tOptics = System.currentTimeMillis()
             // On the bitmap directly, so the native pass reads and writes the
             // locked buffers and nothing is copied through the Java heap.
-            val (corrected, _) = Optics.apply(bitmap, params)
-            if (corrected !== bitmap) {
+            val corrected = Optics.applyCropped(bitmap, params)
+            if (corrected.bitmap !== bitmap) {
                 bitmap.recycle()
-                bitmap = corrected
+                bitmap = corrected.bitmap
             }
+            inset = corrected.inset
             Log.i(TAG, "optics %dms".format(System.currentTimeMillis() - tOptics))
         }
 
-        val framing = RenderCrop.from(characteristics, captureResult).pixels(bitmap.width, bitmap.height)
+        val framing = RenderCrop.from(characteristics, captureResult).pixels(readWidth, readHeight)
+            .let { r ->
+                val l = (r.left - inset.left).coerceIn(0, bitmap.width - 1)
+                val t = (r.top - inset.top).coerceIn(0, bitmap.height - 1)
+                SensorRect(l, t, (r.right - inset.left).coerceIn(l + 1, bitmap.width),
+                    (r.bottom - inset.top).coerceIn(t + 1, bitmap.height))
+            }
         if (framing.width != bitmap.width || framing.height != bitmap.height) {
             val cropped = android.graphics.Bitmap.createBitmap(bitmap, framing.left, framing.top, framing.width, framing.height)
             if (cropped !== bitmap) bitmap.recycle()

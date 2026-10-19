@@ -2041,15 +2041,22 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     }
 
                     fun lockAndQueue() {
+                        // A press never asks for more than the ring can lock at once.
+                        val wanted = minOf(frames, stream.maxBurst)
                         val shot = CaptureFeedback.afterSync(
                             capture = { ZslCapture.take(stream, frames) },
-                            successful = { it.count > 0 && (!canvas2x || it.count == MosaicPreset.ONE_SHOT_FRAMES) },
+                            successful = { it.count == wanted },
                             vibrate = { Haptics.mechanicalRelease(context) },
                         )
-                        if (shot.count == 0 || (canvas2x && shot.count != MosaicPreset.ONE_SHOT_FRAMES)) {
+                        // The snapshot takes what is ready, and what is ready
+                        // can be less than the press asked for -- a timer that
+                        // ran out while the ring was refilling, say. A short
+                        // burst is not the photograph the shutter promises.
+                        if (shot.count < wanted) {
                             shot.close()
                             Haptics.reject(view)
-                            status = if (canvas2x) "super res needs 16 ready frames" else "ring empty: no frames buffered yet"
+                            status = if (canvas2x) "super res needs ${MosaicPreset.ONE_SHOT_FRAMES} ready frames"
+                                else "ring has %d of %d frames: a moment".format(shot.count, wanted)
                             return
                         }
                         val processingId = ++nextProcessingId
@@ -2103,7 +2110,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 lockPending = false
                             }
                             if (zslStream !== stream) return@launch
-                            if (stream.readyFrames() < (if (canvas2x) frames else MIN_BURST_FRAMES.coerceAtMost(frames))) {
+                            if (stream.readyFrames() < frames) {
                                 // The camera did not refill in the time the
                                 // frames take: the ring is dropping. Not a
                                 // photograph; say so.
@@ -2120,8 +2127,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         for (remaining in shotTimerSeconds downTo 1) {
                             countdown = remaining
                             // A metronome you can feel without watching the
-                            // screen, which is the point of a self-timer.
-                            Haptics.tick(view)
+                            // screen, which is the point of a self-timer. The
+                            // last second is silent: the frames the timer
+                            // locks are exposed in it.
+                            if (remaining > 1) Haptics.tick(view)
                             status = "$remaining… tap the shutter to cancel"
                             kotlinx.coroutines.delay(1000)
                         }
@@ -2653,9 +2662,6 @@ private fun Size.previewAspect(sensorOrientation: Int, displayRotation: Int, fac
 
 /** Over the frames' own exposure time, how long a press waits for the ring to refill. */
 private const val REFILL_GRACE_MILLIS = 150L
-
-/** The fewest frames a press takes after waiting for the ring; under this it refuses instead. */
-private const val MIN_BURST_FRAMES = 4
 
 private class PendingShot(
     val processingId: Long,

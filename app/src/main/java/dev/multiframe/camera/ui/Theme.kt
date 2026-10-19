@@ -97,9 +97,6 @@ object Haptics {
         if (dev.multiframe.camera.BuildConfig.DEBUG)
             android.util.Log.d("TitaniumHaptics", "$event emitted=$emitted")
     }
-    /** Light tactile resistance as the mechanical release reaches half travel. */
-    fun halfPress(view: View) =
-        view.performHapticFeedback(HapticFeedbackConstants.GESTURE_START).also { record("halfPress", it) }
     /** Two short release impacts, after a ZSL burst is locked. */
     fun mechanicalRelease(context: Context) {
         runCatching {
