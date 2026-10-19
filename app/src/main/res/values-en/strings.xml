@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="share_photo">Share photo</string>
+    <string name="share_dng">Share DNG</string>
+    <string name="share_preparing">Preparing…</string>
+    <string name="share_unavailable">This file is unavailable. Return to the gallery or try sharing again.</string>
+    <string name="share_no_app">Android could not open the share sheet. Try again after returning to the gallery.</string>
+    <string name="review_loading">Loading photograph…</string>
+    <string name="review_preview_unavailable">Preview unavailable. Return to the gallery or try Share.</string>
+</resources>

@@ -30,6 +30,10 @@ class GalleryZoomTest {
         assertThat(actual.y).isEqualTo(y)
     }
 
+    @Test fun letterboxedImageCannotPanIntoAdditionalBlackSpace() {
+        assertOffset(clampOffset(Offset(999f, 999f), 2f, frame, IntSize(4000, 3000)), 500f, 0f)
+    }
+
     @Test
     fun atFitToScreenThereIsNowhereToPan() {
         // Scale one means the picture exactly fills its box, so every offset

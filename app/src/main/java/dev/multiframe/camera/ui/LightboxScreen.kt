@@ -11,12 +11,24 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +37,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -38,6 +51,17 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
+import dev.multiframe.camera.R
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +73,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntSize
@@ -62,6 +87,8 @@ private const val TAG = "Gallery"
 
 /** Thumbnails are decoded to about this, which is ample for a grid cell. */
 private const val THUMB_PX = 320
+
+private fun frameLabel(count: Int): String = "$count ${if (count == 1) "FRAME" else "FRAMES"}"
 
 /** How far into a picture the reviewer may go. */
 private const val MAX_ZOOM = 8f
@@ -83,13 +110,14 @@ private const val MAX_ZOOM = 8f
  * done off the main thread and cached for as long as the grid is open.
  */
 @Composable
-fun GalleryScreen(
+fun LightboxScreen(
     context: Context,
     onDismiss: () -> Unit,
 ) {
     val view = LocalView.current
     var records by remember { mutableStateOf<List<CaptureRecord>?>(null) }
-    var opened by remember { mutableStateOf<CaptureRecord?>(null) }
+    var openedName by rememberSaveable { mutableStateOf<String?>(null) }
+    val opened = records?.firstOrNull { it.baseName == openedName }
     var confirming by remember { mutableStateOf<CaptureRecord?>(null) }
 
     // Read once when the grid opens. Deliberately not on every recomposition:
@@ -109,7 +137,7 @@ fun GalleryScreen(
     BackHandler {
         when {
             confirming != null -> confirming = null
-            opened != null -> opened = null
+            openedName != null -> openedName = null
             else -> onDismiss()
         }
     }
@@ -117,12 +145,12 @@ fun GalleryScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink.PaneSolid)
+            .background(TitaniumTokens.ProofVelvet)
             // Swallows taps so they cannot reach the viewfinder underneath,
             // which is still composed and still listening for a focus tap.
             .pointerInput(Unit) { detectTapGestures { } },
     ) {
-        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+        Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
             GalleryHeader(
                 count = records?.size ?: 0,
                 loaded = records != null,
@@ -150,7 +178,7 @@ fun GalleryScreen(
                             cache = cache,
                         ) {
                             Haptics.segment(view)
-                            opened = record
+                            openedName = record.baseName
                         }
                     }
                 }
@@ -159,12 +187,20 @@ fun GalleryScreen(
     }
 
     opened?.let { record ->
-        ReviewOverlay(
-            context = context,
-            record = record,
-            onDismiss = { opened = null },
-            onDelete = { confirming = record },
-        )
+        val pages = records.orEmpty()
+        val pager = rememberPagerState(initialPage = pages.indexOf(record).coerceAtLeast(0)) { pages.size }
+        var zoomed by remember { mutableStateOf(false) }
+        HorizontalPager(
+            state = pager, key = { pages[it].baseName },
+            userScrollEnabled = !zoomed, modifier = Modifier.fillMaxSize().testTag("lightbox-pager"),
+        ) { page ->
+            ReviewOverlay(
+                context = context, record = pages[page],
+                onDismiss = { openedName = null },
+                onDelete = { confirming = pages[page] },
+                onZoom = { if (page == pager.currentPage) zoomed = it },
+            )
+        }
     }
 
     confirming?.let { record ->
@@ -174,7 +210,7 @@ fun GalleryScreen(
             onConfirm = {
                 Haptics.confirm(view)
                 confirming = null
-                opened = null
+                openedName = null
                 records = records?.filterNot { it.baseName == record.baseName }
                 cache.forget(record.baseName)
                 // Fire and forget: the grid has already dropped the cell, and
@@ -196,26 +232,27 @@ private fun GalleryHeader(count: Int, loaded: Boolean, onDismiss: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Row(verticalAlignment = Alignment.Bottom) {
-            Text(text = "GALLERY", style = Type.Section)
+            Text(text = "PROOF SHEET / LIGHTBOX", style = TitaniumTokens.Section, color = TitaniumTokens.TitaniumM6)
             if (loaded && count > 0) {
                 Text(
                     text = count.toString(),
-                    style = Type.Gauge,
+                    style = TitaniumTokens.Gauge,
                     modifier = Modifier.padding(start = 10.dp),
                 )
             }
         }
         Box(
             modifier = Modifier
-                .heightIn(min = 48.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .border(1.dp, Ink.Hairline, RoundedCornerShape(24.dp))
+                .heightIn(min = TitaniumTokens.MinimumTouch)
+                .clip(RoundedCornerShape(TitaniumTokens.RadiusPlate))
+                .background(TitaniumTokens.PlateSurface)
+                .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusPlate))
                 .clickable(onClick = onDismiss)
-                .padding(horizontal = 18.dp)
+                .padding(horizontal = 16.dp)
                 .semantics { contentDescription = "Close gallery" },
             contentAlignment = Alignment.Center,
         ) {
-            Text(text = "CLOSE", style = Type.Control)
+            Text(text = "CLOSE", style = TitaniumTokens.Control, color = TitaniumTokens.TelemetryWhite)
         }
     }
 }
@@ -225,7 +262,8 @@ private fun EmptyGallery() {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text(
             text = "NOTHING SHOT YET",
-            style = Type.Instruction,
+            style = TitaniumTokens.Instruction,
+            color = TitaniumTokens.TelemetryDim,
             modifier = Modifier.padding(bottom = 80.dp),
         )
     }
@@ -256,12 +294,15 @@ private fun GalleryCell(
         modifier = Modifier
             .padding(3.dp)
             .aspectRatio(1f)
-            .clip(RoundedCornerShape(6.dp))
-            .background(Ink.Pane)
+            .clip(RoundedCornerShape(TitaniumTokens.RadiusPlate))
+            .background(TitaniumTokens.PlateSurface)
+            .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusPlate))
             .clickable(onClick = onOpen)
+            .testTag("lightbox-cell-${record.baseName}")
             .semantics {
                 contentDescription = buildString {
                     append(record.description)
+                    record.frameCount?.let { append(", ${frameLabel(it)}") }
                     if (record.hasRaw) append(", raw available")
                 }
             },
@@ -275,32 +316,60 @@ private fun GalleryCell(
             )
         }
 
+        record.frameCount?.let { count ->
+            Text(
+                text = frameLabel(count),
+                style = TitaniumTokens.Badge,
+                color = TitaniumTokens.OpticalAmber,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(5.dp)
+                    .background(TitaniumTokens.Chassis.copy(alpha = .85f), RoundedCornerShape(TitaniumTokens.RadiusSmall))
+                    .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusSmall))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            )
+        }
+
         // The badges say what a thumbnail cannot: that a DNG exists beside
         // the JPEG, and that the JPEG is a 2x accumulation -- a picture whose
         // resolution is a claim about the burst rather than the sensor, and
-        // which a cell this size cannot show. Weight, not hue: same fill as
-        // every other readout on a photograph.
+        // which a cell this size cannot show.
         if (record.isSuperRes) {
             Text(
                 text = "SUPER-RES 2X",
-                style = Type.Label,
-                color = Ink.Bone,
+                style = TitaniumTokens.Badge,
+                color = TitaniumTokens.OpticalAmber,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(5.dp)
-                    .background(Ink.Readout, RoundedCornerShape(4.dp))
+                    .background(TitaniumTokens.Chassis.copy(alpha = .85f), RoundedCornerShape(TitaniumTokens.RadiusSmall))
+                    .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusSmall))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            )
+        }
+        record.nativeHighResMegapixels?.let { megapixels ->
+            Text(
+                text = "${megapixels}MP${if (record.hasRaw) " RAW" else ""}",
+                style = TitaniumTokens.Badge,
+                color = TitaniumTokens.OpticalAmber,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(5.dp)
+                    .background(TitaniumTokens.Chassis.copy(alpha = .85f), RoundedCornerShape(TitaniumTokens.RadiusSmall))
+                    .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusSmall))
                     .padding(horizontal = 5.dp, vertical = 2.dp),
             )
         }
         if (record.hasRaw) {
             Text(
                 text = "DNG",
-                style = Type.Label,
-                color = Ink.Bone,
+                style = TitaniumTokens.Badge,
+                color = TitaniumTokens.OpticalAmber,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(5.dp)
-                    .background(Ink.Readout, RoundedCornerShape(4.dp))
+                    .background(TitaniumTokens.Chassis.copy(alpha = .85f), RoundedCornerShape(TitaniumTokens.RadiusSmall))
+                    .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusSmall))
                     .padding(horizontal = 5.dp, vertical = 2.dp),
             )
         }
@@ -320,12 +389,41 @@ private fun ReviewOverlay(
     record: CaptureRecord,
     onDismiss: () -> Unit,
     onDelete: () -> Unit,
+    onZoom: (Boolean) -> Unit,
 ) {
     val view = LocalView.current
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var frame by remember { mutableStateOf(IntSize.Zero) }
 
+    val scope = rememberCoroutineScope()
+    var sharing by remember(record.baseName) { mutableStateOf(false) }
+    var shareError by remember(record.baseName) { mutableStateOf<String?>(null) }
+    fun share(file: dev.multiframe.camera.pipeline.CaptureFile) {
+        if (sharing) return
+        sharing = true
+        shareError = null
+        Haptics.segment(view)
+        scope.launch {
+            try {
+                val chooser = withContext(Dispatchers.IO) { PhotoShare.prepare(context, file) }
+                context.startActivity(chooser)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: android.content.ActivityNotFoundException) {
+                shareError = context.getString(R.string.share_no_app)
+            } catch (failure: Exception) {
+                Log.w(TAG, "Could not share ${file.displayName}", failure)
+                shareError = context.getString(R.string.share_unavailable)
+            } finally {
+                sharing = false
+            }
+        }
+    }
+
+    LaunchedEffect(scale) { onZoom(scale > 1f) }
+
+    var loadComplete by remember(record.baseName) { mutableStateOf(false) }
     val full by produceState<Bitmap?>(null, record.baseName) {
         val uri = record.preview.uri ?: return@produceState
         value = withContext(Dispatchers.IO) {
@@ -334,34 +432,42 @@ private fun ReviewOverlay(
             // one image; a sixty megapixel mosaic is not.
             decodeSampled(context, uri, 4096)
         }
+        loadComplete = true
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink.Ground)
+            .background(TitaniumTokens.Chassis)
             // The frame the pan is clamped against, measured on the container
             // the picture is drawn into rather than on the picture, which is
             // being transformed and would report its own scaled size.
             .onSizeChanged { frame = it }
+            .semantics {
+                galleryScale = scale
+                galleryOffset = offset
+                galleryFrameSize = frame
+                galleryImageSize = full?.let { IntSize(it.width, it.height) } ?: IntSize.Zero
+            }
+            .testTag("lightbox-review-${record.baseName}")
             .pointerInput(record.baseName) {
-                detectTransformGestures { centroid, pan, zoom, _ ->
-                    val next = (scale * zoom).coerceIn(1f, MAX_ZOOM)
-                    offset = if (next <= 1f) {
-                        // Back at fit-to-screen there is nowhere to pan to, and
-                        // leaving a stale offset would strand the picture off
-                        // centre with no way to recover it.
-                        Offset.Zero
-                    } else {
-                        // Zoom about the fingers rather than about the middle,
-                        // so the detail under them stays under them.
-                        val factor = next / scale
-                        clampOffset(
-                            (offset - centroid) * factor + centroid + pan,
-                            next, frame,
-                        )
-                    }
-                    scale = next
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        if (event.changes.any { it.pressed && it.previousPressed } &&
+                            (event.changes.count { it.pressed } >= 2 || scale > 1f)) {
+                            val centroid = event.calculateCentroid(useCurrent = false)
+                            val anchor = centroid - Offset(frame.width / 2f, frame.height / 2f)
+                            val next = (scale * event.calculateZoom()).coerceIn(1f, MAX_ZOOM)
+                            offset = clampOffset(
+                                (offset - anchor) * (next / scale) + anchor + event.calculatePan(),
+                                next, frame, full?.let { IntSize(it.width, it.height) } ?: frame,
+                            )
+                            scale = next
+                            event.changes.forEach { it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
                 }
             }
             .pointerInput(record.baseName) {
@@ -397,6 +503,12 @@ private fun ReviewOverlay(
             )
         }
 
+        if (full == null) Text(
+            stringResource(if (loadComplete) R.string.review_preview_unavailable else R.string.review_loading),
+            style = TitaniumTokens.Readable,
+            modifier = Modifier.align(Alignment.Center).padding(24.dp).testTag("lightbox-image-state"),
+        )
+
         ReviewChrome(
             record = record,
             scale = scale,
@@ -408,6 +520,9 @@ private fun ReviewOverlay(
                 Haptics.segment(view)
                 onDelete()
             },
+            onShare = ::share,
+            sharing = sharing,
+            shareError = shareError,
             modifier = Modifier.fillMaxSize(),
         )
     }
@@ -419,59 +534,95 @@ private fun ReviewChrome(
     scale: Float,
     onClose: () -> Unit,
     onDelete: () -> Unit,
+    onShare: (dev.multiframe.camera.pipeline.CaptureFile) -> Unit,
+    sharing: Boolean,
+    shareError: String?,
     modifier: Modifier = Modifier,
 ) {
+    val view = LocalView.current
+    var showInfo by rememberSaveable(record.baseName) { mutableStateOf(false) }
     Box(modifier = modifier) {
         Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .statusBarsPadding()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ChromeButton("CLOSE", onClose)
-            if (scale > 1.02f) {
-                Text(
-                    text = "%.1fx".format(scale),
-                    style = Type.Gauge,
-                    modifier = Modifier
-                        .background(Ink.Readout, RoundedCornerShape(6.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                )
-            }
-            ChromeButton("DELETE", onDelete, tint = Ink.Danger)
+            ChromeButton("INFO", { Haptics.segment(view); showInfo = !showInfo })
+            ChromeButton("DELETE", onDelete, tint = TitaniumTokens.Danger)
         }
 
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 18.dp),
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = record.description.uppercase(),
-                style = Type.Instruction,
-                modifier = Modifier
-                    .background(Ink.Readout, RoundedCornerShape(6.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-            )
-            if (record.hasRaw || record.isSuperRes) {
+            if (showInfo) Column(
+                modifier = Modifier.heightIn(max = 120.dp).verticalScroll(rememberScrollState())
+                    .background(TitaniumTokens.PlateSurface, RoundedCornerShape(TitaniumTokens.RadiusPlate))
+                    .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusPlate))
+                    .padding(12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Text(
-                    text = buildString {
-                        if (record.isSuperRes) append("SUPER-RES 2X")
-                        if (record.hasRaw) {
-                            if (isNotEmpty()) append(" · ")
-                            append("JPEG + DNG")
-                        }
-                    },
-                    style = Type.Label,
-                    modifier = Modifier.padding(top = 8.dp),
+                    text = record.description.uppercase(),
+                    style = TitaniumTokens.Instruction,
+                    modifier = Modifier
+                        .background(TitaniumTokens.PlateSurface, RoundedCornerShape(TitaniumTokens.RadiusPlate))
+                        .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusPlate))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                )
+                if (record.frameCount != null || record.hasRaw || record.isSuperRes || record.nativeHighResMegapixels != null) {
+                    Text(
+                        text = buildString {
+                            record.frameCount?.let { append(frameLabel(it)) }
+                            if (record.isSuperRes) {
+                                if (isNotEmpty()) append(" · ")
+                                append("SUPER-RES 2X")
+                            }
+                            record.nativeHighResMegapixels?.let {
+                                if (isNotEmpty()) append(" · ")
+                                append("${it}MP${if (record.hasRaw) " RAW" else ""}")
+                            }
+                            if (record.hasRaw) {
+                                if (isNotEmpty()) append(" · ")
+                                append(if (record.jpeg == null) "DNG" else if (record.jpeg.displayName.endsWith(".heic", true) || record.jpeg.displayName.endsWith(".heif", true)) "HEIF + DNG" else "JPEG + DNG")
+                            }
+                        },
+                        style = TitaniumTokens.Label,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+
+                if (record.jpeg != null && record.dng != null) ChromeButton(
+                    stringResource(R.string.share_dng), { onShare(record.dng) },
+                    modifier = Modifier.testTag("lightbox-share-dng"), enabled = !sharing,
                 )
             }
+            shareError?.let { message ->
+                Text(message, style = TitaniumTokens.ReadableSmall,
+                    modifier = Modifier.background(TitaniumTokens.PlateSurface)
+                        .padding(8.dp).semantics { liveRegion = LiveRegionMode.Polite }
+                        .testTag("lightbox-share-error"))
+            }
+            if (scale > 1.02f) Text(
+                text = "%.1fx".format(scale), style = TitaniumTokens.Gauge,
+                modifier = Modifier.background(TitaniumTokens.PlateSurface).padding(6.dp),
+            )
+            ChromeButton(
+                stringResource(if (sharing) R.string.share_preparing else if (record.jpeg != null) R.string.share_photo else R.string.share_dng),
+                { onShare(record.preview) },
+                modifier = Modifier.testTag("lightbox-share-photo"), enabled = !sharing,
+            )
         }
     }
 }
@@ -480,19 +631,22 @@ private fun ReviewChrome(
 private fun ChromeButton(
     label: String,
     onClick: () -> Unit,
-    tint: androidx.compose.ui.graphics.Color = Ink.Bone,
+    tint: androidx.compose.ui.graphics.Color = TitaniumTokens.TelemetryWhite,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     Box(
-        modifier = Modifier
-            .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(24.dp))
-            .background(Ink.Readout)
-            .clickable(onClick = onClick)
+        modifier = modifier
+            .heightIn(min = TitaniumTokens.MinimumTouch)
+            .clip(RoundedCornerShape(TitaniumTokens.RadiusPlate))
+            .background(TitaniumTokens.PlateSurface)
+            .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusPlate))
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .padding(horizontal = 18.dp)
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        Text(text = label, style = Type.Control, color = tint)
+        Text(text = label, style = TitaniumTokens.Control, color = tint)
     }
 }
 
@@ -512,29 +666,29 @@ private fun DeleteConfirmation(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Ink.Readout)
+            .background(TitaniumTokens.Chassis.copy(alpha = 0.85f))
             .pointerInput(Unit) { detectTapGestures { onCancel() } },
         contentAlignment = Alignment.Center,
     ) {
         Column(
             modifier = Modifier
-                .background(Ink.Panel, RoundedCornerShape(20.dp))
-                .border(1.dp, Ink.Hairline, RoundedCornerShape(20.dp))
+                .background(TitaniumTokens.PlateSurface, RoundedCornerShape(TitaniumTokens.RadiusPlate))
+                .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusPlate))
                 .padding(horizontal = 24.dp, vertical = 22.dp)
                 .pointerInput(Unit) { detectTapGestures { } },
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text(text = "DELETE THIS PHOTOGRAPH", style = Type.Section)
+            Text(text = "DELETE THIS PHOTOGRAPH", style = TitaniumTokens.Section)
             Text(
                 text = if (record.hasRaw) "The JPEG and the DNG both go."
                 else "This cannot be undone.",
-                style = Type.Spec,
+                style = TitaniumTokens.Spec,
                 modifier = Modifier.padding(top = 12.dp, bottom = 20.dp),
             )
             Row {
                 ChromeButton("CANCEL", onCancel)
-                Box(Modifier.size(width = 10.dp, height = 1.dp))
-                ChromeButton("DELETE", onConfirm, tint = Ink.Danger)
+                Spacer(Modifier.width(12.dp))
+                ChromeButton("DELETE", onConfirm, tint = TitaniumTokens.Danger)
             }
         }
     }
@@ -617,7 +771,7 @@ private fun decodeSampled(context: Context, uri: Uri, maxPx: Int): Bitmap? = try
  * gesture that brings it back, which reads as the review having lost the
  * photograph.
  */
-internal fun clampOffset(offset: Offset, scale: Float, frame: IntSize): Offset {
+internal fun clampOffset(offset: Offset, scale: Float, frame: IntSize, image: IntSize = frame): Offset {
     // Nothing measured yet. Clamping against a zero frame would pin the picture
     // at centre and make the first gesture after opening do nothing.
     if (frame.width == 0 || frame.height == 0) return offset
@@ -628,8 +782,9 @@ internal fun clampOffset(offset: Offset, scale: Float, frame: IntSize): Offset {
     // negative input -- harmless as a translation, but a wart to reason about.
     if (scale <= 1f) return Offset.Zero
 
-    val maxX = (frame.width * (scale - 1f)) / 2f
-    val maxY = (frame.height * (scale - 1f)) / 2f
+    val fit = minOf(frame.width.toFloat() / image.width.coerceAtLeast(1), frame.height.toFloat() / image.height.coerceAtLeast(1))
+    val maxX = ((image.width * fit * scale - frame.width) / 2f).coerceAtLeast(0f)
+    val maxY = ((image.height * fit * scale - frame.height) / 2f).coerceAtLeast(0f)
     return Offset(
         offset.x.coerceIn(-maxX, maxX),
         offset.y.coerceIn(-maxY, maxY),

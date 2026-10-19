@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Multiframe</string>
+    <string name="rangefinder_color_tab">COLOR</string>
+    <string name="rangefinder_color_footer">OPTICAL COLOR</string>
     <string name="shutter">Shutter</string>
     <string name="grant_camera">Grant camera access</string>
     <string name="permission_rationale">Multiframe needs the camera to capture and merge photo bursts.</string>
@@ -18,7 +20,14 @@
     <string name="about">About</string>
     <string name="about_dismiss">Close</string>
     <string name="about_what">Every time you press the shutter this app captures a short burst of photographs instead of one, aligns them to cancel out hand movement, and merges them into a single image. Combining frames this way reduces sensor noise, which is most visible in shadows and low light. Tone mapping is kept deliberately restrained rather than heavily processed.</string>
-    <string name="privacy_summary">This app does not collect, transmit, or share any personal data. Everything it does happens on your device. There is no analytics, advertising, or tracking of any kind, and no user account. The app does not request internet access, so it is not technically capable of sending your photographs anywhere.</string>
+    <string name="privacy_summary">This app does not collect, transmit, or share any personal data. Everything it does happens on your device. There is no analytics, advertising, or tracking of any kind, and no user account. The app does not request internet access. You can choose to share a saved photograph through another app using Android’s share sheet.</string>
     <string name="privacy_camera">Camera access is used only to show the viewfinder and capture photographs. Burst frames are held in memory just long enough to be merged, then discarded. They are never written elsewhere or sent off the device.</string>
     <string name="privacy_photos">Photographs you capture are saved to your device\'s own photo library. The app writes only the files it creates. It does not request permission to read your existing photo library and cannot browse or open pictures taken with other apps. Uninstalling the app does not delete photographs you have already saved.</string>
+    <string name="share_photo">Share photo</string>
+    <string name="share_dng">Share DNG</string>
+    <string name="share_preparing">Preparing…</string>
+    <string name="share_unavailable">This file is unavailable. Return to the gallery or try sharing again.</string>
+    <string name="share_no_app">Android could not open the share sheet. Try again after returning to the gallery.</string>
+    <string name="review_loading">Loading photograph…</string>
+    <string name="review_preview_unavailable">Preview unavailable. Return to the gallery or try Share.</string>
 </resources>
