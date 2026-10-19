@@ -61,7 +61,50 @@ data class CameraCapabilities(
     /** The largest RAW_SENSOR size in the maximum-resolution stream map, or zero where there is no such mode. */
     val fullResolutionRawWidth: Int = 0,
     val fullResolutionRawHeight: Int = 0,
+    val supportsAwbLock: Boolean = false,
+    /** Flash LED on the camera device that owns the active session. */
+    val hasFlashUnit: Boolean = false,
+    val manualPostProcessing: Boolean = false,
+    val whiteBalanceCalibration: ColorScience.Calibration? = null,
 ) {
+
+    val supportsManualWhiteBalance: Boolean get() = manualPostProcessing &&
+        CameraMetadata.CONTROL_AWB_MODE_OFF in awbModes && CalibratedWhiteBalance.range(whiteBalanceCalibration) != null
+
+    /** Reconcile every control with the physical sensor selected for the RAW stream. */
+    fun forLens(ch: CameraCharacteristics): CameraCapabilities {
+        val capabilities = ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+        val iso = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        val exposure = ch.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val active = ch.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        val ev = ch.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        val full = (ZslPolicy.evaluateFullResolution(
+            CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW in capabilities,
+            ZslRawStream.fullResolutionConfigs(ch),
+        ) as? ZslDecision.Stream)?.config
+        return copy(
+            hasManualSensor = CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in capabilities,
+            manualPostProcessing = CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING in capabilities,
+            whiteBalanceCalibration = cachedCalibration(ch),
+            isoMin = iso?.lower, isoMax = iso?.upper,
+            exposureMinNs = exposure?.lower, exposureMaxNs = exposure?.upper,
+            minFocusDiopters = ch.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
+            awbModes = ch.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toList().orEmpty(),
+            supportsAwbLock = ch.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) == true,
+            afModes = ch.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toList().orEmpty(),
+            noiseReductionModes = ch.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)?.toList().orEmpty(),
+            edgeModes = ch.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)?.toList().orEmpty(),
+            evMin = ev?.lower ?: 0, evMax = ev?.upper ?: 0,
+            evStep = ch.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f,
+            sensorOrientation = ch.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90,
+            supportsRaw = CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW in capabilities,
+            rawWidth = active?.width() ?: 0, rawHeight = active?.height() ?: 0,
+            maxAnalogIso = ch.get(CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY),
+            ultraHighResolution = CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR in capabilities,
+            fullResolutionRawWidth = full?.width ?: 0, fullResolutionRawHeight = full?.height ?: 0,
+            hasFlashUnit = ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true,
+        )
+    }
 
     /**
      * Whether a full-resolution raw stream can be asked for at all: the mode,
@@ -112,6 +155,10 @@ data class CameraCapabilities(
 
     val hasExposureRange: Boolean
         get() = exposureMinNs != null && exposureMaxNs != null && exposureMaxNs > exposureMinNs
+
+    val hasManualColor: Boolean get() = (supportsAwbLock &&
+        CameraMetadata.CONTROL_AWB_MODE_AUTO in awbModes) ||
+        awbModes.any { it != CameraMetadata.CONTROL_AWB_MODE_AUTO }
 
     val supportsBracketing: Boolean
         get() = hasManualSensor && hasIsoRange && supportsRaw
@@ -169,6 +216,21 @@ data class CameraCapabilities(
     }
 
     companion object {
+        private val calibrations = mutableMapOf<String, ColorScience.Calibration?>()
+        private fun cachedCalibration(ch: CameraCharacteristics): ColorScience.Calibration? {
+            val key = listOf(ch.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE),
+                ch.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE),
+                ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.contentToString(),
+                ch.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1), ch.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2),
+                ch.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM1), ch.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM2),
+                ch.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX1), ch.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX2),
+                ch.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1), ch.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2)).joinToString("|")
+            return synchronized(calibrations) {
+                if (calibrations.containsKey(key)) calibrations[key]
+                else ColorProfile.calibrationFrom(ch).also { calibrations[key] = it }
+            }
+        }
+
         /**
          * The largest RAW_SENSOR size of the maximum-resolution stream map,
          * where the camera has one. Read in a try, because a HAL that does
@@ -181,9 +243,23 @@ data class CameraCapabilities(
             val map = c2.getCameraCharacteristic(
                 CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION
             ) ?: return null
+            val previews = map.getOutputSizes(android.view.SurfaceHolder::class.java).orEmpty()
             map.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)
+                ?.filter { raw -> previews.any { preview ->
+                    preview.width <= 1920 &&
+                        kotlin.math.abs(preview.width.toDouble() / preview.height -
+                            raw.width.toDouble() / raw.height) < 0.02
+                } && map.getOutputStallDuration(android.graphics.ImageFormat.RAW_SENSOR, raw) == 0L &&
+                    map.getOutputMinFrameDuration(android.graphics.ImageFormat.RAW_SENSOR, raw) in
+                        1..ZslPolicy.MAX_FULL_RESOLUTION_FRAME_DURATION_NS }
                 ?.maxByOrNull { it.width.toLong() * it.height }
         }.getOrNull()
+
+        fun supportsCroppedRaw(ch: CameraCharacteristics): Boolean =
+            android.os.Build.VERSION.SDK_INT >= 34 && runCatching {
+                ch.get(CameraCharacteristics.SCALER_AVAILABLE_STREAM_USE_CASES)
+                    ?.contains(CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_CROPPED_RAW.toLong()) == true
+            }.getOrDefault(false)
 
         // See the note in ManualSettings: the compiler reads one of these and
         // AndroidX lint reads the other.
@@ -228,6 +304,9 @@ data class CameraCapabilities(
                     CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE
                 ) ?: 0f,
                 awbModes = awb,
+                supportsAwbLock = c2.getCameraCharacteristic(
+                    CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE
+                ) == true,
                 afModes = ints(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES),
                 noiseReductionModes = ints(
                     CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES
@@ -256,6 +335,7 @@ data class CameraCapabilities(
                 ),
                 fullResolutionRawWidth = fullResolutionRaw(c2)?.width ?: 0,
                 fullResolutionRawHeight = fullResolutionRaw(c2)?.height ?: 0,
+                hasFlashUnit = c2.getCameraCharacteristic(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true,
             )
         }
     }

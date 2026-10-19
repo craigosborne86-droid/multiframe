@@ -170,8 +170,9 @@ class RawRingBudgetTest {
     @Test
     fun `depth is capped at the maximum ring`() {
         assertThat(RawRingBudget.depthForBurst(32)).isEqualTo(RawRingBudget.MAX_CAPACITY)
+        assertThat(RawRingBudget.depthForBurst(FrameCountPolicy.MAX_FRAMES)).isEqualTo(RawRingBudget.MAX_CAPACITY)
         assertThat(RawRingBudget.burstForDepth(RawRingBudget.MAX_CAPACITY))
-            .isEqualTo(RawRingBudget.MAX_CAPACITY - RawRingBudget.WRITE_HEADROOM)
+            .isEqualTo(FrameCountPolicy.MAX_FRAMES)
     }
 
     @Test
@@ -215,6 +216,15 @@ class RawRingBudgetTest {
     }
 
     @Test
+    fun `default pixel mode never selects a fast full-resolution stream`() {
+        val fastFull = fullResolution.copy(minFrameDurationNs = 33_333_000L)
+        val decision = ZslPolicy.evaluate(true, listOf(pixel9ProXl, fastFull)) as ZslDecision.Stream
+        assertThat(decision.config).isEqualTo(pixel9ProXl)
+        assertThat((ZslPolicy.evaluateFullResolution(true, listOf(pixel9ProXl, fastFull)) as ZslDecision.Stream).config)
+            .isEqualTo(fastFull)
+    }
+
+    @Test
     fun `a sensor without the mode has no full-resolution stream, and says so`() {
         val decision = ZslPolicy.evaluateFullResolution(true, listOf(pixel9ProXl))
         assertThat(decision).isInstanceOf(ZslDecision.Fallback::class.java)
@@ -236,5 +246,15 @@ class RawRingBudgetTest {
         // and the desired depth caps it.
         val depth = RawRingBudget.capacityFor(8160, 6144, 8L shl 30, 16L shl 30, RawRingBudget.FULL_RESOLUTION_CAPACITY)
         assertThat(depth).isEqualTo(RawRingBudget.FULL_RESOLUTION_CAPACITY)
+    }
+
+    @Test
+    fun `maximum-resolution ring alone stays below the six-hundred-megabyte cap`() {
+        val capacity = RawRingBudget.fullResolutionCapacity(8160, 6144)
+        assertThat(capacity).isEqualTo(5)
+        assertThat(RawRingBudget.frameBytes(8160, 6144) * capacity)
+            .isLessThan(RawRingBudget.FULL_RESOLUTION_RING_MAX_BYTES)
+        // Larger formats cannot silently allocate five oversized slots.
+        assertThat(RawRingBudget.fullResolutionCapacity(12000, 9000)).isEqualTo(0)
     }
 }

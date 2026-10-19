@@ -60,6 +60,11 @@ data class CaptureRecord(
 
     /** Whether the developed image is a 2x accumulation, which the grid badges. */
     val isSuperRes: Boolean get() = RecentCapture.isSuperRes(baseName)
+
+    val nativeHighResMegapixels: Int? get() = RecentCapture.nativeHighResMegapixels(baseName)
+
+    /** Frames actually accumulated into this saved image, when its name records a count. */
+    val frameCount: Int? get() = RecentCapture.frameCount(baseName)
 }
 
 /**

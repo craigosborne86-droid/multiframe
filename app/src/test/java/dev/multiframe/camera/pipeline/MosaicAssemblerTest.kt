@@ -134,6 +134,25 @@ class MosaicAssemblerTest {
         assertThat(origin[1]).isGreaterThan((1200 - tile) / 2f + 40f)
     }
 
+    @Test
+    fun `a misplaced neighbour cannot pull a new tile out of feature consensus`() {
+        val a = assembler()
+        val anchor = a.anchor(window(100, 100)).transform.apply(0f, 0f)
+        fun place(sx: Int, sy: Int, dx: Int, dy: Int) {
+            val h = Homography.translation((anchor[0] + dx).toDouble(), (anchor[1] + dy).toDouble())
+            assertThat(a.place(window(sx, sy), h, 20, 1f)).isNotNull()
+        }
+        place(250, 100, 190, 0) // 40 px wrong despite plausible capture guidance
+        place(100, 220, 0, 120)
+        place(190, 170, 90, 70)
+
+        val located = a.locate(window(250, 220), proxyScale)
+        assertThat(located).isNotNull()
+        val at = located!!.transform.apply(0f, 0f)
+        assertThat(at[0]).isWithin(4f).of(anchor[0] + 150f)
+        assertThat(at[1]).isWithin(4f).of(anchor[1] + 120f)
+    }
+
     // ------------------------------------------------------------------
     // Refusing frames.
     // ------------------------------------------------------------------

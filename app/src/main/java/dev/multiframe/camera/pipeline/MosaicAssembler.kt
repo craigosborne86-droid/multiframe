@@ -2,6 +2,7 @@ package dev.multiframe.camera.pipeline
 
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.hypot
 
 /** Where a tile ended up, and how confident the registration was. */
 data class Placement(
@@ -193,9 +194,7 @@ class MosaicAssembler(
 
         // Extracted once and matched against every candidate.
         val features = FeatureMatcher.extract(proxy)
-        val predictions = ArrayList<Homography>()
-        var bestInliers = 0
-        var bestRatio = 0f
+        val predictions = ArrayList<Prediction>()
         for (candidate in registrationCandidates().take(maxCandidates.coerceAtLeast(1))) {
             val fit = FeatureMatcher.register(placedFeatures[candidate], features)
             if (fit == null) {
@@ -204,20 +203,17 @@ class MosaicAssembler(
                 continue
             }
             val inverse = fit.homography.invert() ?: continue
-            predictions.add(
+            predictions.add(Prediction(
                 placements[candidate].transform
-                    .times(proxyToTile).times(inverse).times(tileToProxy)
-            )
-            if (fit.inliers.size > bestInliers) {
-                bestInliers = fit.inliers.size
-                bestRatio = fit.inlierRatio
-            }
+                    .times(proxyToTile).times(inverse).times(tileToProxy),
+                fit.inliers.size, fit.inlierRatio,
+            ))
         }
         if (predictions.isEmpty()) return null
-        val transform = consensus(predictions) ?: run { lastFailure = "no consensus"; return null }
-        if (!landsOnCanvas(transform)) { lastFailure = "off the canvas"; return null }
+        val selected = consensus(predictions, proxyScale) ?: run { lastFailure = "no consensus"; return null }
+        if (!landsOnCanvas(selected.transform)) { lastFailure = "off the canvas"; return null }
         lastFailure = null
-        return Located(transform, bestInliers, bestRatio)
+        return Located(selected.transform, selected.inliers, selected.ratio)
     }
 
     /** Why the last [locate] returned null, for the log; null when it did not. */
@@ -320,15 +316,20 @@ class MosaicAssembler(
         return listOf(newest) + nearby
     }
 
+    private data class Prediction(val transform: Homography, val inliers: Int, val ratio: Float) {
+        val support: Float get() = inliers * ratio
+    }
+
     /**
-     * Averages several predicted placements into one.
-     *
-     * The predictions' corner positions are averaged and a transform refitted
-     * from them, rather than the matrices being averaged directly: homographies
-     * do not average meaningfully element by element, but the points they
-     * predict do.
+     * A RANSAC-style consensus over neighbouring tile predictions. Each pair's
+     * feature matches has already passed homography verification, but a prior
+     * tile may itself be misplaced. Averaging that tile with a sound neighbour
+     * moves the new tile halfway toward a ghost. Two predictions agree only
+     * when every projected corner is within both fits' 3-proxy-pixel residual
+     * budgets. The cluster with the most verified support wins; only its
+     * corners are averaged, and homographies themselves are never averaged.
      */
-    private fun consensus(predictions: List<Homography>): Homography? {
+    private fun consensus(predictions: List<Prediction>, proxyScale: Float): Prediction? {
         if (predictions.size == 1) return predictions.first()
 
         val corners = listOf(
@@ -337,20 +338,35 @@ class MosaicAssembler(
             0f to tileHeight.toFloat(),
             tileWidth.toFloat() to tileHeight.toFloat(),
         )
+        val agreementPx = 6f * proxyScale // two independent 3-pixel RANSAC fits
+        fun agree(a: Prediction, b: Prediction): Boolean = corners.all { (x, y) ->
+            val pa = a.transform.apply(x, y)
+            val pb = b.transform.apply(x, y)
+            pa.all { it.isFinite() } && pb.all { it.isFinite() } &&
+                hypot(pa[0] - pb[0], pa[1] - pb[1]) <= agreementPx
+        }
+        val group = predictions.map { seed -> predictions.filter { agree(seed, it) } }
+            .maxWithOrNull(compareBy<List<Prediction>> { it.sumOf { p -> p.support.toDouble() } }
+                .thenBy { it.size }) ?: return null
+        if (group.size == 1) return group.first()
         val matches = ArrayList<Match>(corners.size)
         corners.forEach { (x, y) ->
             var sumX = 0f
             var sumY = 0f
-            var used = 0
-            for (prediction in predictions) {
-                val p = prediction.apply(x, y)
+            var weight = 0f
+            for (prediction in group) {
+                val p = prediction.transform.apply(x, y)
                 if (p[0].isNaN() || p[1].isNaN()) continue
-                sumX += p[0]; sumY += p[1]; used++
+                sumX += p[0] * prediction.support
+                sumY += p[1] * prediction.support
+                weight += prediction.support
             }
-            if (used > 0) matches.add(Match(x, y, sumX / used, sumY / used))
+            if (weight > 0f) matches.add(Match(x, y, sumX / weight, sumY / weight))
         }
-        if (matches.size < 4) return predictions.first()
-        return Homography.fit(matches) ?: predictions.first()
+        val strongest = group.maxBy { it.support }
+        if (matches.size < 4) return strongest
+        return Prediction(Homography.fit(matches) ?: strongest.transform,
+            strongest.inliers, strongest.ratio)
     }
 
     /** Scales a transform between proxy and full-resolution coordinates. */

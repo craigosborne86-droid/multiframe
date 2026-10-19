@@ -1,17 +1,15 @@
 package dev.multiframe.camera.pipeline
-
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
-
 class SuperResPolicyTest {
-    @Test fun primaryModeAndZoomRequestTheCanvasOnAnyCapableLens() {
-        assertThat(SuperResPolicy.wantsCanvas(CaptureMode.SUPER_RES, 1f, true)).isTrue()
-        for (mode in listOf(CaptureMode.AUTO, CaptureMode.NIGHT, CaptureMode.ACTION)) {
-            assertThat(SuperResPolicy.wantsCanvas(mode, 1.99f, true)).isFalse()
-            assertThat(SuperResPolicy.wantsCanvas(mode, 2f, true)).isTrue()
-            assertThat(SuperResPolicy.wantsCanvas(mode, 5f, false)).isFalse()
+    @Test fun zoomRequestsCanvasInBothModes() {
+        for (mode in CaptureMode.entries) {
+            assertThat(SuperResPolicy.wantsCanvas(mode, 1f, true)).isFalse()
+            for (zoom in listOf(1.5f, 2f, 10f)) {
+                assertThat(SuperResPolicy.wantsCanvas(mode, zoom, true)).isTrue()
+                assertThat(SuperResPolicy.wantsCanvas(mode, zoom, false)).isFalse()
+            }
         }
-        assertThat(SuperResPolicy.wantsCanvas(CaptureMode.SUPER_RES, 1f, false)).isFalse()
         assertThat(MosaicPreset.ONE_SHOT_FRAMES).isEqualTo(16)
     }
 }

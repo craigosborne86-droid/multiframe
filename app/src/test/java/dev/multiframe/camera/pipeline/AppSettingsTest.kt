@@ -42,6 +42,7 @@ class AppSettingsTest {
                 manualExposure = true, iso = 800, exposureTimeNs = 4_000_000L,
                 manualFocus = true, focusDiopters = 2.5f,
                 awbMode = CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT,
+                manualColor = true,
                 evIndex = -6, suppressIspProcessing = false,
             ),
             burstFrames = 16,
@@ -128,7 +129,7 @@ class AppSettingsTest {
         val stored = AppSettings().encode().toMutableMap()
         stored[AppSettings.KEY_MODE] = "TELEPATHY"
 
-        assertThat(AppSettings.decode(stored).captureMode).isEqualTo(CaptureMode.AUTO)
+        assertThat(AppSettings.decode(stored).captureMode).isEqualTo(CaptureMode.PHOTO)
     }
 
     /**
@@ -139,8 +140,8 @@ class AppSettingsTest {
     @Test
     fun `super res is not a mode the app reopens in`() {
         val stored = AppSettings().encode().toMutableMap()
-        stored[AppSettings.KEY_MODE] = CaptureMode.SUPER_RES.name
-        assertThat(AppSettings.decode(stored).captureMode).isEqualTo(CaptureMode.AUTO)
+        stored[AppSettings.KEY_MODE] = "SUPER_RES"
+        assertThat(AppSettings.decode(stored).captureMode).isEqualTo(CaptureMode.PHOTO)
     }
 
     @Test
@@ -162,10 +163,20 @@ class AppSettingsTest {
         val stored = AppSettings().encode().toMutableMap()
         stored[AppSettings.KEY_BURST] = "9999"
 
-        assertThat(AppSettings.decode(stored).burstFrames).isAtMost(32)
+        assertThat(AppSettings.decode(stored).burstFrames).isAtMost(FrameCountPolicy.MAX_FRAMES)
 
         stored[AppSettings.KEY_BURST] = "-4"
         assertThat(AppSettings.decode(stored).burstFrames).isAtLeast(1)
+    }
+
+    @Test
+    fun `old 32 frame setting migrates to the supported 28 frame ceiling`() {
+        val stored = AppSettings().encode().toMutableMap()
+        stored[AppSettings.KEY_BURST] = "32"
+
+        assertThat(AppSettings.decode(AppSettings(burstFrames = 28).encode()).burstFrames).isEqualTo(28)
+        assertThat(AppSettings.decode(stored).burstFrames).isEqualTo(FrameCountPolicy.MAX_FRAMES)
+        assertThat(AppSettings(burstFrames = 32).encode()[AppSettings.KEY_BURST]).isEqualTo("28")
     }
 
     // ------------------------------------------------------------------

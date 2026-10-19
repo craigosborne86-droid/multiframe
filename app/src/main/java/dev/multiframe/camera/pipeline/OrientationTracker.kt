@@ -48,8 +48,8 @@ class OrientationTracker(context: Context) {
      * Clockwise rotation to apply to a sensor-native frame, per the Camera2
      * JPEG orientation rule for a back-facing camera.
      */
-    fun captureRotation(sensorOrientation: Int): Int =
-        (sensorOrientation + deviceDegrees + 360) % 360
+    fun captureRotation(sensorOrientation: Int, facingBack: Boolean = true): Int =
+        CaptureOrientation.degrees(sensorOrientation, deviceDegrees, facingBack)
 
     companion object {
         fun rotate(bitmap: Bitmap, degrees: Int): Bitmap {

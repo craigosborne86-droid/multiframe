@@ -109,7 +109,7 @@ class LevelSensor(context: Context) {
         ?: manager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
     @Volatile
-    var attitude: Attitude = Attitude(0f, 0f, facingUpOrDown = false)
+    var attitude: Attitude? = null
         private set
 
     private var smoothedRoll = 0f

@@ -65,7 +65,7 @@ object SuperResCapture {
         val baseName = "MF_${stamp}${RecentCapture.SUPER_RES_TAG}${captured}f"
 
         val color = ColorProfile.calibrated(characteristics, captureResult)
-        val shading = ShadingMap.from(captureResult)
+        val shading = ShadingMap.from(captureResult, profile)
         // The rendering, adapted to the gain the burst was taken at.
         val params = params.adaptedTo(captureResult?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY))
 
@@ -87,7 +87,7 @@ object SuperResCapture {
                 rotationDegrees = rotationDegrees,
             ),
         ) { fd ->
-            stats = canvas.developToJpeg(fd, profile, color, params, shading, quality)
+            stats = canvas.developToJpeg(fd, profile, color, params, shading, quality, RenderCrop.from(characteristics, captureResult))
             stats != null
         }
         val jpegMillis = System.currentTimeMillis() - tJpeg
@@ -113,7 +113,8 @@ object SuperResCapture {
                 context, mergedBuffer.duplicate(), mergedWidth, mergedHeight,
                 characteristics, captureResult, dngName,
                 baselineExposureStops = baselineExposureStops,
-                whiteBalanceGains = color.gains,
+                whiteBalanceNeutral = ColorProfile.cameraNeutral(captureResult, color.gains),
+                rotationDegrees = rotationDegrees,
             )
         } else {
             null
@@ -123,8 +124,8 @@ object SuperResCapture {
         return Written(
             jpegName = jpegName,
             dngName = if (dngUri != null) dngName else null,
-            width = canvas.width,
-            height = canvas.height,
+            width = RenderCrop.from(characteristics, captureResult).pixels(canvas.width, canvas.height).width,
+            height = RenderCrop.from(characteristics, captureResult).pixels(canvas.width, canvas.height).height,
             jpegMillis = jpegMillis,
             dngMillis = dngMillis,
             exposureGain = stats?.exposureGain ?: 0f,

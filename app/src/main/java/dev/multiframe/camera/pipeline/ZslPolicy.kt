@@ -83,7 +83,7 @@ object ZslPolicy {
     ): ZslDecision {
         val full = configs.filter { it.fullResolution }
         if (full.isEmpty()) return ZslDecision.Fallback("no maximum-resolution RAW_SENSOR output sizes")
-        return evaluate(supportsRaw, full, MAX_FULL_RESOLUTION_FRAME_DURATION_NS)
+        return evaluateCandidates(supportsRaw, full, MAX_FULL_RESOLUTION_FRAME_DURATION_NS)
     }
 
     /**
@@ -97,6 +97,14 @@ object ZslPolicy {
         supportsRaw: Boolean,
         configs: List<RawStreamConfig>,
         maxFrameDurationNs: Long = MAX_FRAME_DURATION_NS,
+    ): ZslDecision = evaluateCandidates(
+        supportsRaw, configs.filterNot { it.fullResolution }, maxFrameDurationNs,
+    )
+
+    private fun evaluateCandidates(
+        supportsRaw: Boolean,
+        configs: List<RawStreamConfig>,
+        maxFrameDurationNs: Long,
     ): ZslDecision {
         if (!supportsRaw) return ZslDecision.Fallback("camera reports no RAW capability")
         if (configs.isEmpty()) return ZslDecision.Fallback("no RAW_SENSOR output sizes")
@@ -208,6 +216,16 @@ object RawRingBudget {
      * capped by the depth as everywhere ([burstForDepth]).
      */
     const val FULL_RESOLUTION_CAPACITY = 5
+
+    /** Hard limit for the RAW ring alone; other merge/develop allocations are separate. */
+    const val FULL_RESOLUTION_RING_MAX_BYTES = 600_000_000L
+
+    fun fullResolutionCapacity(width: Int, height: Int): Int {
+        val bytes = frameBytes(width, height)
+        if (bytes <= 0L) return 0
+        val capacity = minOf(FULL_RESOLUTION_CAPACITY.toLong(), FULL_RESOLUTION_RING_MAX_BYTES / bytes).toInt()
+        return if (capacity >= MIN_CAPACITY) capacity else 0
+    }
 
     fun depthForBurst(burst: Int): Int =
         (burst + WRITE_HEADROOM).coerceIn(MIN_CAPACITY, MAX_CAPACITY)

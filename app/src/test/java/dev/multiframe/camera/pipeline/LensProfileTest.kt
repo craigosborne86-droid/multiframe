@@ -187,4 +187,15 @@ class LensProfileTest {
         val sub = profile().copy(cameraId = "3", logicalId = "0")
         assertThat(sub.toString()).contains("via 0")
     }
+
+    @Test
+    fun nativeHighResolutionBelongsToThePhysicalSensorProfile() {
+        val full = profile().copy(
+            maxResolutionDimensions = FrameSize(8160, 6120),
+            supportsNativeHighRes = true,
+        )
+        assertThat(full.maxResolutionDimensions).isEqualTo(FrameSize(8160, 6120))
+        assertThat(full.toString()).contains("maxRAW=8160x6120")
+        assertThat(full).isNotEqualTo(profile())
+    }
 }

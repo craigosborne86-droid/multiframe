@@ -17,7 +17,13 @@ data class ManualSettings(
     val exposureTimeNs: Long = 8_000_000L,
     val manualFocus: Boolean = false,
     val focusDiopters: Float = 0f,
+    val rememberedManualFocus: Boolean = false,
     val awbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO,
+    /** Freeze the running AWB solution in PRO, or use the selected preset. */
+    val manualColor: Boolean = false,
+    val whiteBalanceMode: WhiteBalanceMode = WhiteBalanceMode.AUTO,
+    val kelvin: Int = 5200,
+    val tint: Int = 0,
     val evIndex: Int = 0,
     val suppressIspProcessing: Boolean = true,
 ) {
@@ -52,8 +58,9 @@ data class ManualSettings(
         }
 
         if (manualExposure && caps.hasManualSensor) {
-            val iso = effectiveIso(caps)
-            val time = effectiveExposureTimeNs(caps)
+            val desired = effectiveExposureTimeNs(caps)
+            val iso = PreviewExposure.iso(effectiveIso(caps), desired, caps.isoMax ?: effectiveIso(caps))
+            val time = PreviewExposure.time(desired)
             b.setCaptureRequestOption(
                 CaptureRequest.CONTROL_AE_MODE,
                 CameraMetadata.CONTROL_AE_MODE_OFF,
@@ -85,6 +92,18 @@ data class ManualSettings(
         }
 
         b.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, effectiveAwbMode(caps))
+        if (caps.supportsAwbLock) {
+            b.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AWB_LOCK,
+                (manualColor || whiteBalanceMode == WhiteBalanceMode.LOCK) && effectiveAwbMode(caps) == CameraMetadata.CONTROL_AWB_MODE_AUTO,
+            )
+        }
+
+        manualWhiteBalance(caps)?.let { solution ->
+            b.setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_MODE, CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+            b.setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_GAINS, solution.cameraGains())
+            b.setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_TRANSFORM, solution.cameraTransform())
+        }
 
         // The lens shading map is only reported when it is asked for, and raw
         // is uncorrected by definition, so without this every frame keeps its
@@ -113,7 +132,36 @@ data class ManualSettings(
         focusDiopters.coerceIn(0f, caps.minFocusDiopters)
 
     fun effectiveAwbMode(caps: CameraCapabilities): Int =
-        if (caps.awbModes.contains(awbMode)) awbMode else CameraMetadata.CONTROL_AWB_MODE_AUTO
+        if (manualWhiteBalance(caps) != null) CameraMetadata.CONTROL_AWB_MODE_OFF
+        else if (whiteBalanceMode == WhiteBalanceMode.LOCK) CameraMetadata.CONTROL_AWB_MODE_AUTO
+        else if (caps.awbModes.contains(awbMode)) awbMode else CameraMetadata.CONTROL_AWB_MODE_AUTO
+
+    fun manualWhiteBalance(caps: CameraCapabilities): CalibratedWhiteBalance.Solution? =
+        if (whiteBalanceMode == WhiteBalanceMode.MANUAL && caps.supportsManualWhiteBalance)
+            CalibratedWhiteBalance.resolve(caps.whiteBalanceCalibration, kelvin, tint) else null
+
+    /** PRO starts from the sensor's latest AE reading, avoiding a visible exposure jump. */
+    fun forPro(enabled: Boolean, caps: CameraCapabilities?, liveExposure: Pair<Int, Long>? = null): ManualSettings {
+        if (!enabled) return copy(
+            manualExposure = false,
+            manualFocus = false,
+            manualColor = false,
+            awbMode = CameraMetadata.CONTROL_AWB_MODE_AUTO,
+        )
+        if (caps == null || !caps.hasManualSensor || !caps.hasManualColor) return this
+        val exposure = liveExposure?.takeIf { it.first > 0 && it.second > 0L }
+        val colorMode = if (caps.supportsAwbLock && CameraMetadata.CONTROL_AWB_MODE_AUTO in caps.awbModes)
+            CameraMetadata.CONTROL_AWB_MODE_AUTO
+            else awbMode.takeIf { it != CameraMetadata.CONTROL_AWB_MODE_AUTO && it in caps.awbModes }
+                ?: caps.awbModes.first { it != CameraMetadata.CONTROL_AWB_MODE_AUTO }
+        return copy(
+            manualExposure = true,
+            iso = exposure?.first ?: iso,
+            exposureTimeNs = exposure?.second ?: exposureTimeNs,
+            manualColor = true,
+            awbMode = colorMode,
+        )
+    }
 
     fun effectiveEvIndex(caps: CameraCapabilities): Int =
         if (caps.supportsExposureCompensation) {
@@ -127,10 +175,10 @@ data class ManualSettings(
         manualExposure && caps.hasManualSensor
 
     /** Human-readable shutter speed, e.g. "1/125" or "0.5s". */
-    fun shutterLabel(): String {
+    fun shutterLabel(locale: java.util.Locale = java.util.Locale.getDefault()): String {
         val seconds = exposureTimeNs / 1_000_000_000.0
         return if (seconds >= 0.4) {
-            "%.1fs".format(seconds)
+            "%.1fs".format(locale, seconds)
         } else {
             "1/${(1.0 / seconds).toInt()}"
         }

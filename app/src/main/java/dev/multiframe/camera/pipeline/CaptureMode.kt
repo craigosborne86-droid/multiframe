@@ -4,30 +4,10 @@ import kotlin.math.roundToInt
 
 /** What the user is trying to photograph. */
 enum class CaptureMode {
-    /** Let the scene decide. */
-    AUTO,
-
-    /** Everything is still; spend time to gather light. */
-    NIGHT,
-
-    /** Something is moving; spend light to stop it. */
-    ACTION,
-
-    /** One viewpoint, sixteen raw frames accumulated on the 2x sensor canvas. */
-    SUPER_RES;
-
-    val label: String
-        get() = when (this) {
-            AUTO -> "AUTO"
-            NIGHT -> "NIGHT"
-            ACTION -> "ACTION"
-            SUPER_RES -> "SUPER RES"
-        }
-
-    /** Whether this mode is a single burst from the ring, as against a mosaic of them. */
+    PHOTO, NIGHT;
+    val label: String get() = name
     val isSingleCapture: Boolean get() = true
-
-    fun next(): CaptureMode = entries[(ordinal + 1) % entries.size]
+    fun next(): CaptureMode = if (this == NIGHT) PHOTO else NIGHT
 }
 
 /**
@@ -120,20 +100,7 @@ object CaptureModes {
         requestedFrames: Int,
     ): CapturePlan {
         val ceiling = availableFrames.coerceAtLeast(1)
-        if (mode == CaptureMode.SUPER_RES) return CapturePlan(
-            frames = minOf(MosaicPreset.ONE_SHOT_FRAMES, ceiling),
-            maxExposureNs = AUTO_EXPOSURE_NS,
-            protectHighlights = analysis.highlightLevel >= DARK_THRESHOLD,
-            resolved = CaptureMode.SUPER_RES,
-            reason = "single-viewpoint sub-pixel accumulation",
-        )
-
-        val resolved = when (mode) {
-            // A Super Res tile is exposed by the mosaic's lock, not by a plan;
-            // as a plan it is the ordinary one.
-            CaptureMode.AUTO, CaptureMode.SUPER_RES -> resolveAuto(analysis)
-            else -> mode
-        }
+        val resolved = if (mode == CaptureMode.PHOTO) resolveAuto(analysis) else mode
 
         return when (resolved) {
             CaptureMode.NIGHT -> CapturePlan(
@@ -150,22 +117,14 @@ object CaptureModes {
                 // exposure would spend the shadow detail the mode exists for.
                 protectHighlights = false,
                 resolved = CaptureMode.NIGHT,
-                reason = if (mode == CaptureMode.AUTO) "scene is dark" else "night mode",
+                reason = if (mode == CaptureMode.PHOTO) "scene is dark" else "night mode",
             )
 
-            CaptureMode.ACTION -> CapturePlan(
-                frames = minOf(ACTION_FRAMES, ceiling),
-                maxExposureNs = ACTION_EXPOSURE_NS,
-                protectHighlights = true,
-                resolved = CaptureMode.ACTION,
-                reason = "freezing motion",
-            )
-
-            CaptureMode.AUTO, CaptureMode.SUPER_RES -> CapturePlan(
+            CaptureMode.PHOTO -> CapturePlan(
                 frames = requestedFrames.coerceIn(1, minOf(ceiling, AUTO_MAX_FRAMES)),
                 maxExposureNs = AUTO_EXPOSURE_NS,
                 protectHighlights = true,
-                resolved = CaptureMode.AUTO,
+                resolved = CaptureMode.PHOTO,
                 reason = "ordinary scene",
             )
         }
@@ -181,7 +140,7 @@ object CaptureModes {
      * and the camera does not.
      */
     fun resolveAuto(analysis: SceneAnalysis): CaptureMode =
-        if (analysis.highlightLevel < DARK_THRESHOLD) CaptureMode.NIGHT else CaptureMode.AUTO
+        if (analysis.highlightLevel < DARK_THRESHOLD) CaptureMode.NIGHT else CaptureMode.PHOTO
 
     /**
      * Stops of shadow recovery this plan has bought, for display.

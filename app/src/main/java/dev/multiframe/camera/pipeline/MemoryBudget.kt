@@ -80,7 +80,9 @@ object MemoryBudget {
     ): Boolean {
         if (width <= 0 || height <= 0 || physicalBytes <= 0) return false
         val pixels = width.toLong() * height.toLong()
-        val ring = RawRingBudget.frameBytes(width, height) * RawRingBudget.FULL_RESOLUTION_CAPACITY
+        val capacity = RawRingBudget.fullResolutionCapacity(width, height)
+        if (capacity == 0) return false
+        val ring = RawRingBudget.frameBytes(width, height) * capacity
         val merge = pixels * RawRingBudget.MERGE_BYTES_PER_PIXEL
         return ring + merge <= physicalBytes / 2
     }

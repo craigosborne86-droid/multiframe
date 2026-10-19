@@ -286,7 +286,8 @@ object RawBurstCapture {
                     context, mergedBuffer.duplicate(), width, height,
                     characteristics, captureResult, dngName,
                     baselineExposureStops = baselineExposureStops,
-                    whiteBalanceGains = color.gains,
+                    whiteBalanceNeutral = ColorProfile.cameraNeutral(captureResult, color.gains),
+                    rotationDegrees = rotationDegrees,
                 )
                 dngMillis = System.currentTimeMillis() - started
             }.apply { name = "dng-write"; start() }
@@ -301,7 +302,7 @@ object RawBurstCapture {
         val develop = develop.adaptedTo(iso)
         // Raw is uncorrected by definition, so the falloff the camera measured
         // for this capture has to be applied here or the corners stay dingy.
-        val shading = ShadingMap.from(captureResult)
+        val shading = ShadingMap.from(captureResult, profile)
         if (shading != null) {
             Log.i(TAG, "lens shading: %.2f stops of falloff".format(shading.falloffStops))
         }
@@ -349,6 +350,12 @@ object RawBurstCapture {
             Log.i(TAG, "optics %dms".format(System.currentTimeMillis() - tOptics))
         }
 
+        val framing = RenderCrop.from(characteristics, captureResult).pixels(bitmap.width, bitmap.height)
+        if (framing.width != bitmap.width || framing.height != bitmap.height) {
+            val cropped = android.graphics.Bitmap.createBitmap(bitmap, framing.left, framing.top, framing.width, framing.height)
+            if (cropped !== bitmap) bitmap.recycle()
+            bitmap = cropped
+        }
         val tRotate = System.currentTimeMillis()
         bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
         val rotateMillis = System.currentTimeMillis() - tRotate
@@ -492,10 +499,10 @@ object RawBurstCapture {
      * Rewrites the tags `DngCreator` gives no way to set, in the bytes it
      * left for them: BaselineExposure with the guard's pull undone
      * ([DngMetadata.baselineExposureOffset]) and AsShotNeutral with the
-     * white balance the develop used ([DngMetadata.asShotNeutralOffset]).
+     * camera neutral used by the JPEG matrix ([DngMetadata.asShotNeutralOffset]).
      * The pixels are untouched.
      */
-    private fun patchTags(resolver: android.content.ContentResolver, uri: android.net.Uri, stops: Float, gains: FloatArray?) {
+    private fun patchTags(resolver: android.content.ContentResolver, uri: android.net.Uri, stops: Float, neutral: FloatArray?) {
         try {
             resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
                 // Positioned reads and writes on the descriptor itself: a
@@ -521,10 +528,10 @@ object RawBurstCapture {
                     if (at == null) Log.w(TAG, "DNG has no BaselineExposure tag to carry the guard's %.2f stops".format(stops))
                     else write(at, DngMetadata.encodeBaselineExposure(bytes, stops))
                 }
-                if (gains != null && gains.size >= 4) {
+                if (neutral != null && neutral.size >= 3) {
                     val at = DngMetadata.asShotNeutralOffset(bytes)
                     if (at == null) Log.w(TAG, "DNG has no AsShotNeutral tag to carry the develop's white balance")
-                    else write(at, DngMetadata.encodeAsShotNeutral(bytes, gains))
+                    else write(at, DngMetadata.encodeCameraNeutral(bytes, neutral))
                 }
             }
         } catch (e: Exception) {
@@ -550,11 +557,12 @@ object RawBurstCapture {
          */
         baselineExposureStops: Float = 0f,
         /**
-         * The white balance gains the develop used -- `ColorProfile.gains` --
-         * written as the DNG's AsShotNeutral so the two outputs agree; null
+         * The camera-space scene white used by the JPEG matrix, written as
+         * the DNG's AsShotNeutral so the two outputs agree; null
          * leaves `DngCreator`'s. See [DngMetadata.asShotNeutralOffset].
          */
-        whiteBalanceGains: FloatArray? = null,
+        whiteBalanceNeutral: FloatArray? = null,
+        rotationDegrees: Int = 0,
     ): android.net.Uri? = try {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
@@ -571,12 +579,13 @@ object RawBurstCapture {
 
         merged.rewind()
         DngCreator(characteristics, result).use { dng ->
+            dng.setOrientation(CaptureOrientation.exif(rotationDegrees))
             resolver.openOutputStream(uri)?.use { out ->
                 dng.writeByteBuffer(out, Size(width, height), merged, 0)
             } ?: error("openOutputStream returned null")
         }
-        if (kotlin.math.abs(baselineExposureStops) >= 0.005f || whiteBalanceGains != null) {
-            patchTags(resolver, uri, baselineExposureStops, whiteBalanceGains)
+        if (kotlin.math.abs(baselineExposureStops) >= 0.005f || whiteBalanceNeutral != null) {
+            patchTags(resolver, uri, baselineExposureStops, whiteBalanceNeutral)
         }
 
         values.clear()

@@ -446,6 +446,9 @@ object MosaicCapture {
                         // carry the white balance gains, or there is nothing to
                         // develop with; a frame without them is waited past.
                         val burst = stream.snapshot(1)
+                        // The shared ring no longer substitutes a neighbouring result.
+                        // Await this frame's callback before using its colour/attitude.
+                        try { burst.awaitResults() } catch (e: Exception) { burst.close(); throw e }
                         val result = burst.referenceResult
                         val color = ColorProfile.calibrated(stream.characteristics, result)
                         val buffer = burst.frames.buffer(0)
@@ -465,7 +468,7 @@ object MosaicCapture {
                         if (color.isNeutralGains) Log.w(TAG, "anchoring with unity white balance: the result carried no gains")
                         if (!motion.attitudeSettled()) Log.w(TAG, "anchoring on an attitude that has not settled")
                         val stride = burst.frames.rowStride
-                        session.lockColour(color, ShadingMap.from(result))
+                        session.lockColour(color, ShadingMap.from(result, profile))
                         NativeMerge.create(stream.config.width, stream.config.height, profile)?.use { m ->
                             m.setReference(buffer, stride)
                             val (merged, _) = m.finish()
@@ -538,10 +541,12 @@ object MosaicCapture {
                                 exposeProgress = (fresh.toFloat() / tileFrames).coerceIn(0f, 1f)
                                 if (fresh >= tileFrames) {
                                     val burst = stream.snapshot(tileFrames)
-                                    if (burst.count == 0) {
+                                    val hasResults = try { burst.awaitResults() }
+                                        catch (e: Exception) { burst.close(); throw e }
+                                    if (burst.count == 0 || !hasResults) {
                                         burst.close()
                                         guide.rejected(c.node, now)
-                                        onEvent(MosaicEvent.Rejected(c.node, "ring empty"))
+                                        onEvent(MosaicEvent.Rejected(c.node, if (burst.count == 0) "ring empty" else "missing frame metadata"))
                                     } else {
                                         // The photograph is taken. The node is done, the
                                         // haptic fires -- the frames a haptic could blur are

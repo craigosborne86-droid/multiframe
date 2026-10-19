@@ -3,6 +3,7 @@ package dev.multiframe.camera.pipeline
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
+import android.graphics.ImageFormat
 import android.util.Log
 import kotlin.math.hypot
 
@@ -70,6 +71,10 @@ data class LensProfile(
     // Read-noise characterisation, filled in by [DcgCalibration]. Null until
     // the background profiling has run at least once on this camera.
     val dcgThresholdIso: Int?,
+    /** Largest RAW_SENSOR output in this sensor's maximum-resolution map. */
+    val maxResolutionDimensions: FrameSize? = null,
+    /** The physical sensor advertises an un-binned RAW_SENSOR readout. */
+    val supportsNativeHighRes: Boolean = false,
 ) {
     /**
      * Micrometres per photosite, which is the number that decides how much
@@ -123,7 +128,9 @@ data class LensProfile(
             exposureMaxNs == other.exposureMaxNs &&
             (distortion?.contentEquals(other.distortion) ?: (other.distortion == null)) &&
             (intrinsics?.contentEquals(other.intrinsics) ?: (other.intrinsics == null)) &&
-            dcgThresholdIso == other.dcgThresholdIso
+            dcgThresholdIso == other.dcgThresholdIso &&
+            maxResolutionDimensions == other.maxResolutionDimensions &&
+            supportsNativeHighRes == other.supportsNativeHighRes
 
     override fun hashCode(): Int {
         var h = cameraId.hashCode()
@@ -134,6 +141,8 @@ data class LensProfile(
         h = 31 * h + (distortion?.contentHashCode() ?: 0)
         h = 31 * h + (intrinsics?.contentHashCode() ?: 0)
         h = 31 * h + (dcgThresholdIso ?: 0)
+        h = 31 * h + (maxResolutionDimensions?.hashCode() ?: 0)
+        h = 31 * h + supportsNativeHighRes.hashCode()
         return h
     }
 
@@ -148,6 +157,7 @@ data class LensProfile(
         if (distortion != null) append(" distortion")
         if (intrinsics != null) append(" intrinsics")
         dcgThresholdIso?.let { append(" dcg@$it") }
+        maxResolutionDimensions?.let { append(" maxRAW=${it.width}x${it.height}") }
     }
 }
 
@@ -216,6 +226,15 @@ object LensProfiles {
             CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION
         ) ?: IntArray(0)
 
+        val nativeHighRes = if (lens.supportsRaw && caps.contains(
+                CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR
+            )) runCatching {
+                ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+                    ?.getOutputSizes(ImageFormat.RAW_SENSOR)
+                    ?.maxByOrNull { it.width.toLong() * it.height }
+                    ?.let { FrameSize(it.width, it.height) }
+            }.getOrNull() else null
+
         return LensProfile(
             cameraId = lens.cameraId,
             logicalId = lens.logicalId,
@@ -246,6 +265,8 @@ object LensProfiles {
             // Filled in later by the background noise profiling. A profile is
             // useful long before that has run.
             dcgThresholdIso = null,
+            maxResolutionDimensions = nativeHighRes,
+            supportsNativeHighRes = nativeHighRes != null,
         )
     }
 

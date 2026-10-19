@@ -39,6 +39,13 @@ data class RecentShot(
  */
 object RecentCapture {
 
+    // These are the current merge output names. The terminal number is the
+    // number of frames accumulated, not the frame setting requested at shutter.
+    private val FRAME_COUNT_NAME = Regex(
+        """^MF_[0-9]{8}_[0-9]{6}_(?:zsl|merged|sr2x|[1-9][0-9]*mp)_([1-9][0-9]*)f(?:\.(?:jpg|dng))?$""",
+        RegexOption.IGNORE_CASE,
+    )
+
     /** Where captures are written. */
     const val FOLDER = "Multiframe"
 
@@ -122,6 +129,14 @@ object RecentCapture {
      */
     fun isSuperRes(displayName: String): Boolean = displayName.contains(SUPER_RES_TAG)
 
+    /** Native maximum-resolution RAW readout, recorded in both output names. */
+    fun nativeHighResMegapixels(displayName: String): Int? =
+        Regex("_([0-9]+)mp_").find(displayName)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+    /** Saved merge count for a canonical JPEG/DNG name or its extensionless record key. */
+    fun frameCount(displayName: String): Int? =
+        FRAME_COUNT_NAME.matchEntire(displayName)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
     /** The name segment that marks a 2x capture: `MF_<stamp>_sr2x_<n>f.jpg`. */
     const val SUPER_RES_TAG = "_sr2x_"
 
@@ -129,6 +144,7 @@ object RecentCapture {
     fun describe(displayName: String): String = when {
         displayName.contains("_mosaic_") -> "mosaic"
         isSuperRes(displayName) -> "super-res 2x"
+        nativeHighResMegapixels(displayName) != null -> "${nativeHighResMegapixels(displayName)}MP native raw"
         displayName.contains("_zsl_") -> "zero shutter lag"
         displayName.contains("_merged_") -> "merged burst"
         displayName.contains("_raw") -> "single frame"

@@ -207,7 +207,7 @@ class RawRing private constructor(
         stride: Int = 8,
     ): Boolean {
         if (closed) return false
-        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
         return nHistogramNewest(handle, bins, stride, black, profile.whiteLevel, profile.cfaPattern)
     }
 
@@ -224,7 +224,7 @@ class RawRing private constructor(
         stride: Int = 8,
     ): Boolean {
         if (closed) return false
-        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
         return nHistogramSlot(handle, slot, bins, stride, black, profile.whiteLevel, profile.cfaPattern)
     }
 
@@ -247,13 +247,12 @@ class RawRing private constructor(
     /**
      * A downscaled luma view of the newest frame, without consuming it.
      *
-     * Focus peaking wants the sensor's own image: the preview has been through
-     * the ISP's sharpening, so peaking it would measure the processing rather
-     * than the focus.
+     * For RAW diagnostics. Live peaking uses the GPU preview texture so it
+     * cannot drift behind the displayed frame.
      */
     fun lumaNewest(out: ByteArray, width: Int, height: Int, profile: SensorProfile): Boolean {
         if (closed) return false
-        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
         return nLumaNewest(handle, out, width, height, black, profile.whiteLevel)
     }
 
@@ -265,7 +264,7 @@ class RawRing private constructor(
      */
     fun trackingLumaNewest(out: ByteArray, width: Int, height: Int, profile: SensorProfile): Long {
         if (closed) return -1L
-        val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+        val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
         return nTrackingLumaNewest(handle, out, width, height, black, profile.whiteLevel)
     }
 
@@ -341,7 +340,7 @@ class RawRing private constructor(
             buffer: java.nio.ByteBuffer, width: Int, height: Int, strideBytes: Int,
             out: ByteArray, outWidth: Int, outHeight: Int, profile: SensorProfile,
         ): Boolean {
-            val black = IntArray(4) { profile.blackLevel.getOrElse(it) { 0 } }
+            val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
             return nTrackingLumaOf(buffer, width, height, strideBytes, out, outWidth, outHeight, black, profile.whiteLevel)
         }
 

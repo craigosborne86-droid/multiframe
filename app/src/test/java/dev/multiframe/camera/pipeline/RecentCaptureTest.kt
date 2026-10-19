@@ -61,4 +61,30 @@ class RecentCaptureTest {
         assertThat(RecentCapture.isSuperRes("MF_20260914_020000_zsl_8f.jpg")).isFalse()
         assertThat(RecentCapture.SUPER_RES_TAG).isEqualTo("_sr2x_")
     }
+
+    @Test
+    fun `native resolution tag is measured and distinct from 2x`() {
+        val name = "MF_20260926_120000_50mp_3f.jpg"
+        assertThat(RecentCapture.nativeHighResMegapixels(name)).isEqualTo(50)
+        assertThat(RecentCapture.describe(name)).isEqualTo("50MP native raw")
+        assertThat(RecentCapture.isSuperRes(name)).isFalse()
+        assertThat(RecentCapture.nativeHighResMegapixels("MF_1_sr2x_16f.jpg")).isNull()
+    }
+
+    @Test
+    fun `saved merge frame counts come only from canonical terminal count names`() {
+        assertThat(RecentCapture.frameCount("MF_20261001_110907_zsl_2f")).isEqualTo(2)
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_zsl_28f.jpg")).isEqualTo(28)
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_merged_8f.dng")).isEqualTo(8)
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_sr2x_16f.jpg")).isEqualTo(16)
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_50mp_3f")).isEqualTo(3)
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_zsl_1f")).isEqualTo(1)
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_zsl_0f")).isNull()
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_mosaic_28t.jpg")).isNull()
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_raw.jpg")).isNull()
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_zsl_28f_copy.jpg")).isNull()
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_zsl_28f.png")).isNull()
+        assertThat(RecentCapture.frameCount("other_20261001_110852_zsl_28f.jpg")).isNull()
+        assertThat(RecentCapture.frameCount("MF_20261001_110852_zsl_999999999999999999999f")).isNull()
+    }
 }

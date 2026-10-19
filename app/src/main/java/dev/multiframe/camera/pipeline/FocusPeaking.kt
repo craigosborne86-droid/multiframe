@@ -5,30 +5,9 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Marks what is in focus.
- *
- * Manual focus on a phone is close to guesswork: the screen is small, bright,
- * and shows a preview that has already been sharpened, so the difference
- * between nearly right and right is invisible. Peaking replaces judgement with
- * a reading -- it marks the pixels where local contrast is high, which is where
- * the image is actually resolving detail.
- *
- * ### Contrast, normalised by brightness
- *
- * Raw gradient magnitude is the obvious measure and it is misleading: a bright
- * area produces larger differences than a dark one at the same sharpness,
- * because the same relative change spans more codes. Peaking on raw gradient
- * lights up every highlight and ignores the shadows, which is precisely the
- * opposite of useful when focusing on something dark.
- *
- * Dividing by local brightness measures *relative* contrast, which is what
- * sharpness actually is, and makes the reading comparable across the frame.
- *
- * ### Why the sensor rather than the preview
- *
- * The preview has been through the ISP's own sharpening, which manufactures
- * edges that are not in the optical image. Peaking on that measures the
- * processing rather than the focus. The raw ring holds what the sensor saw.
+ * Legacy RAW-plane diagnostics used by host/device sharpness benchmarks.
+ * Not the live viewfinder overlay: PeakingPreview computes that on the GPU
+ * from the exact displayed frame using multiscale sharpness, not this gradient.
  */
 object FocusPeaking {
 

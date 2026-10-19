@@ -13,6 +13,8 @@ import android.hardware.camera2.CameraMetadata
 data class AppSettings(
     val manual: ManualSettings = ManualSettings(),
     val burstFrames: Int = 8,
+    val manualBurst: Boolean = false,
+    val rememberedManualBurst: Boolean = false,
     /** Physical camera id of the chosen lens, or null to use the default. */
     val lensId: String? = null,
     val highlightGuard: Boolean = true,
@@ -23,13 +25,8 @@ data class AppSettings(
      * rendering. Off for the photographer who wants the space back.
      */
     val dngEnabled: Boolean = true,
-    /**
-     * The mode the viewfinder opens in. Never [CaptureMode.SUPER_RES]: that
-     * mode holds the telephoto and the ring while it is selected, and an app
-     * that reopened holding them would be reopening mid-gesture. The screen
-     * stores AUTO in its place.
-     */
-    val captureMode: CaptureMode = CaptureMode.AUTO,
+    /** PHOTO or NIGHT; retired mode names migrate to PHOTO. */
+    val captureMode: CaptureMode = CaptureMode.PHOTO,
     /** Self-timer delay in seconds; zero is off. */
     val timerSeconds: Int = 0,
     /** Which composition guides are drawn, by [dev.multiframe.camera.ui.GuideMode] name. */
@@ -43,7 +40,7 @@ data class AppSettings(
      */
     val mosaicPreset: MosaicPreset = MosaicPreset.DETAIL_BOOST,
     /**
-     * Whether the live histogram is drawn under the exposure gauge. Off by
+     * Whether the live histogram is drawn in the reserved bottom control band. Off by
      * default: the viewfinder shows the picture and the three numbers that
      * describe its exposure, and the plot is for the photographer who wants
      * to see the distribution behind them.
@@ -97,10 +94,15 @@ data class AppSettings(
         KEY_EXPOSURE_NS to manual.exposureTimeNs.toString(),
         KEY_MANUAL_FOCUS to manual.manualFocus.toString(),
         KEY_FOCUS_DIOPTRES to manual.focusDiopters.toString(),
+        "rememberedFocus" to manual.rememberedManualFocus.toString(),
         KEY_AWB to manual.awbMode.toString(),
+        KEY_MANUAL_COLOR to manual.manualColor.toString(),
+        "wbMode" to manual.whiteBalanceMode.name, "kelvin" to manual.kelvin.toString(), "tint" to manual.tint.toString(),
         KEY_EV to manual.evIndex.toString(),
         KEY_SUPPRESS_ISP to manual.suppressIspProcessing.toString(),
-        KEY_BURST to burstFrames.toString(),
+        KEY_MANUAL_BURST to manualBurst.toString(),
+        "rememberedBurst" to rememberedManualBurst.toString(),
+        KEY_BURST to FrameCountPolicy.normalize(burstFrames).toString(),
         KEY_GUARD to highlightGuard.toString(),
         KEY_DNG to dngEnabled.toString(),
         KEY_MOSAIC_PRESET to mosaicPreset.name,
@@ -120,8 +122,10 @@ data class AppSettings(
         const val KEY_MANUAL_FOCUS = "manualFocus"
         const val KEY_FOCUS_DIOPTRES = "focusDioptres"
         const val KEY_AWB = "awb"
+        const val KEY_MANUAL_COLOR = "manualColor"
         const val KEY_EV = "ev"
         const val KEY_SUPPRESS_ISP = "suppressIsp"
+        const val KEY_MANUAL_BURST = "manualBurst"
         const val KEY_BURST = "burst"
         const val KEY_LENS = "lens"
         const val KEY_GUARD = "guard"
@@ -162,23 +166,30 @@ data class AppSettings(
                     exposureTimeNs = stored[KEY_EXPOSURE_NS]?.toLongOrNull()
                         ?: defaults.manual.exposureTimeNs,
                     manualFocus = bool(KEY_MANUAL_FOCUS, defaults.manual.manualFocus),
+                    rememberedManualFocus = bool("rememberedFocus", bool(KEY_MANUAL_FOCUS, false)),
                     focusDiopters = stored[KEY_FOCUS_DIOPTRES]?.toFloatOrNull()
                         ?: defaults.manual.focusDiopters,
                     awbMode = int(KEY_AWB, defaults.manual.awbMode),
+                    manualColor = bool(KEY_MANUAL_COLOR, defaults.manual.manualColor),
+                    whiteBalanceMode = WhiteBalanceMode.entries.firstOrNull { it.name == stored["wbMode"] } ?: WhiteBalanceMode.AUTO,
+                    kelvin = int("kelvin", defaults.manual.kelvin),
+                    tint = int("tint", defaults.manual.tint).coerceIn(-100, 100),
                     evIndex = int(KEY_EV, defaults.manual.evIndex),
                     suppressIspProcessing = bool(
                         KEY_SUPPRESS_ISP, defaults.manual.suppressIspProcessing,
                     ),
                 ),
-                burstFrames = int(KEY_BURST, defaults.burstFrames).coerceIn(1, 32),
+                burstFrames = FrameCountPolicy.normalize(int(KEY_BURST, defaults.burstFrames)),
+                manualBurst = bool(KEY_MANUAL_BURST, defaults.manualBurst),
+                rememberedManualBurst = bool("rememberedBurst", bool(KEY_MANUAL_BURST, false)),
                 lensId = stored[KEY_LENS]?.takeIf { it.isNotBlank() },
                 highlightGuard = bool(KEY_GUARD, defaults.highlightGuard),
                 dngEnabled = bool(KEY_DNG, defaults.dngEnabled),
                 // An unrecognised mode name -- from an older or newer version --
                 // costs the mode rather than the whole configuration.
                 captureMode = stored[KEY_MODE]?.let { name ->
-                    CaptureMode.entries.firstOrNull { it.name == name }
-                }?.takeIf { it != CaptureMode.SUPER_RES } ?: defaults.captureMode,
+                    CaptureMode.entries.firstOrNull { it.name == (if (name == "AUTO") "PHOTO" else name) }
+                }?.takeIf { it == CaptureMode.PHOTO || it == CaptureMode.NIGHT } ?: defaults.captureMode,
                 // A self-timer that forgets is worse than none, because you
                 // find out by missing the shot. Clamped to the delays the
                 // control can actually cycle to, so a stored value from
@@ -211,8 +222,13 @@ data class AppSettings(
                 manual = manual.copy(
                     manualExposure = manual.manualExposure && caps.hasManualSensor,
                     manualFocus = manual.manualFocus && caps.hasManualFocus,
-                    awbMode = if (caps.awbModes.contains(manual.awbMode)) manual.awbMode
-                    else CameraMetadata.CONTROL_AWB_MODE_AUTO,
+                    awbMode = manual.awbMode.takeIf { it in caps.awbModes &&
+                        (it != CameraMetadata.CONTROL_AWB_MODE_AUTO || !manual.manualColor || caps.supportsAwbLock) }
+                        ?: (if (manual.manualColor) caps.awbModes.firstOrNull {
+                            it != CameraMetadata.CONTROL_AWB_MODE_AUTO
+                        } else null)
+                        ?: CameraMetadata.CONTROL_AWB_MODE_AUTO,
+                    manualColor = manual.manualColor && caps.hasManualColor,
                     evIndex = manual.effectiveEvIndex(caps),
                 ),
                 // The single-framing canvas needs a device that can hold one;

@@ -39,14 +39,20 @@ private const val TAG = "Multiframe"
  */
 class ZslBurst internal constructor(
     val frames: RingSnapshot,
-    val results: Array<TotalCaptureResult?>,
+    private val metadata: FrameMetadataStore<TotalCaptureResult>.Ticket,
 ) : AutoCloseable {
     val count: Int get() = frames.count
+    val results: List<TotalCaptureResult?> get() = metadata.values()
+
+    suspend fun awaitResults(timeoutMillis: Long = 2_000): Boolean = metadata.awaitComplete(timeoutMillis)
 
     /** Metadata of the reference (newest) frame, which the outputs are written against. */
-    val referenceResult: TotalCaptureResult? get() = results.firstOrNull { it != null }
+    val referenceResult: TotalCaptureResult? get() = results.firstOrNull()
 
-    override fun close() = frames.close()
+    override fun close() {
+        metadata.close()
+        frames.close()
+    }
 }
 
 /**
@@ -105,6 +111,7 @@ class ZslRawStream private constructor(
     private val resultStamps = LongArray(RESULT_RING)
     private var resultWrite = 0
     private val resultLock = Any()
+    private val captureMetadata = FrameMetadataStore<TotalCaptureResult>(RESULT_RING)
 
     /** Most recent low-ISO result, for [latestExposure] during DCG. */
     private var lastLowResult: TotalCaptureResult? = null
@@ -114,6 +121,9 @@ class ZslRawStream private constructor(
 
     @Volatile
     private var closed = false
+
+    @Volatile
+    private var torchEnabled = false
 
     /**
      * Whether the stream is alternating between two ISO levels.
@@ -204,8 +214,20 @@ class ZslRawStream private constructor(
     @Volatile
     private var focusRegion: SensorRect? = null
 
+    // While a tapped AE region is settling, the shutter-cap follower must not
+    // immediately take AE back from the sensor using an old whole-frame result.
+    private val tapMeteringGeneration = AtomicLong(0L)
+    @Volatile private var tapMeteringAfterFrame = 0L
+    @Volatile private var tapMeteringPending = false
+    @Volatile private var lastTapTriggerResult: TotalCaptureResult? = null
+
+    /** Last Camera2 result for a submitted tap, for focused device diagnostics. */
+    internal fun latestTapTriggerResult(): TotalCaptureResult? = lastTapTriggerResult
+
     @Volatile
     private var zoomRatio: Float = 1f
+    @Volatile private var zoomReadySince: Long = 0L
+    private var lastRawCrop: android.graphics.Rect? = null
 
     /**
      * Whether exposure and white balance are pinned.
@@ -310,7 +332,11 @@ class ZslRawStream private constructor(
      * in hand -- now, if it arrived first, or from [captureCallback] when it
      * arrives.
      */
+    private val stillInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var latestImageTimestamp = 0L
+
     internal fun onFramePushed(slot: Int, timestampNs: Long) {
+        latestImageTimestamp = timestampNs
         if (!followerActive()) return
         if (!ring.histogramSlot(slot, capBins, sensorProfile)) return
         val level = ShutterCap.meanLevel(capBins)
@@ -349,6 +375,19 @@ class ZslRawStream private constructor(
         if (closed || locked) return
         val s = lastSettings ?: return
         val c = lastCaps ?: return
+        if (tapMeteringPending) {
+            val region = focusRegion ?: return
+            val requested = result.request.get(CaptureRequest.CONTROL_AE_REGIONS)?.firstOrNull()
+            if (result.frameNumber <= tapMeteringAfterFrame || requested == null ||
+                requested.x != region.left || requested.y != region.top ||
+                requested.width != region.width || requested.height != region.height
+            ) return
+            val state = result.get(CaptureResult.CONTROL_AE_STATE)
+            if (state != null && state != CameraMetadata.CONTROL_AE_STATE_CONVERGED &&
+                state != CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED
+            ) return
+            tapMeteringPending = false
+        }
         // Under dual conversion gain only the low frames meter.
         if (dcg && result.request.tag == TAG_HIGH) return
         val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return
@@ -409,7 +448,7 @@ class ZslRawStream private constructor(
     val ringReservedBytes: Long get() = ring.reservedBytes
 
     /** Frames a shutter press could take right now. */
-    fun readyFrames(): Int = if (closed) 0 else ring.readyCount()
+    fun readyFrames(): Int = if (closed) 0 else ring.readyCountSince(zoomReadySince)
 
     /** Frames a shot holds in the ring right now, which the camera cannot write into. */
     fun lockedFrames(): Int = if (closed) 0 else ring.lockedCount()
@@ -444,15 +483,13 @@ class ZslRawStream private constructor(
      * and a scan of the ring rather than by frame size or burst length.
      */
     fun snapshot(count: Int): ZslBurst {
-        // One snapshot at a time: releasing one releases every locked slot, so
-        // overlapping bursts would free each other's frames. The UI serialises
-        // captures behind its busy flag, which is what makes that safe.
-        val frames = ring.lockNewest(count.coerceAtMost(maxBurst))
-        val results = arrayOfNulls<TotalCaptureResult>(frames.count)
-        for (i in 0 until frames.count) {
-            results[i] = findResult(frames.timestampsNs[i])
+        val frames = ring.lockNewest(count.coerceAtMost(maxBurst).coerceAtMost(readyFrames()))
+        try {
+            return ZslBurst(frames, captureMetadata.retain(frames.timestampsNs))
+        } catch (e: Exception) {
+            frames.close()
+            throw e
         }
-        return ZslBurst(frames, results)
     }
 
     /**
@@ -518,36 +555,96 @@ class ZslRawStream private constructor(
         normalisedY: Float,
         settings: ManualSettings,
         caps: CameraCapabilities,
-    ) {
-        if (closed) return
-        val orientation = caps.sensorOrientation
-        focusRegion = TouchFocus.regionAt(normalisedX, normalisedY, orientation, activeArray)
+        displayRotation: Int = 0,
+    ): Boolean {
+        if (closed || stillInFlight.get()) return false
+        val autoAf = !settings.manualFocus && !locked && caps.autoAfMode() != null &&
+            (characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0
+        val autoAe = !settings.manualExposureActive(caps) && !locked &&
+            (characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0
+        if (!autoAf && !autoAe) return false
+        val front = characteristics.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_FRONT
+        val orientation = (caps.sensorOrientation + (if (front) displayRotation else -displayRotation) + 360) % 360
+        // Zoom-ratio requests use the post-zoom coordinate system. Legacy
+        // SCALER_CROP_REGION requests retain full-array coordinates.
+        val crop = if (zoomRange != null) activeArray else
+            TouchFocus.cropForZoom(activeArray, zoomRatio, MAX_FALLBACK_ZOOM)
+        val mirrored = characteristics.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_FRONT
+        val previousRegion = focusRegion
+        focusRegion = TouchFocus.regionAt(if (mirrored) 1f - normalisedX else normalisedX, normalisedY, orientation, crop)
+        val generation = tapMeteringGeneration.incrementAndGet()
+        lastTapTriggerResult = null
+        tapMeteringPending = false
+        if (autoAe) {
+            shutterCap?.release()
+            tapMeteringAfterFrame = Long.MAX_VALUE
+            tapMeteringPending = true
+        }
         applySettings(settings, caps)
-
-        runCatching {
-            val trigger = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                addTarget(previewSurface)
-                if (config.fullResolution) {
-                    set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+        return runCatching {
+            val handler = Handler(cameraThread.looper)
+            // A previous tap may have left AF locked. CANCEL and START must be
+            // separate frames; a second START alone can leave the lens still.
+            val reset = buildRequest(settings, caps,
+                afTrigger = if (autoAf) CameraMetadata.CONTROL_AF_TRIGGER_CANCEL else null,
+                aeTrigger = if (autoAe) CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL else null)
+            val trigger = buildRequest(settings, caps,
+                afTrigger = if (autoAf) CameraMetadata.CONTROL_AF_TRIGGER_START else null,
+                aeTrigger = if (autoAe) CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_START else null)
+            session.captureBurst(listOf(reset, trigger), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                    captureCallback.onCaptureCompleted(s, request, result)
+                    if (tapMeteringGeneration.get() == generation &&
+                        (request.get(CaptureRequest.CONTROL_AF_TRIGGER) == CameraMetadata.CONTROL_AF_TRIGGER_START ||
+                            request.get(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER) == CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+                    ) lastTapTriggerResult = result
+                    if (request.get(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER) !=
+                        CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_START ||
+                        !autoAe || tapMeteringGeneration.get() != generation) return
+                    // AE precapture may internally lock exposure. Cancel the
+                    // one-shot trigger; the repeating request keeps the new
+                    // AE region and continues live metering there.
+                    runCatching {
+                        val clear = buildRequest(lastSettings ?: settings, lastCaps ?: caps,
+                            aeTrigger = CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL)
+                        s.capture(clear, object : CameraCaptureSession.CaptureCallback() {
+                            override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                                captureCallback.onCaptureCompleted(s, request, result)
+                                if (tapMeteringGeneration.get() == generation) tapMeteringAfterFrame = result.frameNumber
+                            }
+                            override fun onCaptureFailed(s: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                                captureCallback.onCaptureFailed(s, request, failure)
+                                if (tapMeteringGeneration.get() == generation) tapMeteringPending = false
+                            }
+                        }, handler)
+                    }.onFailure {
+                        if (tapMeteringGeneration.get() == generation) tapMeteringPending = false
+                        Log.w(TAG, "AE trigger reset failed", it)
+                    }
                 }
-                focusRegion?.let {
-                    val rect = arrayOf(TouchFocus.meteringRectangle(it))
-                    set(CaptureRequest.CONTROL_AF_REGIONS, rect)
-                    set(CaptureRequest.CONTROL_AE_REGIONS, rect)
+                override fun onCaptureFailed(s: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                    captureCallback.onCaptureFailed(s, request, failure)
+                    if (request.get(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER) ==
+                        CameraMetadata.CONTROL_AE_PRECAPTURE_TRIGGER_START &&
+                        tapMeteringGeneration.get() == generation) tapMeteringPending = false
+                    Log.w(TAG, "tap metering request failed: ${failure.reason}")
                 }
-                set(
-                    CaptureRequest.CONTROL_AF_TRIGGER,
-                    android.hardware.camera2.CameraMetadata.CONTROL_AF_TRIGGER_START,
-                )
-            }.build()
-            session.capture(trigger, null, Handler(cameraThread.looper))
-        }.onFailure { Log.w(TAG, "focus trigger failed", it) }
+            }, handler)
+            true
+        }.getOrElse {
+            if (tapMeteringGeneration.get() == generation) tapMeteringPending = false
+            focusRegion = previousRegion
+            applySettings(settings, caps)
+            Log.w(TAG, "tap metering submission failed", it)
+            false
+        }
     }
 
     /** Clears any tapped focus point, returning to whole-frame metering. */
     fun clearFocusPoint(settings: ManualSettings, caps: CameraCapabilities) {
         if (closed || focusRegion == null) return
         focusRegion = null
+        tapMeteringPending = false
         applySettings(settings, caps)
     }
 
@@ -648,10 +745,11 @@ class ZslRawStream private constructor(
 
     /** Digital zoom on top of whichever lens is selected. */
     fun setZoom(ratio: Float, settings: ManualSettings, caps: CameraCapabilities) {
-        if (closed) return
+        if (closed || stillInFlight.get()) return
         val max = zoomRange?.upper ?: MAX_FALLBACK_ZOOM
         val clamped = ratio.coerceIn(1f, max)
         if (kotlin.math.abs(clamped - zoomRatio) < 0.01f) return
+        zoomReadySince = Long.MAX_VALUE
         zoomRatio = clamped
         applySettings(settings, caps)
     }
@@ -671,7 +769,7 @@ class ZslRawStream private constructor(
     }
 
     /**
-     * A small luma view of the newest frame, for focus peaking.
+     * A small luma view of the newest frame, for RAW diagnostics (not live peaking).
      *
      * From the sensor rather than the preview, and read in place so it costs
      * the ring nothing and consumes no frames the shutter might want.
@@ -779,10 +877,67 @@ class ZslRawStream private constructor(
         submitRepeating(settings, caps)
     }
 
+    /** Torch belongs to this live Camera2 session, not CameraManager's out-of-session switch. */
+    fun setTorch(enabled: Boolean, caps: CameraCapabilities): Boolean {
+        if (closed || (enabled && !caps.hasFlashUnit)) return false
+        if (torchEnabled == enabled) return true
+        torchEnabled = enabled
+        val current = lastSettings
+        if (current != null) applySettings(current, lastCaps ?: caps)
+        return true
+    }
+
+    /** Long exposures are explicit still requests, never repeating preview requests. */
+    suspend fun captureStillBurst(settings: ManualSettings, caps: CameraCapabilities, count: Int): ZslCapture.Shot =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            check(!closed)
+            check(count in 1..maxBurst && lockedFrames() + count <= ringCapacity)
+            check(stillInFlight.compareAndSet(false, true)) { "Still capture already running" }
+            val completed = kotlinx.coroutines.CompletableDeferred<Long>()
+            val handler = Handler(cameraThread.looper)
+            try {
+                session.stopRepeating()
+                var finalTimestamp = 0L
+                val stillTimestamps = mutableSetOf<Long>()
+                val callback = object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                        captureCallback.onCaptureCompleted(s, request, result)
+                        finalTimestamp = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: 0L
+                        stillTimestamps.add(finalTimestamp)
+                    }
+                    override fun onCaptureSequenceCompleted(s: CameraCaptureSession, id: Int, frameNumber: Long) {
+                        completed.complete(finalTimestamp)
+                    }
+                    override fun onCaptureFailed(s: CameraCaptureSession, request: CaptureRequest, failure: android.hardware.camera2.CaptureFailure) {
+                        completed.completeExceptionally(IllegalStateException("Still capture failed: ${failure.reason}"))
+                    }
+                    override fun onCaptureSequenceAborted(s: CameraCaptureSession, id: Int) {
+                        completed.completeExceptionally(IllegalStateException("Still capture aborted"))
+                    }
+                }
+                session.captureBurst(List(count) { buildRequest(settings, caps, still = true) }, callback, handler)
+                kotlinx.coroutines.withTimeout(count * (settings.effectiveExposureTimeNs(caps) / 1_000_000L + 1000L) + 5000L) {
+                    val stamp = completed.await()
+                    check(stamp > 0)
+                    while (latestImageTimestamp < stamp) kotlinx.coroutines.delay(10)
+                    val shot = ZslCapture.take(this@ZslRawStream, count)
+                    check(shot.count == count && shot.burst.frames.timestampsNs.all { it in stillTimestamps }) { shot.close(); "Incomplete still burst" }
+                    shot
+                }
+            } catch (e: Exception) {
+                runCatching { session.abortCaptures() }
+                throw e
+            } finally {
+                stillInFlight.set(false)
+                if (!closed) submitRepeating(lastSettings ?: settings, lastCaps ?: caps)
+            }
+        }
+
     private fun submitRepeating(settings: ManualSettings, caps: CameraCapabilities) {
+        if (closed || stillInFlight.get()) return
         try {
             val low = buildRequest(settings, caps)
-            val high = if (dcg) buildHighRequest(settings, caps) else null
+            val high = if (dcg && !(settings.manualExposureActive(caps) && settings.effectiveExposureTimeNs(caps) > PreviewExposure.FRAME_NS)) buildHighRequest(settings, caps) else null
             val handler = Handler(cameraThread.looper)
             if (high != null) {
                 session.setRepeatingBurst(
@@ -794,15 +949,6 @@ class ZslRawStream private constructor(
         } catch (e: Exception) {
             Log.w(TAG, "ZSL repeating request update failed", e)
         }
-    }
-
-    private fun findResult(timestampNs: Long): TotalCaptureResult? = synchronized(resultLock) {
-        for (i in resultSlots.indices) {
-            if (resultStamps[i] == timestampNs) return resultSlots[i]
-        }
-        // Metadata for that exact frame has aged out of the ring; the newest
-        // result is a better answer than none, and is at most a few frames off.
-        return newestLocked()
     }
 
     /** The most recent result in the ring. Caller must hold [resultLock]. */
@@ -868,6 +1014,15 @@ class ZslRawStream private constructor(
             result: TotalCaptureResult,
         ) {
             val stamp = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
+            captureMetadata.put(stamp, result)
+            val actualZoom = result.request.get(CaptureRequest.CONTROL_ZOOM_RATIO)
+                ?: result.request.get(CaptureRequest.SCALER_CROP_REGION)?.let { activeArray.width.toFloat() / it.width().coerceAtLeast(1) }
+                ?: 1f
+            if (kotlin.math.abs(actualZoom - zoomRatio) < 0.01f) {
+                val rawCrop = if (android.os.Build.VERSION.SDK_INT >= 34) result.get(CaptureResult.SCALER_RAW_CROP_REGION) else null
+                if (zoomReadySince == Long.MAX_VALUE || rawCrop != lastRawCrop) zoomReadySince = stamp
+                lastRawCrop = rawCrop?.let { android.graphics.Rect(it) }
+            } else zoomReadySince = Long.MAX_VALUE
             synchronized(resultLock) {
                 resultSlots[resultWrite] = result
                 resultStamps[resultWrite] = stamp
@@ -945,6 +1100,10 @@ class ZslRawStream private constructor(
         builder.addTarget(previewSurface)
         builder.addTarget(reader.surface)
 
+        if (torchEnabled && caps.hasFlashUnit) {
+            builder.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
+        }
+
         // The un-binned readout, where the session was configured for it.
         if (config.fullResolution) {
             builder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
@@ -968,6 +1127,10 @@ class ZslRawStream private constructor(
                     android.hardware.camera2.CameraMetadata.EDGE_MODE_OFF,
                 )
             }
+        }
+
+        if (settings.manualFocus && caps.canDisableEdgeEnhancement()) {
+            builder.set(CaptureRequest.EDGE_MODE, android.hardware.camera2.CameraMetadata.EDGE_MODE_OFF)
         }
 
         val heldFocus = if (locked) lockedFocusDiopters else null
@@ -1000,6 +1163,16 @@ class ZslRawStream private constructor(
         }
 
         builder.set(CaptureRequest.CONTROL_AWB_MODE, settings.effectiveAwbMode(caps))
+        if (caps.supportsAwbLock) {
+            builder.set(CaptureRequest.CONTROL_AWB_LOCK,
+                (settings.manualColor || settings.whiteBalanceMode == WhiteBalanceMode.LOCK) && settings.effectiveAwbMode(caps) == CameraMetadata.CONTROL_AWB_MODE_AUTO)
+        }
+
+        settings.manualWhiteBalance(caps)?.let { solution ->
+            builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+            builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, solution.cameraGains())
+            builder.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, solution.cameraTransform())
+        }
 
         // Reported only when requested, and raw is uncorrected by definition.
         builder.set(
@@ -1020,8 +1193,10 @@ class ZslRawStream private constructor(
 
         focusRegion?.let {
             val rect = arrayOf(TouchFocus.meteringRectangle(it))
-            builder.set(CaptureRequest.CONTROL_AF_REGIONS, rect)
-            builder.set(CaptureRequest.CONTROL_AE_REGIONS, rect)
+            if ((characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0)
+                builder.set(CaptureRequest.CONTROL_AF_REGIONS, rect)
+            if ((characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0)
+                builder.set(CaptureRequest.CONTROL_AE_REGIONS, rect)
         }
 
         if (zoomRatio > 1.001f) {
@@ -1045,8 +1220,12 @@ class ZslRawStream private constructor(
     private fun buildRequest(
         settings: ManualSettings,
         caps: CameraCapabilities,
+        still: Boolean = false,
+        afTrigger: Int? = null,
+        aeTrigger: Int? = null,
     ): CaptureRequest {
         val builder = createBaseBuilder(settings, caps)
+        if (still) builder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CameraMetadata.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
 
         if (locked) {
             builder.set(CaptureRequest.CONTROL_AE_LOCK, true)
@@ -1065,8 +1244,11 @@ class ZslRawStream private constructor(
                 CaptureRequest.CONTROL_AE_MODE,
                 android.hardware.camera2.CameraMetadata.CONTROL_AE_MODE_OFF,
             )
-            builder.set(CaptureRequest.SENSOR_SENSITIVITY, chosenIso ?: settings.effectiveIso(caps))
-            val exposure = chosenExposure ?: settings.effectiveExposureTimeNs(caps)
+            val requestedIso = chosenIso ?: settings.effectiveIso(caps)
+            val desired = chosenExposure ?: settings.effectiveExposureTimeNs(caps)
+            val exposure = if (still) desired else PreviewExposure.time(desired)
+            val previewIso = if (still) requestedIso else PreviewExposure.iso(requestedIso, desired, caps.isoMax ?: requestedIso)
+            builder.set(CaptureRequest.SENSOR_SENSITIVITY, previewIso)
             builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
             // Frame duration must cover the exposure or the stream slows to it.
             builder.set(
@@ -1090,6 +1272,8 @@ class ZslRawStream private constructor(
         }
 
         if (dcg) builder.setTag(TAG_LOW)
+        afTrigger?.let { builder.set(CaptureRequest.CONTROL_AF_TRIGGER, it) }
+        aeTrigger?.let { builder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, it) }
         return builder.build()
     }
 
@@ -1111,7 +1295,7 @@ class ZslRawStream private constructor(
 
         if (settings.manualExposureActive(caps)) {
             baseIso = settings.effectiveIso(caps)
-            baseExposureNs = settings.effectiveExposureTimeNs(caps)
+            baseExposureNs = settings.effectiveExposureTimeNs(caps).coerceAtMost(33_333_333L)
         } else {
             if (convergedIso <= 0 || convergedExposureNs <= 0) return null
             baseIso = convergedIso
@@ -1310,11 +1494,18 @@ class ZslRawStream private constructor(
 
             val executor = Executor { cameraHandler.post(it) }
             val session = try {
-                createSession(
-                    device, listOf(previewSurface, reader.surface), executor,
-                    physicalCameraId = lens.logicalId?.let { lens.cameraId },
-                    fullResolution = config.fullResolution,
-                )
+                val useCrop = !config.fullResolution && CameraCapabilities.supportsCroppedRaw(characteristics)
+                val requested = runCatching {
+                    createSession(device, listOf(previewSurface, reader.surface), executor,
+                        physicalCameraId = lens.logicalId?.let { lens.cameraId },
+                        fullResolution = config.fullResolution, croppedRaw = useCrop)
+                }.getOrNull()
+                requested ?: if (useCrop) {
+                    Log.w(TAG, "cropped RAW combination declined; retrying the ordinary RAW stream")
+                    createSession(device, listOf(previewSurface, reader.surface), executor,
+                        physicalCameraId = lens.logicalId?.let { lens.cameraId },
+                        fullResolution = config.fullResolution)
+                } else null
             } catch (e: Exception) {
                 Log.e(TAG, "ZSL declined: session configuration failed", e)
                 device.close()
@@ -1463,9 +1654,11 @@ class ZslRawStream private constructor(
             executor: Executor,
             physicalCameraId: String? = null,
             fullResolution: Boolean = false,
+            croppedRaw: Boolean = false,
         ): CameraCaptureSession? = suspendCancellableCoroutine { cont ->
-            val outputs = surfaces.map { surface ->
+            val outputs = surfaces.mapIndexed { index, surface ->
                 OutputConfiguration(surface).apply {
+                    if (croppedRaw) setStreamUseCase(if (index == 1) CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_CROPPED_RAW.toLong() else CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_PREVIEW.toLong())
                     // Tagging the output is the only way to say which sensor a
                     // stream should come from. Without it the logical camera
                     // decides, and a raw frame could arrive from a different
@@ -1535,7 +1728,17 @@ class ZslRawStream private constructor(
                 characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
             }.getOrNull() ?: return emptyList()
             val sizes = map.getOutputSizes(ImageFormat.RAW_SENSOR) ?: return emptyList()
-            return sizes.map { size ->
+            val previews = map.getOutputSizes(SurfaceHolderClass).orEmpty()
+            return sizes.filter { raw ->
+                // Every output in this session uses maximum-resolution pixel
+                // mode. Decline a RAW size without a same-aspect preview from
+                // that map instead of constructing a stretched fallback surface.
+                previews.any { preview ->
+                    preview.width <= 1920 &&
+                        kotlin.math.abs(preview.width.toDouble() / preview.height -
+                            raw.width.toDouble() / raw.height) < 0.02
+                }
+            }.map { size ->
                 RawStreamConfig(
                     width = size.width,
                     height = size.height,

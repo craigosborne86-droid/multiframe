@@ -5,6 +5,7 @@ import android.hardware.camera2.CaptureResult
 import android.util.Log
 import kotlin.math.max
 import kotlin.math.pow
+import kotlin.math.roundToInt
 
 private const val TAG = "Multiframe"
 
@@ -34,6 +35,9 @@ private const val TAG = "Multiframe"
 object ZslCapture {
 
     private const val TILE_TARGET = 32
+
+    /** Actual merge work, including the final native resolve. */
+    data class MergeProgress(val processed: Int, val total: Int, val finished: Boolean = false)
 
     /** A burst in hand, with what the shutter press knew about it. */
     class Shot internal constructor(
@@ -88,9 +92,11 @@ object ZslCapture {
         /** Whether the merged raw is written as a DNG beside the JPEG. */
         writeDng: Boolean = true,
         onProgress: (String) -> Unit = {},
+        onMergeProgress: (MergeProgress) -> Unit = {},
+        outputTag: String = "zsl",
     ): RawBurstResult = develop(
         context, stream, take(stream, frameCount), rotationDegrees,
-        lensProfile, outputFormat, superRes, develop, writeDng, onProgress,
+        lensProfile, outputFormat, superRes, develop, writeDng, onProgress, onMergeProgress, outputTag,
     )
 
     /**
@@ -109,6 +115,8 @@ object ZslCapture {
         develop: DevelopParams = DevelopParams(),
         writeDng: Boolean = true,
         onProgress: (String) -> Unit = {},
+        onMergeProgress: (MergeProgress) -> Unit = {},
+        outputTag: String = "zsl",
     ): RawBurstResult {
         val profile = SensorProfile.from(stream.characteristics)
         // The meter's intent, for the develop to stay near: the guard's pull
@@ -130,6 +138,8 @@ object ZslCapture {
             )
         }
 
+        onMergeProgress(MergeProgress(0, burst.count))
+
         var merger: NativeMerge? = null
         // The 2x canvas, when one is built. Closed in the finally below as
         // well as on its own path, because close is idempotent and a canvas
@@ -139,6 +149,11 @@ object ZslCapture {
         var captured = 0
 
         try {
+            check(burst.awaitResults()) { "Missing exact CaptureResult; refusing metadata substitution" }
+            val results = burst.results
+            check(results.indices.all { i ->
+                results[i]?.get(CaptureResult.SENSOR_TIMESTAMP) == burst.frames.timestampsNs[i]
+            }) { "RAW/CaptureResult timestamp mismatch" }
             val t0 = System.currentTimeMillis()
             val m = NativeMerge.create(stream.config.width, stream.config.height, profile)
                 ?: run {
@@ -173,7 +188,7 @@ object ZslCapture {
             if (stream.dcg) {
                 var refIso = Int.MAX_VALUE
                 for (i in 0 until burst.count) {
-                    val iso = burst.results[i]
+                    val iso = results[i]
                         ?.get(CaptureResult.SENSOR_SENSITIVITY) ?: continue
                     if (iso < refIso) {
                         refIso = iso
@@ -184,7 +199,7 @@ object ZslCapture {
             // ISO times exposure: the frame's gathered light, which is what a
             // frame at other settings is brought to the reference's scale by.
             // The shutter cap can move the exposure as well as the gain.
-            val referenceLight = lightOf(burst.results[refIndex])
+            val referenceLight = lightOf(results[refIndex])
 
             val refBuffer = burst.frames.buffer(refIndex)
                 ?: error("reference slot unreadable")
@@ -194,6 +209,7 @@ object ZslCapture {
             // pyramid, and native builds its own.
             val refPyramid by lazy { Aligner.buildPyramid(refProxy) }
             captured = 1
+            onMergeProgress(MergeProgress(captured, burst.count))
             // The merge has its own copy of the reference; the slot goes
             // back to the ring now. Not under the 2x canvas, which reads
             // every frame again once the burst is aligned.
@@ -217,7 +233,7 @@ object ZslCapture {
                 onProgress("merging ${captured + 1}/${burst.count}")
                 val buffer = burst.frames.buffer(i) ?: continue
 
-                val frameLight = lightOf(burst.results[i])
+                val frameLight = lightOf(results[i])
                 val gainScale = if (referenceLight > 0.0 && frameLight > 0.0)
                     (frameLight / referenceLight).toFloat() else 1f
 
@@ -244,6 +260,7 @@ object ZslCapture {
                 // integer offsets only and is unchanged by this.
                 aligned.add(AlignedFrame(buffer, field.withFlatTilesBorrowed(), gainScale))
                 captured++
+                onMergeProgress(MergeProgress(captured, burst.count))
                 // Read once, given back at once: the camera refills this
                 // slot while the next frame is merged, and the next shutter
                 // press finds a burst rather than the two frames a held
@@ -282,6 +299,7 @@ object ZslCapture {
             val t1 = System.currentTimeMillis()
             val (mergedBuffer, stats) = m.finish()
             mergeMillis += System.currentTimeMillis() - t1
+            onMergeProgress(MergeProgress(captured, burst.count, finished = true))
 
             val statsAfter = stream.stats()
 
@@ -297,7 +315,7 @@ object ZslCapture {
                         mergedHeight = m.height,
                         profile = profile,
                         characteristics = stream.characteristics,
-                        captureResult = burst.results[refIndex] ?: burst.referenceResult,
+                        captureResult = results[refIndex],
                         rotationDegrees = rotationDegrees,
                         captured = captured,
                         lens = stream.lens,
@@ -340,14 +358,17 @@ object ZslCapture {
                 height = m.height,
                 profile = profile,
                 characteristics = stream.characteristics,
-                captureResult = burst.results[refIndex] ?: burst.referenceResult,
+                captureResult = results[refIndex],
                 rotationDegrees = rotationDegrees,
                 frameCount = frameCount,
                 captured = captured,
                 stats = stats,
                 captureMillis = 0,
                 mergeMillis = mergeMillis,
-                tag = "zsl",
+                // Keep the native readout's measured pixel count with both
+                // files, so the gallery can distinguish it from a 2x canvas.
+                tag = if (stream.config.fullResolution)
+                    "${stream.config.megapixels.roundToInt()}mp" else outputTag,
                 lens = stream.lens,
                 lensProfile = lensProfile,
                 outputFormat = outputFormat,
@@ -438,11 +459,15 @@ object ZslCapture {
 
         val t0 = System.currentTimeMillis()
         try {
-            canvas.setReference(refBuffer, stride)
-            for ((i, f) in aligned.withIndex()) {
-                onProgress("placing ${i + 2}/${aligned.size + 1} at 2x")
-                canvas.addFrame(f.buffer, stride, f.field, f.gainScale)
-            }
+            submitSubPixelFrames(
+                alternateCount = aligned.size,
+                setReference = { canvas.setReference(refBuffer, stride) },
+                addFrame = { i ->
+                    val f = aligned[i]
+                    onProgress("placing ${i + 2}/${aligned.size + 1} at 2x")
+                    canvas.addFrame(f.buffer, stride, f.field, f.gainScale)
+                },
+            )
             onProgress("resolving 2x canvas")
             val result = canvas.finish()
             val accumulateMillis = System.currentTimeMillis() - t0
