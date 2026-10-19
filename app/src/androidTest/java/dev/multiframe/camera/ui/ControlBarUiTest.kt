@@ -16,7 +16,7 @@ import dev.multiframe.camera.pipeline.CaptureMode
 import org.junit.Rule
 import org.junit.Test
 
-/** Active Revision 05 controls; the final ActionStrip test is compatibility-only. */
+/** Active Revision 05 controls. */
 class ControlBarUiTest {
     @get:Rule val compose = createComposeRule()
 
@@ -119,23 +119,5 @@ class ControlBarUiTest {
         compose.onNodeWithContentDescription("Open Settings: Settings")
             .assertIsDisplayed().performTouchInput { click() }
         assertThat(opened).isEqualTo(1)
-    }
-
-    @Test fun runningSuperResStopRemainsActionableButStoppingDoesNot() {
-        var phase by mutableStateOf(Phase.RUNNING)
-        val fired = mutableListOf<String>()
-        val state = ControlBarState(streamOffered = true, manualOffered = true,
-            superResOffered = true, busy = true)
-        compose.setContent {
-            ActionStrip(ControlBar.actions(state.copy(superRes = phase)), onControl = { fired += it })
-        }
-        compose.assumeRendered()
-        compose.onNodeWithContentDescription("STOP").assertIsDisplayed().performTouchInput { click() }
-        assertThat(fired).containsExactly(ControlBar.STOP)
-        phase = Phase.STOPPING
-        compose.waitForIdle()
-        compose.onNodeWithContentDescription("STOPPING").assertIsNotEnabled()
-            .performTouchInput { click() }
-        assertThat(fired).containsExactly(ControlBar.STOP)
     }
 }

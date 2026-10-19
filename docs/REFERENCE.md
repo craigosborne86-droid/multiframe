@@ -2321,17 +2321,30 @@ with it.
 
 | File | Purpose |
 |---|---|
-| `Theme.kt` | `Ink` palette, `Type` scale, `Haptics` vocabulary, `MultiframeTheme` |
-| `Gauges.kt` | `GaugeState` holder and the live readouts: exposure, histogram, focus, zoom |
-| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`; the builders `chrome` (the one opener over the picture), `pro` (the manual drawer's opener beside the shutter), `settings` (the settings screen's chips: FRAMES, TIMER, DNG, GUIDES, HISTOGRAM, INFO), `carousel` (PHOTO · NIGHT), `actions` (STOP, while a Super Res runs; nothing otherwise) |
-| `ControlChips.kt` | Composable rendering: `ChromeOpeners`, `SettingsChips`, `ModeCarousel`, `ActionStrip`, `ControlChip` |
-| `SettingsScreen.kt` | Everything set once, on a screen of its own: the settings chips and the set-once panel |
-| `ControlsPanel.kt` | `ManualPanel` -- exposure, focus, WB, in the PRO drawer over the bottom bar; `SetOncePanel` -- GUARD, LOCAL TONE, HEIF, reset, the capability summary, on the settings screen |
+| `TitaniumTokens.kt` | The one palette, type scale and geometry of the Titanium Rangefinder interface (§1.1–1.2) |
+| `Theme.kt` | `Ink`/`Type` aliases of `TitaniumTokens`, the `Haptics` vocabulary (§1.3), `MultiframeTheme` |
+| `Revision05Geometry.kt` | The fixed root allocation: image, controls and HUD regions from window geometry |
+| `Revision05Console.kt` | The console: Pro tabs, replacement panels, footer with modes and shutter; `InstrumentButton`, `Revision05TopDeck`, `Revision05ManualPanel` |
+| `MechanicalConsole.kt` | `MechanicalTurret` (the reachable focal stops) and `MechanicalShutter` |
+| `RangefinderDial.kt` | The manual dial: ISO, shutter, focus, frames, with detents and coasting |
+| `RangefinderShutter.kt` | `MechanicalClick`, the shutter sound |
+| `RangefinderDiagnostics.kt` | Overlay policy and semantics hooks the device tests read |
+| `TitaniumReticle.kt` | Focus target, tap-to-focus brackets and the loupe frame, all telemetry white |
+| `TitaniumTelemetryDeck.kt` | `TitaniumResolutionSelector`, the `12 MP | 50 MP` choice where the capability exists |
+| `WhiteBalancePanel.kt`, `CompactWhiteBalancePanel.kt` | White balance: Auto, Lock and calibrated Kelvin/tint, each only where supported |
+| `FocusAssist.kt`, `PeakingPreview.kt` | The loupe inset and the cyan peaking overlay while manual focus is engaged |
+| `PreviewRgbHistogram.kt` | The opt-in preview RGB histogram |
+| `CaptureFeedback.kt`, `MergeProcessingIndicator.kt` | Haptics after the frames are locked; the develop queue's progress |
+| `CameraViewport.kt`, `WindowLayout.kt` | The viewport fit and the layout decision for the window and the hand (§1.4) |
+| `InstrumentSurface.kt` | The milled finish drawn under the console |
+| `ControlBar.kt` | Control data model: `ControlSpec`, `ControlBarState`, `Detents`, and the settings screen's chips |
+| `SettingsScreen.kt` | Everything set once: the settings rows, `ServiceCaptureSettings`, Labs |
+| `LightboxScreen.kt`, `PhotoShare.kt` | Review with pixel-level zoom, delete, and the Sharesheet hand-off |
 | `BackNavigation.kt` | What the system back gesture does, given what is open: a pure stack, tested |
-| `Gallery.kt` | Gallery grid, review overlay with pixel-level zoom, delete confirmation; its own back handler |
-| `Onboarding.kt` | The first screen, once: the statement, the camera permission with its refusals and the settings deep-link (PRD §2.2.7) |
-| `WindowLayout.kt` | The layout decision for the window and the hand (§1.4): postures, the turn, the fit |
-| `Guides.kt` | Composition guides (rule of thirds, golden ratio, etc.), `MosaicGuidance` -- the outline, the reticle and the dots -- and `MosaicPresetPill` (`1-SHOT · 50 MP | 2×2 · 33 MP | 3×3 · 75 MP`) |
+| `Onboarding.kt` | The first screen, once: the statement and the camera permission (PRD §2.2.7) |
+| `Guides.kt` | Composition guides and the Labs mosaic guidance |
+| `Gauges.kt` | `GaugeState` and the shutter label |
+| `Revision05SweepMarker.kt` | The Labs Brenizer sweep marker |
 | `AboutSheet.kt` | About/info bottom sheet |
 
 ### Build Configuration

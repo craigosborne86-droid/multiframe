@@ -180,12 +180,8 @@ import dev.multiframe.camera.ui.CameraXPeakingPreview
 import dev.multiframe.camera.ui.FocusAssistInset
 import dev.multiframe.camera.ui.MosaicPresetPill
 import dev.multiframe.camera.ui.MosaicGuidance
-import dev.multiframe.camera.ui.ManualPanel
 import dev.multiframe.camera.ui.MechanicalConsole
-import dev.multiframe.camera.ui.RangefinderCameraFlip
-import dev.multiframe.camera.ui.RangefinderTorchToggle
 import dev.multiframe.camera.ui.MechanicalProToggle
-import dev.multiframe.camera.ui.RangefinderTimerToggle
 import dev.multiframe.camera.ui.MechanicalTurret
 import dev.multiframe.camera.ui.RangefinderTurretHeight
 import dev.multiframe.camera.ui.MechanicalModeTumbler
@@ -197,11 +193,9 @@ import dev.multiframe.camera.ui.MergeProcessingIndicator
 import dev.multiframe.camera.ui.MergeUiProgress
 import dev.multiframe.camera.ui.RangefinderOverlayPolicy
 import dev.multiframe.camera.ui.CaptureFeedback
-import dev.multiframe.camera.ui.SetOncePanel
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
-import dev.multiframe.camera.ui.ActionStrip
 import dev.multiframe.camera.ui.BackNavigation
 import dev.multiframe.camera.ui.CameraLayout
 import dev.multiframe.camera.ui.LocalHandRotation
@@ -210,11 +204,8 @@ import dev.multiframe.camera.ui.fitAspect
 import dev.multiframe.camera.ui.rotateLayout
 import dev.multiframe.camera.ui.UprightInHand
 import dev.multiframe.camera.ui.rememberCameraLayout
-import dev.multiframe.camera.ui.ChromeOpeners
-import dev.multiframe.camera.ui.ResolutionPill
 import dev.multiframe.camera.ui.ControlBar
 import dev.multiframe.camera.ui.ControlBarState
-import dev.multiframe.camera.ui.ModeCarousel
 import dev.multiframe.camera.ui.SettingsScreen
 import dev.multiframe.camera.pipeline.SuperResMachine
 import androidx.activity.compose.BackHandler
