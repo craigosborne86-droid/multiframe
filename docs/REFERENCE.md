@@ -624,7 +624,7 @@ Merged CFA (uint16, Bayer-patterned)
    lamp -- it extrapolates far outside the chart and overshoots. The tenth
    field test's rose: the sensor saw its green at three tenths of its red
    (camera space, white-balanced); the matrix put it at one tenth, purity
-   0.89, and the S-curve of step 7c took the encoded ratio from 0.28 to 0.20.
+   0.89, and the S-curve of step 8a took the encoded ratio from 0.28 to 0.20.
    That is a purity no display has and no eye saw, and the petals'
    gradations, which lived in the green, collapsed onto the gamut's edge as
    one slab of red. Compressing the purity before the tone chain -- the peak
@@ -641,8 +641,10 @@ Merged CFA (uint16, Bayer-patterned)
    the native to the Kotlin through it.
   |
   v
-7. Tone curve (global, hue-preserving)
-   Three stages applied in order:
+7. Tone curve (global, hue-preserving), on the scene-linear values
+   Three stages applied in order (the contrast curve that completes the
+   tone is step 8a, after the gamma; until 20 October this list numbered it
+   7c and the clipped-neutral recovery 7d, though the recovery ran first):
    a. Highlight roll-off: compress the *max channel* and scale all three by the
       same factor — `R' = R · T(m)/m` with `m = max(R,G,B)`. This preserves hue
       *and* saturation through the compression: no orange highlight shift, and
@@ -691,9 +693,7 @@ Merged CFA (uint16, Bayer-patterned)
       near-white — gives up colour, and a saturated red keeps its hue and
       saturation. `ToneCurveTest` renders the flower and holds it red; the
       native `Tone.h` mirrors the key.
-   c. Contrast: S-curve applied after gamma encode. Slope at mid-grey =
-      1 + 0.875 * contrast.
-   d. Sensor-clipped neutral recovery, after the linear tone chain and before
+   c. Sensor-clipped neutral recovery, after the linear tone chain and before
       gamma/contrast (`SensorSaturation.kt`, `Tone.h`): read a sliding 2×2 CFA
       cell containing R/Gr/Gb/B, or the three unbalanced canvas channels. With
       per-channel black subtraction, let m = min((raw − black)/(white − black)).
@@ -719,6 +719,12 @@ Merged CFA (uint16, Bayer-patterned)
      if linear <= 0.0031308: sRGB = linear * 12.92
      else: sRGB = 1.055 * linear^(1/2.4) - 0.055
    Via 4096-entry LUT for speed.
+  |
+  v
+8a. Contrast: S-curve on the gamma-encoded value (`ToneCurve.renderDisplay`,
+   `Tone.h` display table), with the toe. Slope at mid-grey =
+   1 + 0.875 * contrast. After the gamma because the curve is a perceptual
+   one: its pivot is mid-grey as displayed.
   |
   v
 9. Chrominance smoothing (`ChromaSmooth.kt`, `Chroma.h`)
@@ -818,7 +824,7 @@ implementations together.
 - **Before step 7 (built):** Bilateral-grid local tone mapping, §3.5: the
   pixel scaled by its neighbourhood's lift after step 6a and the exposure
   gain, before the roll-off.
-- **Step 7d (built, 19 September):** sensor-evidenced recovery replaces the
+- **Step 7c (built, 19 September):** sensor-evidenced recovery replaces the
   proposed near-clip WB fade. Fading WB alone cannot guarantee neutral after
   a non-neutral matrix and local tone; recovery therefore follows linear tone.
 
@@ -841,8 +847,10 @@ For each alt frame i (i = 1..N-1):
   gainScale_i   = (ISO_i · t_i) / (ISO_ref · t_ref)     (the light gathered)
   normalized:     n_i = black + (a_i - black) / gainScale_i
   difference:     d_i = |n_i - r|
-  noise estimate: sigma (from MAD of local neighborhood)
-  weight:         w_i = exp(-(d_i / sigma)^2)           (robustness weighting)
+  noise envelope: e = noiseTolerance * sigma(r)         (sigma per brightness bin)
+  weight:         w_i = 1                               d_i <= e
+                  w_i = (4e^2 - d_i^2) / (3 d_i^2)      e < d_i < 2e
+                  w_i = 0                               d_i >= 2e
 
 Accumulation:
   sum_weighted = r + sum(w_i * n_i)
@@ -852,6 +860,23 @@ Accumulation:
 Mean contribution: sum(w_i) / (N - 1)
   This is the "kept %" shown to the user.
 ```
+
+**The weight has finite support.** A sample inside the noise envelope is
+noise and keeps full weight; past twice the envelope it is motion and gets
+none; between, `(4e² − d²)/(3d²)` falls from one at `d = e` to zero at
+`d = 2e`, continuous at both ends. It was `exp(−(d/σ)²)`, whose tail is
+never zero: a silhouette that had moved kept a small weight in every
+alternate, and over a long burst those weights could accumulate into the
+silhouette where it had been. `sigma` is measured
+from the burst, per brightness bin -- the median absolute difference of the
+first alternate against the reference, which in a static scene is noise
+and is robust to what genuinely moved, converted to one frame's sigma
+(`BayerMerger.estimateNoise`, the same in `bayer_merge.cpp`). The rule is
+one expression, `d² <= e² ? 1 : d² < 4e² ? (4e² − d²)/(3d²) : 0`, in the
+Kotlin merge (`BayerMerger`), the scalar and NEON loops of
+`bayer_merge.cpp`, and the sub-pixel accumulation (`SubPixelAccumulator`,
+`SubPixel.cpp`), whose envelope also carries the interpolation's own
+uncertainty (§3.6.1). `MergeParityTest` holds native to Kotlin through it.
 
 **Invariants:**
 
@@ -1929,17 +1954,28 @@ For bursts taking this path, §3.1 changes:
 ```
 Merged CFA -> black -> hot pixel -> shading -> white balance
   -> DEMOSAIC                                    <-- removed
-  -> colour matrix -> tone curve -> sRGB gamma -> sharpen
+  -> colour matrix -> purity -> [local tone] -> tone curve -> clip recovery
+  -> sRGB gamma -> contrast -> chroma smooth -> defringe -> sharpen
+  -> optics -> valid-region crop
 ```
 
-becomes
+becomes, as `LinearDevelop.cpp` (and its reference `LinearDeveloper.kt`)
+runs it:
 
 ```
 Reference CFA -> hot pixel                       <-- on the reference, before placement
   -> SUB-PIXEL ACCUMULATION (this section)       <-- replaces demosaic, outputs
                                                      16-bit RGB at 2x in sensor counts
   -> black -> shading -> white balance           <-- per channel, on the canvas
-  -> colour matrix -> tone curve -> sRGB gamma -> sharpen
+  -> exposure gain                               <-- measured on the canvas, held
+                                                     near the meter's (§3.8)
+  -> colour matrix -> purity compression (6a)
+  -> [local tone, §3.5]                          <-- grid from the canvas's 2x2 means
+  -> tone curve (7a, 7b) -> clipped-neutral recovery (7c, from the canvas's
+                                                     unbalanced channels)
+  -> sRGB gamma -> contrast (8a)
+  -> chroma smooth (9) -> sharpen (11)           <-- no defringe, see below
+  -> render crop (the zoom's framing)            <-- at the encode; no optics, see below
   -> JPEG                                        <-- from native memory to the descriptor
 ```
 
@@ -1966,6 +2002,35 @@ each reference sample as it is placed, on the sensor grid. Alternates need no
 such treatment: their defects disagree with the reference and are rejected.
 Defringe is absent because the canvas was built from aligned measured samples
 rather than interpolated across colour planes, and has no demosaic fringes.
+
+**The optics correction and its crop (§3.1 step 12) are not run, and the 2x
+JPEG carries the lens's distortion and lateral aberration uncorrected.** Its
+1x sibling, and the 1x JPEG written when the canvas declines, are corrected
+and cropped, so the two can differ in geometry by the lens's peak
+displacement at the edge -- the 24mm main lens's correction moves its edges
+far enough to cost about sixty pixels a side of 4080 in the crop. It is
+omitted rather than added because it cannot be added honestly here yet:
+
+- *No lens data reaches it.* `SuperResCapture.finishOutputs` is given the
+  `Lens` for the EXIF, not the `LensProfile`, and the canvas has no
+  aberration estimate of its own; the 1x path measures one on the developed
+  bitmap.
+- *Its geometry is the sensor's doubled.* The Brown–Conrady intrinsics are in
+  active-array pixels; on the canvas the principal point and focal length
+  are doubled and offset by the half-cell of the 2x grid, and the render
+  crop that frames the zoom has to be placed before the inset and carried
+  through it, as the 1x path does (`RawBurstCapture.finishOutputs`).
+- *The memory and the gather.* The developed canvas is 150 MB of three-byte
+  RGB in an anonymous mapping, and a gather cannot run in place: it needs a
+  second mapping the size of the cropped output while the first is live,
+  doubling the develop's peak at the moment the ring may still hold frames.
+  `Optics.cpp` gathers on ARGB bitmaps; the canvas needs a three-byte variant,
+  banded so it can release its source as it goes, held to the Kotlin
+  reference by an `OpticsParityTest` of its own.
+
+That is device work: the peak has to be measured on the phone, with the ring
+full, before it ships. Until then the 2x path is the one place a lens's
+geometry reaches the JPEG, and §3.6.6 has no row for it.
 
 **The develop is native, from the canvas's pages to the file.** A 50 MP canvas
 developed to RGBA is 200 MB, which cannot be a Bitmap beside a 256 MB heap

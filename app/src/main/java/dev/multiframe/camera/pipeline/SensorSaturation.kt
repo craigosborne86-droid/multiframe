@@ -4,7 +4,7 @@ package dev.multiframe.camera.pipeline
  * All colours must approach white in sensor or balanced camera space;
  * a saturated red alone is not white.
  * Applied after the global linear tone chain so neither the meter nor local
- * compression can turn a fully clipped source grey. REFERENCE §3.1 step 7d.
+ * compression can turn a fully clipped source grey. REFERENCE §3.1 step 7c.
  */
 object SensorSaturation {
     const val START = 0.70f
