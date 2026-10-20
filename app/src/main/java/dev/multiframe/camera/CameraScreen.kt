@@ -567,7 +567,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // written one at a time on a worker while the viewfinder runs on. One
     // at a time because the merge already spans every core; two at once
     // would only contend. A shot in hand is a photograph owed, so a develop
-    // is not cancelled once begun.
+    // is not cancelled once begun. The merge and render run on Default; the
+    // DNG and JPEG writes inside them move to IO (RawBurstCapture and
+    // SuperResCapture.finishOutputs).
     val developQueue = remember { Channel<PendingShot>(Channel.UNLIMITED) }
     LaunchedEffect(Unit) {
         for (pending in developQueue) {

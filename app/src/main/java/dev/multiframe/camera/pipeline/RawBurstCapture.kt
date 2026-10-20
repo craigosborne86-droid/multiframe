@@ -14,7 +14,11 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
 import java.text.SimpleDateFormat
@@ -239,7 +243,7 @@ object RawBurstCapture {
 
     private const val TILE_TARGET = 32
 
-    internal fun finishOutputs(
+    internal suspend fun finishOutputs(
         context: Context,
         merger: NativeMerge,
         mergedBuffer: java.nio.ByteBuffer,
@@ -267,7 +271,7 @@ object RawBurstCapture {
         writeDng: Boolean = true,
         /** Stops the DNG tells a converter to add back: the guard's pull, undone. */
         baselineExposureStops: Float = 0f,
-    ): RawBurstResult {
+    ): RawBurstResult = coroutineScope {
         val stamp = stamp()
 
         // One merged raw image feeds both outputs, so the DNG and the JPEG
@@ -294,21 +298,21 @@ object RawBurstCapture {
         // From the sensor's own characterisation rather than the ISP's
         // rendering matrix, which is tuned to the manufacturer's look. Read
         // before the DNG writer starts: the DNG carries the same white balance.
+        // On the IO dispatcher: it is a file write, and the develop beside it
+        // keeps the computation's threads.
         val color = ColorProfile.calibrated(characteristics, captureResult)
-        var dngUri: android.net.Uri? = null
-        var dngMillis = 0L
         val dngWriter = if (writeDng && captureResult != null) {
-            Thread {
+            async(Dispatchers.IO) {
                 val started = System.currentTimeMillis()
-                dngUri = writeDng(
+                val uri = writeDng(
                     context, mergedBuffer.duplicate(), width, height,
                     characteristics, captureResult, dngName,
                     baselineExposureStops = baselineExposureStops,
                     whiteBalanceNeutral = ColorProfile.cameraNeutral(captureResult, color.gains),
                     rotationDegrees = rotationDegrees,
                 )
-                dngMillis = System.currentTimeMillis() - started
-            }.apply { name = "dng-write"; start() }
+                uri to System.currentTimeMillis() - started
+            }
         } else {
             null
         }
@@ -399,15 +403,19 @@ object RawBurstCapture {
         // photograph arrives in a library with no camera, no lens and no
         // exposure. The DNG needs none of it -- DngCreator has already written
         // full metadata from the same capture result.
-        val saved = ImageSaver.saveImage(
-            context, bitmap, baseName, outputFormat,
-            metadata = ExifWriter.from(
-                result = captureResult,
-                characteristics = characteristics,
-                lens = lens,
-                frames = captured,
-            ),
-        )
+        // The encode streams into the file it publishes; the calling thread
+        // waits on the encoder's workers and the storage, so it waits on IO.
+        val saved = withContext(Dispatchers.IO) {
+            ImageSaver.saveImage(
+                context, bitmap, baseName, outputFormat,
+                metadata = ExifWriter.from(
+                    result = captureResult,
+                    characteristics = characteristics,
+                    lens = lens,
+                    frames = captured,
+                ),
+            )
+        }
         val jpegOk = saved != null
         val jpegName = saved?.second ?: "$baseName.jpg"
         bitmap.recycle()
@@ -415,7 +423,7 @@ object RawBurstCapture {
         val developMillis = System.currentTimeMillis() - t3
 
         // Nothing may be reported until the DNG is actually on disk.
-        dngWriter?.join()
+        val (dngUri, dngMillis) = dngWriter?.await() ?: (null to 0L)
         val dngOk = dngUri != null
         val writeMillis = dngMillis
         val outputsMillis = System.currentTimeMillis() - t2
@@ -452,7 +460,7 @@ object RawBurstCapture {
             if (dngOk) add("DNG")
             if (jpegOk) add("JPEG")
         }
-        return RawBurstResult(
+        RawBurstResult(
             frameCount, captured, stats, captureMillis, mergeMillis,
             developMillis, writeMillis,
             if (dngOk) dngName else null,
