@@ -1658,7 +1658,8 @@ class ZslRawStream private constructor(
         ): CameraCaptureSession? = suspendCancellableCoroutine { cont ->
             val outputs = surfaces.mapIndexed { index, surface ->
                 OutputConfiguration(surface).apply {
-                    if (croppedRaw) setStreamUseCase(if (index == 1) CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_CROPPED_RAW.toLong() else CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_PREVIEW.toLong())
+                    // supportsCroppedRaw already requires API 34; the check repeats it where the constant is used.
+                    if (croppedRaw && android.os.Build.VERSION.SDK_INT >= 34) setStreamUseCase(if (index == 1) CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_CROPPED_RAW.toLong() else CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_PREVIEW.toLong())
                     // Tagging the output is the only way to say which sensor a
                     // stream should come from. Without it the logical camera
                     // decides, and a raw frame could arrive from a different

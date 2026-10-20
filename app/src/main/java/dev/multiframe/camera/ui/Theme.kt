@@ -1,5 +1,6 @@
 package dev.multiframe.camera.ui
 
+import android.os.Build
 import android.view.HapticFeedbackConstants
 import android.view.View
 import android.content.Context
@@ -129,9 +130,14 @@ object Haptics {
         record("dialDetent CLICK", played)
     }
 
-    /** Mode toggle, cycle step, lens switch — discrete mechanical detent. */
+    /** Mode toggle, cycle step, lens switch — discrete mechanical detent.
+     * SEGMENT_FREQUENT_TICK arrived in API 34; API 33 does not know the constant
+     * and plays nothing, so it gets the clock tick. */
     fun segment(view: View) =
-        view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK).also { record("segment", it) }
+        view.performHapticFeedback(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) HapticFeedbackConstants.SEGMENT_FREQUENT_TICK
+            else HapticFeedbackConstants.CLOCK_TICK,
+        ).also { record("segment", it) }
 
     /** Mosaic tile rejected, invalid action, error. */
     fun reject(view: View) =
