@@ -43,18 +43,20 @@ class SeptemberDevelopParityTest {
                 compare(ref, nat, file.name + " core")
             }
             compare(expected, actual, file.name + " develop")
+            // The reference's whole §3.1, optics and crop last; production's
+            // native develop, then Optics.applyCropped on its bitmap.
             val optics = Optics.Params(distortion = BenchLenses.modelFor(whole, w, h), lensId = null)
+            val reference = RawDeveloper.developCropped(BayerFrame(w, h, original.copyOf()), dng.sensor, dng.color,
+                params.copy(optics = optics), dng.shading)
             // One measured CA model for both implementations; this tests the gather, not estimator noise.
-            val scale = Optics.apply(expected, w, h, optics)
-            val fixed = optics.copy(aberration = scale)
-            val corrected = Optics.applyCropped(bitmap, fixed)
-            val inset = corrected.inset
+            val corrected = Optics.applyCropped(bitmap, optics.copy(aberration = reference.scale))
+            assertThat(corrected.inset).isEqualTo(reference.inset)
             val cw = corrected.bitmap.width; val ch = corrected.bitmap.height
-            val cropped = IntArray(cw * ch)
-            for (y in 0 until ch) System.arraycopy(expected, (y + inset.top) * w + inset.left, cropped, y * cw, cw)
+            assertThat(cw).isEqualTo(reference.width)
+            assertThat(ch).isEqualTo(reference.height)
             val result = IntArray(cw * ch)
             corrected.bitmap.getPixels(result, 0, cw, 0, 0, cw, ch)
-            compare(cropped, result, file.name + " optics/crop")
+            compare(reference.pixels, result, file.name + " optics/crop")
             if (corrected.bitmap !== bitmap) corrected.bitmap.recycle()
             bitmap.recycle()
         }

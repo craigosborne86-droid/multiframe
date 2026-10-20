@@ -2206,9 +2206,15 @@ The default fixture directory (when `mf.out.dir` is supplied) is
 selected. Binary fixtures remain local and are not packaged by Gradle; shared
 DNG parsing and lens records are in `src/sharedTest/java`.
 
-The bench applies `adaptedTo(dng.iso)`, develops with optics disabled, then
-runs optics **after chroma smoothing, defringe and sharpening**, followed by the
-valid-region crop, matching production CFA ordering. `mf.crop=x,y,w,h` develops
+The bench applies `adaptedTo(dng.iso)` and develops through
+`RawDeveloper.developCropped`, the reference's whole §3.1: optics **after
+chroma smoothing, defringe and sharpening**, followed by the valid-region crop
+(`Optics.applyCropped`), matching production CFA ordering. (Until 20 October
+the reference corrected the optics before the chroma smoothing, with the edge
+mirrored and nothing cropped, and the bench worked round it by developing
+without optics and correcting afterwards; the move changed none of the
+bench's 93 September JPEGs by a byte, since the bench's own order was
+already production's.) `mf.crop=x,y,w,h` develops
 the full-resolution frame first, including full-frame exposure statistics and
 shading coordinates, then extracts the inspection window from the corrected
 valid image. Coordinates are unrotated. Half-scale CFA decimation is for tone

@@ -219,4 +219,45 @@ class RawDeveloperTest {
         assertThat(g).isAtMost(64f)
         assertThat(g).isGreaterThan(0f)
     }
+    /** A textured frame: a gradient with a checker, so every neighbourhood pass has edges to act on. */
+    private fun textured(): BayerFrame = BayerFrame(w, h, ShortArray(w * h) { i ->
+        val x = i % w; val y = i / w
+        (120 + x * 6 + y * 3 + if (((x shr 2) + (y shr 2)) and 1 == 0) 160 else 0).coerceAtMost(1000).toShort()
+    })
+
+    private val barrel = Optics.Params(
+        distortion = LensDistortion.Model(fx = 60f, fy = 60f, cx = 32f, cy = 24f, k1 = .08f, skew = 0f, k2 = 0f, k3 = 0f, p1 = 0f, p2 = 0f),
+        correctAberration = false,
+    )
+
+    @Test
+    fun `the reference develop runs the optics after the sharpen and crops what they cannot read`() {
+        // REFERENCE §3.1: chroma smooth, defringe, sharpen, then the optics
+        // and the valid-region crop -- the order production runs.
+        val params = fixed.copy(defringe = Defringe.Params(enabled = true), sharpen = Sharpen.Params(amount = 1f))
+        val plain = RawDeveloper.develop(textured(), sensor, ColorProfile.NEUTRAL, params)
+        val inset = LensDistortion.validInset(barrel.distortion, w, h)
+        val expected = IntArray(inset.width(w) * inset.height(h))
+        Optics.applyReference(plain, expected, w, h, barrel.distortion, ChromaticAberration.NONE,
+            inset.width(w), inset.height(h), inset.left, inset.top)
+
+        val corrected = RawDeveloper.developCropped(textured(), sensor, ColorProfile.NEUTRAL, params.copy(optics = barrel))
+        assertThat(inset.isZero).isFalse()
+        assertThat(corrected.inset).isEqualTo(inset)
+        assertThat(corrected.width).isEqualTo(inset.width(w))
+        assertThat(corrected.height).isEqualTo(inset.height(h))
+        assertThat(corrected.pixels).isEqualTo(expected)
+    }
+
+    @Test
+    fun `without optics the cropped develop is the whole frame`() {
+        val corrected = RawDeveloper.developCropped(textured(), sensor, ColorProfile.NEUTRAL, fixed)
+        assertThat(corrected.inset.isZero).isTrue()
+        assertThat(corrected.pixels).isEqualTo(RawDeveloper.develop(textured(), sensor, ColorProfile.NEUTRAL, fixed))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `the uncropped develop refuses optics it would have to crop`() {
+        RawDeveloper.develop(textured(), sensor, ColorProfile.NEUTRAL, fixed.copy(optics = barrel))
+    }
 }

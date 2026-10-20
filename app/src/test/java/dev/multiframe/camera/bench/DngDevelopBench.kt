@@ -32,7 +32,8 @@ import javax.imageio.ImageWriteParam
  *
  * `mf.scale` is `half` (every other CFA cell, for tone) or `full`;
  * `mf.crop=x,y,w,h` develops the full-resolution frame, then crops for detail.
- * Optics follows chroma/defringe/sharpen, exactly as RawBurstCapture.
+ * The develop is RawDeveloper.developCropped, the whole of REFERENCE §3.1:
+ * optics after chroma/defringe/sharpen, then the valid-region crop, as production.
  * Crop coordinates refer to the corrected, valid, unrotated full-resolution image.
  */
 class DngDevelopBench {
@@ -61,22 +62,18 @@ class DngDevelopBench {
                 sharpen = Sharpen.Params(amount = 0.55f, threshold = 3.5f, maxShift = 28f)),
         ) + tuningVariants()
 
-        /** Production's final gather and valid-region crop, then optional inspection crop. */
-        fun finish(pixels: IntArray, width: Int, height: Int, optics: Optics.Params, crop: List<Int>? = null): Image {
-            val scale = Optics.apply(pixels, width, height, optics)
-            val model = optics.distortion?.takeIf { !it.isIdentity }
-            val inset = if (model == null && scale.isIdentity) dev.multiframe.camera.pipeline.LensDistortion.Inset.NONE
-                else dev.multiframe.camera.pipeline.LensDistortion.validInset(model, width, height, scale)
-            val validW = inset.width(width)
-            val validH = inset.height(height)
-            val box = crop ?: listOf(0, 0, validW, validH)
+        /** The inspection window of a developed, corrected and cropped picture; the whole of it without [crop]. */
+        fun inspect(picture: Optics.CorrectedPixels, crop: List<Int>? = null): Image {
+            val validW = picture.width
+            val validH = picture.height
+            val box = crop ?: return Image(picture.pixels, validW, validH)
             require(box.size == 4) { "mf.crop must be x,y,w,h" }
             val (x, y, w, h) = box
             require(x >= 0 && y >= 0 && w > 0 && h > 0 && x.toLong() + w <= validW && y.toLong() + h <= validH) {
                 "crop $box outside corrected ${validW}x${validH} frame"
             }
             val out = IntArray(w * h)
-            for (row in 0 until h) System.arraycopy(pixels, (inset.top + y + row) * width + inset.left + x, out, row * w, w)
+            for (row in 0 until h) System.arraycopy(picture.pixels, (y + row) * validW + x, out, row * w, w)
             return Image(out, w, h)
         }
 
@@ -137,15 +134,15 @@ class DngDevelopBench {
                 val stages = if (System.getProperty("mf.stages") == "true")
                     DevelopStageDumps(File(out, "${dng.name}__$variant-stages"), dng.frame.width, dng.frame.height)
                         .also { it.raw(dng.frame) } else null
-                val pixels = RawDeveloper.develop(
+                val developed = RawDeveloper.developCropped(
                     dev.multiframe.camera.pipeline.BayerFrame(dng.frame.width, dng.frame.height, dng.frame.data.copyOf()),
                     dng.sensor, dng.color,
-                    params.adaptedTo(dng.iso).copy(optics = null, meteredGain = metered), dng.shading,
+                    params.adaptedTo(dng.iso).copy(optics = optics, meteredGain = metered), dng.shading,
                     recoverSensorSaturation = variant != "beforeclip",
                     observer = stages,
                 )
                 stages?.finish()
-                val corrected = finish(pixels, dng.frame.width, dng.frame.height, optics, crop)
+                val corrected = inspect(developed, crop)
                 val ms = System.currentTimeMillis() - t0
                 val suffix = crop?.let { "_crop" } ?: if (scale == "full") "" else "_half"
                 val target = File(out, "${dng.name}__$variant$suffix.jpg")
