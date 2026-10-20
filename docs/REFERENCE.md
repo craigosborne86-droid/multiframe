@@ -844,7 +844,10 @@ reference value:  r = frame_ref[x, y]
 
 For each alt frame i (i = 1..N-1):
   aligned value:  a_i = frame_i[x + dx_i, y + dy_i]    (from alignment field)
-  gainScale_i   = (ISO_i · t_i) / (ISO_ref · t_ref)     (the light gathered)
+  gainScale_i   = (ISO_i · t_i) / (ISO_ref · t_ref)     (the light gathered; `FrameLight`,
+                                                         each frame's own result, on the
+                                                         ZSL and the sequential burst; 1
+                                                         where either is unknown)
   normalized:     n_i = black + (a_i - black) / gainScale_i
   difference:     d_i = |n_i - r|
   noise envelope: e = noiseTolerance * sigma(r)         (sigma per brightness bin)
