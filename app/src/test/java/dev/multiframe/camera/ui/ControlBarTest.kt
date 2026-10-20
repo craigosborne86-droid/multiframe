@@ -33,7 +33,7 @@ class ControlBarTest {
 
     /** Everything that is not an action, over every place it is drawn. */
     private fun toggles(state: ControlBarState) =
-        ControlBar.settings(state) + ControlBar.chrome(state) + ControlBar.carousel(state) + ControlBar.pro(state)
+        ControlBar.settings(state)
 
     @Test
     fun nothingThatTakesAPhotographAppearsAmongTheToggles() {
@@ -53,40 +53,6 @@ class ControlBarTest {
                 }
             }
         }
-    }
-
-    @Test
-    fun everyActionIsAnAction() {
-        assertThat(ControlBar.actions(fullyCapable.copy(superRes = Phase.RUNNING)).map { it.kind })
-            .containsExactly(ControlKind.Action)
-    }
-
-    /**
-     * The shutter is the only capture. `RAW xN` and `DNG` were squared chips
-     * floating over it; the DNG is a setting beside every JPEG now, and the
-     * sequential burst is a fallback with no chip of its own.
-     */
-    @Test
-    fun theShutterBarCarriesNoCaptureButTheShutter() {
-        assertThat(ControlBar.actions(fullyCapable)).isEmpty()
-        assertThat(ControlBar.actions(fullyCapable.copy(superRes = Phase.ARMED))).isEmpty()
-        assertThat(ids(ControlBar.actions(fullyCapable.copy(superRes = Phase.RUNNING)))).containsExactly(ControlBar.STOP)
-    }
-
-    // --- the chrome ---------------------------------------------------------
-
-    /**
-     * The top of the viewfinder was six settings and two openers, every one
-     * a word over the photograph. It is one opener now; the six are behind it.
-     */
-    @Test
-    fun theOnlyThingOverThePictureIsTheSettingsOpener() {
-        val chrome = ControlBar.chrome(fullyCapable)
-        assertThat(ids(chrome)).containsExactly(ControlBar.SETTINGS)
-        assertThat(chrome.single().kind).isEqualTo(ControlKind.Opener)
-        // And it is reachable whatever is happening: the settings screen's
-        // own controls are the ones that hold still.
-        assertThat(ControlBar.chrome(fullyCapable.copy(busy = true, superRes = Phase.RUNNING)).single().enabled).isTrue()
     }
 
     // --- the settings screen --------------------------------------------------
@@ -112,7 +78,7 @@ class ControlBarTest {
     fun noDeveloperSwitchIsUserFacing() {
         for (phase in Phase.entries) {
             val state = fullyCapable.copy(superRes = phase)
-            val labels = (toggles(state) + ControlBar.actions(state)).map { it.label.uppercase() }
+            val labels = toggles(state).map { it.label.uppercase() }
             for (word in listOf("ZSL", "MERGE", "A/B", "DCG", "ISP", "RAW")) {
                 assertThat(labels.none { it.contains(word) }).isTrue()
             }
@@ -128,20 +94,7 @@ class ControlBarTest {
         assertThat(ControlBar.settings(fullyCapable.copy(dngOn = false)).single { it.id == ControlBar.DNG }.label).isEqualTo("DNG OFF")
     }
 
-    // --- the manual drawer --------------------------------------------------------
-
-    @Test
-    fun theProOpenerSitsBesideTheShutterWhereTheHardwareTakesManualControl() {
-        val pro = ControlBar.pro(fullyCapable).single()
-        assertThat(pro.id).isEqualTo(ControlBar.PRO)
-        assertThat(pro.kind).isEqualTo(ControlKind.Opener)
-        assertThat(pro.active).isFalse()
-        assertThat(ControlBar.pro(fullyCapable.copy(proOpen = true)).single().active).isTrue()
-        // A camera with no manual sensor and no focusing lens has no drawer.
-        assertThat(ControlBar.pro(fullyCapable.copy(manualOffered = false))).isEmpty()
-        // And it is not over the picture: the chrome is the settings opener alone.
-        assertThat(ids(ControlBar.chrome(fullyCapable))).doesNotContain(ControlBar.PRO)
-    }
+    // --- during a capture ---------------------------------------------------------
 
     @Test
     fun captureIsNotReconfiguredWhileOneIsRunning() {
@@ -160,31 +113,7 @@ class ControlBarTest {
         }
     }
 
-    // --- the carousel -----------------------------------------------------------
-
-    @Test
-    fun theCarouselOffersOnlyPhotoAndNightOnEveryCamera() {
-        for (state in listOf(fullyCapable, bare)) {
-            assertThat(ControlBar.carousel(state).map { it.label }).containsExactly("PHOTO", "NIGHT").inOrder()
-        }
-    }
-
-    @Test
-    fun selectedModeIsTheHeavyOne() {
-        for (mode in CaptureMode.entries) {
-            assertThat(ControlBar.carousel(fullyCapable.copy(mode = mode.label)).single { it.active }.label)
-                .isEqualTo(mode.label)
-        }
-    }
-
-    @Test
-    fun theCarouselIsHeldWhileACaptureIsInFlight() {
-        for (state in listOf(fullyCapable.copy(busy = true), fullyCapable.copy(superRes = Phase.RUNNING), fullyCapable.copy(superRes = Phase.STOPPING))) {
-            assertThat(ControlBar.carousel(state).map { it.enabled }).doesNotContain(true)
-        }
-        // Armed is not in flight: the user can still change their mind.
-        assertThat(ControlBar.carousel(fullyCapable.copy(superRes = Phase.ARMED)).map { it.enabled }).doesNotContain(false)
-    }
+    // --- mode ids -----------------------------------------------------------------
 
     @Test
     fun modeIdsRoundTrip() {
@@ -193,38 +122,6 @@ class ControlBarTest {
         }
         assertThat(ControlBar.modeOf(ControlBar.FRAMES)).isNull()
         assertThat(ControlBar.modeOf("mode.TELEPATHY")).isNull()
-    }
-
-    // --- the actions ------------------------------------------------------------
-
-    /**
-     * A Super Res in progress has to be stoppable even though it makes the app
-     * busy. Without this the only way out of one is to leave the app -- which
-     * is what the first field test did.
-     */
-    @Test
-    fun aRunningSuperResCanStillBeStopped() {
-        val running = fullyCapable.copy(busy = true, superRes = Phase.RUNNING)
-        val stop = ControlBar.actions(running).single { it.id == ControlBar.STOP }
-        assertThat(stop.enabled).isTrue()
-        assertThat(stop.label).isEqualTo("STOP")
-    }
-
-    @Test
-    fun aStopAlreadyAskedForIsShownLandingAndTakesNoSecondTap() {
-        val stopping = fullyCapable.copy(busy = true, superRes = Phase.STOPPING)
-        val stop = ControlBar.actions(stopping).single { it.id == ControlBar.STOP }
-        assertThat(stop.enabled).isFalse()
-        assertThat(stop.label).isEqualTo("STOPPING")
-    }
-
-    @Test
-    fun theOnlyActionIsStopAndOnlyWhileRunning() {
-        for (phase in Phase.entries) {
-            val actions = ControlBar.actions(fullyCapable.copy(superRes = phase, busy = phase.inFlight))
-            if (phase.inFlight) assertThat(ids(actions)).containsExactly(ControlBar.STOP)
-            else assertThat(actions).isEmpty()
-        }
     }
 
     // --- readings ---------------------------------------------------------------
@@ -248,7 +145,7 @@ class ControlBarTest {
      */
     @Test
     fun noControlRepeatsItsOwnNameAsItsValue() {
-        for (spec in toggles(fullyCapable) + ControlBar.actions(fullyCapable)) {
+        for (spec in toggles(fullyCapable)) {
             assertThat(spec.value).isNotEqualTo(spec.label)
         }
     }
@@ -273,15 +170,14 @@ class ControlBarTest {
     @Test
     fun theControlsAreStableForTheSameState() {
         assertThat(toggles(fullyCapable)).isEqualTo(toggles(fullyCapable))
-        assertThat(ControlBar.actions(fullyCapable)).isEqualTo(ControlBar.actions(fullyCapable))
-    }
+            }
 
     /** Nothing anywhere is still called a mosaic or a sweep. */
     @Test
     fun theModeIsCalledSuperResEverywhere() {
         for (phase in Phase.entries) {
             val state = fullyCapable.copy(superRes = phase, mode = "SUPER RES")
-            for (spec in toggles(state) + ControlBar.actions(state)) {
+            for (spec in toggles(state)) {
                 assertThat(spec.label.lowercase()).doesNotContain("mosaic")
                 assertThat(spec.label.lowercase()).doesNotContain("sweep")
                 assertThat(spec.id.lowercase()).doesNotContain("mosaic")
@@ -291,10 +187,10 @@ class ControlBarTest {
 
     @Test
     fun burstSizesNeverExceedWhatTheRingCanHold() {
-        assertThat(ControlBar.burstStepsUpTo(10)).containsExactly(1, 2, 4, 8).inOrder()
-        assertThat(ControlBar.burstStepsUpTo(32)).containsExactly(1, 2, 4, 8, 12, 16, 24, 28).inOrder()
+        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.stepsUpTo(10)).containsExactly(1, 2, 4, 8).inOrder()
+        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.stepsUpTo(32)).containsExactly(1, 2, 4, 8, 12, 16, 24, 28).inOrder()
         // A ring too small for even the smallest step still has to offer one.
-        assertThat(ControlBar.burstStepsUpTo(0)).containsExactly(1)
+        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.stepsUpTo(0)).containsExactly(1)
     }
 
     @Test

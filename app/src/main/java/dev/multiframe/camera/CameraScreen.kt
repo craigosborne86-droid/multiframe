@@ -38,10 +38,7 @@ import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import dev.multiframe.camera.pipeline.returnToAuto
 import dev.multiframe.camera.pipeline.restoreManual
 import dev.multiframe.camera.pipeline.whiteBalanceLabel
-import dev.multiframe.camera.ui.previewRegion
 import dev.multiframe.camera.ui.capturePreviewSize
-import dev.multiframe.camera.ui.controlsRegion
-import dev.multiframe.camera.ui.centerCroppedPoint
 import dev.multiframe.camera.ui.TitaniumTokens
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -169,8 +166,6 @@ import dev.multiframe.camera.ui.Ink
 import dev.multiframe.camera.ui.Type
 import dev.multiframe.camera.ui.Haptics
 import dev.multiframe.camera.ui.GaugeState
-import dev.multiframe.camera.ui.ExposureGauge
-import dev.multiframe.camera.ui.HistogramGauge
 import dev.multiframe.camera.ui.AboutSheet
 import dev.multiframe.camera.ui.LightboxScreen
 import dev.multiframe.camera.ui.GuideMode
@@ -178,14 +173,7 @@ import dev.multiframe.camera.ui.Guides
 import dev.multiframe.camera.ui.PeakingPreview
 import dev.multiframe.camera.ui.CameraXPeakingPreview
 import dev.multiframe.camera.ui.FocusAssistInset
-import dev.multiframe.camera.ui.MosaicPresetPill
-import dev.multiframe.camera.ui.MosaicGuidance
-import dev.multiframe.camera.ui.MechanicalConsole
-import dev.multiframe.camera.ui.MechanicalProToggle
 import dev.multiframe.camera.ui.MechanicalTurret
-import dev.multiframe.camera.ui.RangefinderTurretHeight
-import dev.multiframe.camera.ui.MechanicalModeTumbler
-import dev.multiframe.camera.ui.MechanicalProDial
 import dev.multiframe.camera.ui.RangefinderTab
 import dev.multiframe.camera.ui.TitaniumReticle
 import dev.multiframe.camera.ui.MechanicalShutter
@@ -1190,7 +1178,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         val c = caps
         if (stream != null && c != null) {
             stream.setZoom(digitalZoom, settings, c)
-            gauges.setZoom(digitalZoom)
             return@LaunchedEffect
         }
         val cam = camera ?: return@LaunchedEffect
@@ -1312,7 +1299,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             val c = caps
             if (stream != null && c != null && digitalZoom != 1f) {
                 digitalZoom = 1f
-                gauges.setZoom(1f)
                 stream.setZoom(1f, settings, c)
             }
         } else {
@@ -1708,14 +1694,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     if (stream != null) {
                         digitalZoom = (digitalZoom * gestureZoom)
                             .coerceIn(1f, stream.maxZoom)
-                        gauges.setZoom(digitalZoom)
                         stream.setZoom(digitalZoom, settings, c)
                     } else {
                         camera?.let { cam ->
                             val state = cam.cameraInfo.zoomState.value ?: return@let
                             digitalZoom = (digitalZoom * gestureZoom)
                                 .coerceIn(state.minZoomRatio, state.maxZoomRatio)
-                            gauges.setZoom(digitalZoom)
                             runCatching { cam.cameraControl.setZoomRatio(digitalZoom) }
                         }
                     }
@@ -1932,11 +1916,6 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
 
         CompositionLocalProvider(LocalHandRotation provides layout.handRotation) {
-            val evLabel = caps
-                ?.takeIf { it.supportsExposureCompensation && settings.evActive }
-                ?.let { c -> "%+.1f".format(displayLocale, settings.effectiveEvIndex(c) * c.evStep) }
-            val manualExposure = caps?.let { settings.manualExposureActive(it) } == true
-            LaunchedEffect(evLabel, manualExposure) { gauges.setEv(evLabel, manualExposure) }
 
             dev.multiframe.camera.ui.Revision05TopDeck(
                 geometry = captureGeometry, histogramVisible = showHistogram,

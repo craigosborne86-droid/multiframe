@@ -8,13 +8,6 @@ import com.google.common.truth.Truth.assertThat
 import org.junit.Test
 
 class PortraitViewportMappingTest {
-    @Test fun fullWidthPhotoAndRemainingBandMeetWithoutCropping() {
-        assertThat(portraitPhotoHeight(1280, .75f)).isEqualTo(1707)
-        assertThat(portraitControlHeight(1280, 2856, .75f, 304)).isEqualTo(845)
-        assertThat(304 + portraitPhotoHeight(1280, .75f) +
-            portraitControlHeight(1280, 2856, .75f, 304)).isEqualTo(2856)
-    }
-
     @Test fun letterboxedImagePointsUseOnlyImageBounds() {
         val image = Rect(0f, 300f, 1200f, 1900f)
         assertThat(imagePoint(image, image.topLeft)).isEqualTo(Offset.Zero)

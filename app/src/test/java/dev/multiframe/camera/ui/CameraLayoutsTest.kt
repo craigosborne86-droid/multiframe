@@ -10,21 +10,6 @@ import org.junit.Test
 class CameraLayoutsTest {
 
     @Test
-    fun `tap mapping follows the visible source crop on a tall phone`() {
-        val sourceAspect = 3f / 4f
-        val viewportAspect = 9f / 20f
-        val (left, top) = centerCroppedPoint(0f, 0f, sourceAspect, viewportAspect)
-        val (middleX, middleY) = centerCroppedPoint(.5f, .5f, sourceAspect, viewportAspect)
-        val (right, bottom) = centerCroppedPoint(1f, 1f, sourceAspect, viewportAspect)
-        assertThat(left).isWithin(.0001f).of(.2f)
-        assertThat(right).isWithin(.0001f).of(.8f)
-        assertThat(top).isEqualTo(0f)
-        assertThat(bottom).isEqualTo(1f)
-        assertThat(middleX).isEqualTo(.5f)
-        assertThat(middleY).isEqualTo(.5f)
-    }
-
-    @Test
     fun `a phone upright is the portrait strip whatever its aspect`() {
         for ((w, h) in listOf(360f to 640f, 393f to 852f, 412f to 915f, 384f to 896f)) {
             val layout = CameraLayouts.decide(w, h, 0, null)

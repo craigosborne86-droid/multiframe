@@ -51,12 +51,12 @@ class HandLayoutTest {
         compose.setContent {
             Box(Modifier.fillMaxSize()) {
                 Box(Modifier.testTag("upright")) {
-                    MechanicalUtility("HISTOGRAM", "Show histogram", tag = "upright-control") {}
+                    InstrumentButton("HISTOGRAM", "Show histogram", false, true, "upright-control", {})
                 }
                 CompositionLocalProvider(LocalHandRotation provides 90) {
                     Box(Modifier.testTag("turned")) {
                         UprightInHand {
-                            MechanicalUtility("HISTOGRAM", "Show histogram", tag = "turned-control") {}
+                            InstrumentButton("HISTOGRAM", "Show histogram", false, true, "turned-control", {})
                         }
                     }
                 }
@@ -74,8 +74,8 @@ class HandLayoutTest {
         assertThat(uprightW).isGreaterThan(uprightH)
         assertThat(turnedH).isGreaterThan(turnedW)
         assertThat(turnedH).isGreaterThan(uprightH)
-        compose.onAllNodesWithContentDescription("Show histogram").assertCountEquals(2)
-        compose.onAllNodesWithContentDescription("Show histogram")[1].assertIsDisplayed()
+        compose.onAllNodesWithContentDescription("Show histogram: HISTOGRAM").assertCountEquals(2)
+        compose.onAllNodesWithContentDescription("Show histogram: HISTOGRAM")[1].assertIsDisplayed()
     }
 
     @Test

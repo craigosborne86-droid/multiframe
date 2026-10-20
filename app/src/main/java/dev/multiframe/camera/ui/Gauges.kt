@@ -27,8 +27,7 @@ import androidx.compose.ui.unit.dp
  * ### Why this is a class rather than half a dozen `var`s in the screen
  *
  * Everything here changes while the user is doing nothing at all: the sensor
- * reports a new sensitivity, the white balance drifts a hundred kelvin, the
- * histogram is resampled. Held as state in `CameraScreen`, each of those writes
+ * reports a new sensitivity, the white balance drifts a hundred kelvin. Held as state in `CameraScreen`, each of those writes
  * invalidates the whole composable — nineteen hundred lines of camera plumbing,
  * a viewfinder surface, two scrims, the control row, the lens strip and the
  * shutter — to change two digits in a corner.
@@ -64,29 +63,6 @@ class GaugeState {
     var cct by mutableIntStateOf(0)
         internal set
 
-    /** Exposure compensation, already formatted. Null when not applicable. */
-    var evLabel by mutableStateOf<String?>(null)
-        internal set
-
-    /** Whether exposure is under manual control. */
-    var manual by mutableStateOf(false)
-        internal set
-
-    /** Luma histogram, or null before one has been sampled. */
-    var histogram by mutableStateOf<IntArray?>(null)
-        internal set
-
-    /** Focus sharpness metric, shown only under manual focus. */
-    var focusScore by mutableFloatStateOf(0f)
-        internal set
-
-    /** Digital zoom factor. One when the lens is at its native framing. */
-    var digitalZoom by mutableFloatStateOf(1f)
-        internal set
-
-    /** True once there is an exposure worth showing. */
-    val hasExposure: Boolean get() = iso > 0 && exposureNs > 0L
-
     fun setExposure(iso: Int, exposureNs: Long) {
         this.iso = iso
         this.exposureNs = exposureNs
@@ -94,23 +70,6 @@ class GaugeState {
 
     fun setColourTemperature(kelvin: Int) {
         cct = kelvin
-    }
-
-    fun setEv(label: String?, manual: Boolean) {
-        evLabel = label
-        this.manual = manual
-    }
-
-    fun setHistogram(bins: IntArray?) {
-        histogram = bins
-    }
-
-    fun setFocusScore(score: Float) {
-        focusScore = score
-    }
-
-    fun setZoom(factor: Float) {
-        digitalZoom = factor
     }
 
     fun clearExposure() {
@@ -131,157 +90,4 @@ fun shutterLabel(exposureNs: Long, locale: java.util.Locale = java.util.Locale.g
     val seconds = exposureNs / 1_000_000_000.0
     return if (seconds >= 0.4) "%.1fs".format(locale, seconds)
     else "1/${(1.0 / seconds).toInt()}"
-}
-
-/**
- * The instrument bar: what the sensor is doing, right now.
- *
- * Reads [gauges] inside its own scope rather than taking the values as
- * parameters, which is the whole point of the holder — see [GaugeState]. Every
- * field it reads invalidates this row and nothing above it.
- */
-@Composable
-fun ExposureGauge(
-    gauges: GaugeState,
-    modifier: Modifier = Modifier,
-) {
-    if (!gauges.hasExposure) return
-
-    val iso = gauges.iso
-    val shutter = shutterLabel(gauges.exposureNs)
-    val cct = gauges.cct
-    val evLabel = gauges.evLabel
-    val manual = gauges.manual
-
-    Row(
-        modifier = modifier
-            // Upright in the hand, box and all: along the edge of the
-            // picture when the phone is on its side.
-            .rotateLayout(-LocalHandRotation.current)
-            .background(Ink.Readout, RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .semantics {
-                contentDescription = buildString {
-                    append("ISO $iso, shutter $shutter")
-                    if (cct > 0) append(", $cct kelvin")
-                    if (evLabel != null) append(", exposure compensation $evLabel")
-                }
-            },
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Reading("ISO", iso.toString())
-        Separator()
-        Reading(null, shutter)
-        if (cct > 0) {
-            Separator()
-            Reading(null, cct.toString(), unit = "K")
-        }
-        if (evLabel != null) {
-            Separator()
-            Reading(null, evLabel, unit = "EV")
-        }
-        if (manual) {
-            Separator()
-            Text(text = "MAN", style = Type.Indicator)
-        }
-    }
-}
-
-/** One reading: an optional label, the value in the accent, an optional unit. */
-@Composable
-private fun Reading(label: String?, value: String, unit: String? = null) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Start,
-    ) {
-        if (label != null) {
-            Text(
-                text = label,
-                style = Type.Label,
-                modifier = Modifier.padding(end = 5.dp),
-            )
-        }
-        Text(text = value, style = Type.Gauge)
-        if (unit != null) {
-            Text(
-                text = unit,
-                style = Type.Unit,
-                modifier = Modifier.padding(start = 3.dp),
-            )
-        }
-    }
-}
-
-/** The separator between readings. Indigo's dot, and for the same reason. */
-@Composable
-private fun Separator() {
-    Text(
-        text = "·",
-        style = Type.Dot,
-        modifier = Modifier.padding(horizontal = 9.dp),
-    )
-}
-
-/**
- * The histogram, on the same ground and radius as the exposure bar so the two
- * read as one instrument rather than two overlays.
- *
- * Takes the holder rather than the bins for the reason [ExposureGauge] does:
- * the array is replaced several times a second, and the read belongs in the
- * scope that draws it.
- */
-@Composable
-fun HistogramGauge(
-    gauges: GaugeState,
-    modifier: Modifier = Modifier,
-) {
-    val bins = gauges.histogram ?: return
-    Histogram(
-        bins = bins,
-        modifier = modifier
-            .size(width = 132.dp, height = 40.dp)
-            .background(Ink.Readout, RoundedCornerShape(8.dp))
-            .padding(horizontal = 7.dp, vertical = 5.dp),
-    )
-}
-
-/**
- * Sharpness under manual focus, which is the only time it answers a question
- * anyone is asking.
- */
-@Composable
-fun FocusGauge(
-    gauges: GaugeState,
-    modifier: Modifier = Modifier,
-) {
-    val score = gauges.focusScore
-    if (score <= 0f) return
-    Text(
-        text = "FOCUS %.0f".format(score * 1000),
-        style = Type.Gauge,
-        modifier = modifier
-            .rotateLayout(-LocalHandRotation.current)
-            .background(Ink.Readout, RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 5.dp)
-            .semantics { contentDescription = "Focus score %.0f".format(score * 1000) },
-    )
-}
-
-/** Digital zoom, shown only once there is any. */
-@Composable
-fun ZoomGauge(
-    gauges: GaugeState,
-    modifier: Modifier = Modifier,
-) {
-    val zoom = gauges.digitalZoom
-    if (zoom <= 1.02f) return
-    Text(
-        text = "%.1fx".format(zoom),
-        style = Type.GaugeBone,
-        modifier = modifier
-            .rotateLayout(-LocalHandRotation.current)
-            .background(Ink.Readout, RoundedCornerShape(6.dp))
-            .padding(horizontal = 10.dp, vertical = 6.dp)
-            .semantics { contentDescription = "Zoom %.1f times".format(zoom) },
-    )
 }

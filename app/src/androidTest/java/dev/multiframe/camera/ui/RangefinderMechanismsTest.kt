@@ -344,10 +344,9 @@ class RangefinderMechanismsTest {
                     focusAnchor = anchor,
                     onFocusAnchorChange = { anchor = it },
                     onFocusInsetBounds = { insetBounds = it })
-                MechanicalUtility("FOCUS ASSIST", "Toggle magnified focus assist",
-                    active = insetOpen, tag = "rangefinder-focus-assist-toggle",
-                    modifier = Modifier.align(Alignment.BottomStart),
-                    onClick = { insetOpen = !insetOpen })
+                InstrumentButton("FOCUS ASSIST", "Toggle magnified focus assist",
+                    insetOpen, true, "rangefinder-focus-assist-toggle",
+                    { insetOpen = !insetOpen }, Modifier.align(Alignment.BottomStart))
             }
         }
         val fixed = compose.onNodeWithTag("fixed-preview").fetchSemanticsNode().boundsInRoot

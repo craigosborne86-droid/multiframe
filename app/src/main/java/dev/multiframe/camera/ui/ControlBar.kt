@@ -21,14 +21,10 @@ import dev.multiframe.camera.pipeline.SuperResMachine
  * identical to one that flips a boolean, and no amount of styling fixes that
  * while both are built by the same call.
  *
- * So a control now declares what kind of thing it is, and the kinds are kept
- * apart by construction: [ControlBar.settings], [ControlBar.chrome] and
- * [ControlBar.carousel] cannot return an [ControlKind.Action] and
- * [ControlBar.actions] cannot return anything else. The settings screen
- * renders `settings`; the top of the viewfinder renders `chrome`; the row
- * under the shutter renders `carousel`; the strip beside the shutter renders
- * `actions`. An action cannot appear among the toggles by mistake, because
- * the function that builds the toggles cannot express one.
+ * So a control now declares what kind of thing it is. [ControlBar.settings]
+ * builds the settings screen's chips and cannot return an
+ * [ControlKind.Action]; the console that replaced the chip rails draws its
+ * own controls (`Revision05Console`).
  *
  * ### Why it is here rather than in the screen
  *
@@ -127,55 +123,6 @@ data class ControlBarState(
     val superRes: SuperResMachine.Phase = SuperResMachine.Phase.IDLE,
 )
 
-/**
- * Where the dials have stops.
- *
- * A slider on a touchscreen has no mechanical detents, so the value under the
- * finger is something you read rather than something you feel. These are the
- * positions worth feeling: the ISO stops a photographer already thinks in, and
- * zero on the exposure compensation scale, which is the one value on that
- * control anybody navigates back to.
- *
- * Here rather than in the panel that draws them for the reason the rest of this
- * file exists: it is arithmetic, and arithmetic can be tested without a phone.
- */
-object Detents {
-
-    /** The full-stop ISO series, which is what an ISO dial has always clicked at. */
-    val ISO_STOPS = listOf(
-        50f, 100f, 200f, 400f, 800f, 1600f, 3200f, 6400f, 12800f, 25600f,
-    )
-
-    /** How near counts as arrived, as a fraction of the distance to the next stop. */
-    const val TOLERANCE = 0.06f
-
-    /** The ISO stops the hardware can actually reach. */
-    fun isoStops(min: Int, max: Int): List<Float> =
-        ISO_STOPS.filter { it >= min && it <= max }
-
-    /**
-     * Exposure compensation, which has exactly one stop: zero.
-     *
-     * The index scale is the camera's own, so zero index is zero compensation
-     * whatever the step size happens to be.
-     */
-    fun evStops(): List<Float> = listOf(0f)
-
-    /**
-     * The stop [value] is sitting at, or null if it is between two.
-     *
-     * Proportional rather than absolute tolerance, because the ISO series is
-     * geometric: 6 units either side of 100 is a different part of the scale
-     * from 6 units either side of 6400, and an absolute window would make the
-     * bottom of the dial one long detent and the top of it frictionless.
-     */
-    fun nearest(value: Float, stops: List<Float>): Float? =
-        stops.firstOrNull { stop ->
-            val window = (kotlin.math.abs(stop) * TOLERANCE).coerceAtLeast(0.5f)
-            kotlin.math.abs(value - stop) <= window
-        }
-}
-
 object ControlBar {
 
     const val FRAMES = "frames"
@@ -196,12 +143,6 @@ object ControlBar {
         if (!id.startsWith(MODE_PREFIX)) null
         else CaptureMode.entries.firstOrNull { it.name == id.removePrefix(MODE_PREFIX) }
 
-    /** Burst sizes offered, filtered against what the ring can actually hold. */
-    val BURST_STEPS = FrameCountPolicy.STEPS
-
-    fun burstStepsUpTo(ceiling: Int): List<Int> =
-        FrameCountPolicy.stepsUpTo(ceiling)
-
     /** The next burst size, wrapping. */
     fun nextBurst(current: Int, ceiling: Int): Int {
         return FrameCountPolicy.next(current, ceiling)
@@ -212,47 +153,6 @@ object ControlBar {
         0 -> 3
         3 -> 10
         else -> 0
-    }
-
-    /**
-     * What sits over the picture: one opener, and nothing else.
-     *
-     * The row was six settings and two openers. Every one of them was a word
-     * on top of the photograph the user was trying to look at, and a
-     * photographer changes none of them while composing -- a frame count, a
-     * self-timer, a grid overlay are set once. They are behind the opener
-     * now, in [settings], and the top of the viewfinder is the exposure
-     * gauge and this.
-     */
-    fun chrome(state: ControlBarState): List<ControlSpec> = listOf(
-        ControlSpec(
-            id = SETTINGS,
-            label = "SETTINGS",
-            kind = ControlKind.Opener,
-            active = state.settingsOpen,
-            // Always reachable: the settings screen's own controls are the
-            // ones that hold still during a capture.
-            enabled = true,
-        ),
-    )
-
-    /**
-     * The manual opener beside the shutter: PRO slides the manual drawer up
-     * over the bottom bar, with the viewfinder left whole above it. Offered
-     * only where the sensor takes a manual exposure or the lens a manual
-     * focus; a camera with neither has nothing to draw in the drawer.
-     */
-    fun pro(state: ControlBarState): List<ControlSpec> = buildList {
-        if (!state.manualOffered) return@buildList
-        add(
-            ControlSpec(
-                id = PRO,
-                label = "PRO",
-                kind = ControlKind.Opener,
-                active = state.proOpen,
-                enabled = true,
-            )
-        )
     }
 
     /**
@@ -332,50 +232,5 @@ object ControlBar {
                 enabled = true,
             )
         )
-    }
-
-    /** PHOTO and NIGHT remain separate from automatic zoom reconstruction and Labs. */
-    fun carousel(state: ControlBarState): List<ControlSpec> = buildList {
-        // Switching mode reconfigures the capture; not while one is in flight.
-        val settled = !state.busy && state.superRes.controlsEnabled
-        fun mode(m: CaptureMode, value: String? = null) = ControlSpec(
-            id = modeId(m),
-            label = m.label,
-            kind = ControlKind.Mode,
-            value = value,
-            active = state.mode == m.label,
-            enabled = settled,
-        )
-        add(mode(CaptureMode.PHOTO))
-        add(mode(CaptureMode.NIGHT))
-    }
-
-    /**
-     * The strip beside the shutter: the one thing that stops a capture.
-     *
-     * The shutter is the only capture. `RAW xN` and `DNG` were actions here
-     * once -- the sequential path's burst and a single DNG -- and they were
-     * two squared chips floating over the shutter for a photographer who
-     * takes photographs with the shutter; the DNG is a setting now, written
-     * beside every JPEG, and the sequential path is the fallback for a phone
-     * without a ring. What is left is STOP, while a Super Res runs, and
-     * nothing otherwise.
-     */
-    fun actions(state: ControlBarState): List<ControlSpec> = buildList {
-        val phase = state.superRes
-        if (phase.inFlight) {
-            // Stopping must stay available while a capture runs, or the only
-            // way out is to leave the app. Once asked for, it is landing, and
-            // the chip says so rather than taking a second tap.
-            add(
-                ControlSpec(
-                    id = STOP,
-                    label = if (phase == SuperResMachine.Phase.STOPPING) "STOPPING" else "STOP",
-                    kind = ControlKind.Action,
-                    active = true,
-                    enabled = phase == SuperResMachine.Phase.RUNNING,
-                )
-            )
-        }
     }
 }

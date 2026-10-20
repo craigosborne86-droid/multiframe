@@ -40,8 +40,6 @@ object TitaniumTokens {
     val CaptureStatusHeight = 24.dp
     val FocusInsetWidth = 128.dp
     val FocusInsetHeight = 96.dp
-    val TurretHeight = 45.dp
-    val ConsoleHeight = 322.dp
     // The specified Titanium horizon tolerance, shared by the reticle and HUD.
     const val LevelToleranceDegrees = 0.5f
 
