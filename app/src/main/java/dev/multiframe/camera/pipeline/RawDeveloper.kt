@@ -139,6 +139,14 @@ data class DevelopParams(
      */
     val purityThreshold: Float = PURITY_THRESHOLD,
     val purityCeiling: Float = PURITY_CEILING,
+    /**
+     * The HDR rendition's white over SDR white, in linear light; one or
+     * under writes no HDR rendition. Read by neither develop: the SDR
+     * picture is the same whatever this is. The capture measures a gain map
+     * from it beside the develop -- [HdrGainMap], REFERENCE §3.1 step 6b --
+     * and the HDR OUTPUT setting turns it on at [HDR_HEADROOM].
+     */
+    val hdrHeadroom: Float = 0f,
 ) {
     /**
      * These parameters with the exposure resolved to [gain], and the
@@ -187,6 +195,14 @@ data class DevelopParams(
          */
         const val PURITY_THRESHOLD = 0.7f
         const val PURITY_CEILING = 0.85f
+
+        /**
+         * Two stops: the HDR rendition's white at four times SDR white. The
+         * develop's shoulder white -- the sensor's clip after the gain -- is
+         * held at or under [SHOULDER_WHITE_MAX], which is the same four, so
+         * the HDR rendition can show every highlight the sensor kept.
+         */
+        const val HDR_HEADROOM = 4.0f
 
         /**
          * How far the automatic gain may fall under, or rise over, the
@@ -329,7 +345,7 @@ object RawDeveloper {
     private const val MIN_AUTO_GAIN = 0.25f
     private const val MAX_AUTO_GAIN = 64f
 
-    private fun resolveGain(
+    internal fun resolveGain(
         frame: BayerFrame,
         sensor: SensorProfile,
         color: ColorProfile,

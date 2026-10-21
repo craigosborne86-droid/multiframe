@@ -296,4 +296,20 @@ class AppSettingsTest {
         val ultra = caps.copy(ultraHighResolution = true, fullResolutionRawWidth = 8160, fullResolutionRawHeight = 6144)
         if (ultra.supportsFullResolution) assertThat(on.reconcile(ultra, lenses).fullResolution).isTrue()
     }
+
+    @Test
+    fun `hdr output is off out of the box, survives a round trip, and is dropped below API 34`() {
+        assertThat(AppSettings().hdrOutput).isFalse()
+        assertThat(AppSettings().developParams.hdrHeadroom).isEqualTo(0f)
+        val on = AppSettings(hdrOutput = true)
+        assertThat(AppSettings.decode(on.encode()).hdrOutput).isTrue()
+        assertThat(AppSettings.decode(AppSettings().encode()).hdrOutput).isFalse()
+        assertThat(on.developParams.hdrHeadroom).isEqualTo(DevelopParams.HDR_HEADROOM)
+        // Two stops: the HDR white at four times SDR white.
+        assertThat(DevelopParams.HDR_HEADROOM).isEqualTo(4f)
+        assertThat(caps.copy(platformSdk = 33).supportsHdrOutput).isFalse()
+        assertThat(on.reconcile(caps.copy(platformSdk = 33), lenses).hdrOutput).isFalse()
+        assertThat(caps.copy(platformSdk = 34).supportsHdrOutput).isTrue()
+        assertThat(on.reconcile(caps.copy(platformSdk = 34), lenses).hdrOutput).isTrue()
+    }
 }

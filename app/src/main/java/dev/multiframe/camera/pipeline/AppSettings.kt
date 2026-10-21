@@ -71,6 +71,14 @@ data class AppSettings(
      * chip is the switch, and is absent on a sensor without the mode.
      */
     val fullResolution: Boolean = false,
+    /**
+     * Whether a JPEG carries its HDR rendition as an Ultra HDR gain map
+     * ([HdrGainMap]): highlights up to two stops over SDR white on a screen
+     * that has the headroom, today's picture on one that has not. Off by
+     * default; the row is absent below API 34
+     * ([CameraCapabilities.supportsHdrOutput]). HEIF is written without one.
+     */
+    val hdrOutput: Boolean = false,
 ) {
 
     /** The develop's parameters as these settings ask for them. */
@@ -78,6 +86,7 @@ data class AppSettings(
         get() = DevelopParams(
             localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
             shadowLift = if (localTone) DevelopParams.SHADOW_LIFT_ON else 0f,
+            hdrHeadroom = if (hdrOutput) DevelopParams.HDR_HEADROOM else 0f,
         )
 
     /**
@@ -113,6 +122,7 @@ data class AppSettings(
         KEY_FORMAT to outputFormat.name,
         KEY_HISTOGRAM to histogram.toString(),
         KEY_FULL_RESOLUTION to fullResolution.toString(),
+        KEY_HDR_OUTPUT to hdrOutput.toString(),
     ) + (lensId?.let { mapOf(KEY_LENS to it) } ?: emptyMap())
 
     companion object {
@@ -138,6 +148,7 @@ data class AppSettings(
         const val KEY_FORMAT = "outputFormat"
         const val KEY_HISTOGRAM = "histogram"
         const val KEY_FULL_RESOLUTION = "fullResolution"
+        const val KEY_HDR_OUTPUT = "hdrOutput"
 
         private const val PREFERENCES = "multiframe.settings"
 
@@ -204,6 +215,7 @@ data class AppSettings(
                 outputFormat = OutputFormat.named(stored[KEY_FORMAT]),
                 histogram = bool(KEY_HISTOGRAM, defaults.histogram),
                 fullResolution = bool(KEY_FULL_RESOLUTION, defaults.fullResolution),
+                hdrOutput = bool(KEY_HDR_OUTPUT, defaults.hdrOutput),
             )
         }
 
@@ -238,6 +250,8 @@ data class AppSettings(
                 } else mosaicPreset,
                 // A sensor without the un-binned mode has no 50 MP to ask for.
                 fullResolution = fullResolution && caps.supportsFullResolution,
+                // A platform without Gainmap has no HDR rendition to write.
+                hdrOutput = hdrOutput && caps.supportsHdrOutput,
             )
         }
 

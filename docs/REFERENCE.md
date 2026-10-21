@@ -217,7 +217,7 @@ object Haptics {
 | Shutter pressed | `onClick` on shutter button | `Haptics.mechanicalRelease` (two short impacts, `VibratorManager` waveform) | A photograph was taken. It fires only after the frames are locked (ZSL, `CaptureFeedback.afterSync`) or captured (sequential, `CaptureFeedback.afterSuspending`), never during them. The press itself is silent: the half-press haptic was removed because the ring is recording while the finger is down |
 | Shutter refused | Ring full, ring not refilled, or fewer frames ready than the press asked for | `Haptics.reject` | Nothing was taken; the status says so. A press never takes a short burst |
 | Self-timer tick | Each countdown second but the last | `Haptics.tick` | Light metronome, not distracting. The last second is silent: the frames the timer locks are exposed in it |
-| Mode toggle | GUARD, LOCAL TONE, HISTOGRAM, DNG, Labs Brenizer 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
+| Mode toggle | GUARD, LOCAL TONE, HDR OUTPUT, HISTOGRAM, DNG, Labs Brenizer 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
 | Cycle value | FRAMES, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
 | Mode selected | PHOTO or NIGHT chosen in the carousel | `Haptics.segment` | A dial detent; arming Brenizer Sweep also switches the lens, which has the same detent |
 | Super Res stopped | STOP tapped, or the back gesture while running | `Haptics.segment` | Acknowledging the request; the stop itself lands a moment later and is not felt |
@@ -642,6 +642,70 @@ Merged CFA (uint16, Bayer-patterned)
    the native to the Kotlin through it.
   |
   v
+6b. HDR branch -- only with HDR OUTPUT on, API 34+, JPEG (`HdrGainMap.kt`,
+   `UltraHdr.kt`). Not a step of the SDR chain: a second tone mapping of the
+   same linear values, read off beside it. The SDR picture is steps 1-12 as
+   they are, to the last code, and the file carries the ratio of the two
+   renditions as an ISO 21496-1 / Ultra HDR gain map.
+     S(m) = the step-7a shoulder: display white 1, white = gain.
+     H(m) = the same shoulder with its display white at P = 4 (two stops,
+            `DevelopParams.HDR_HEADROOM`): identity to the knee; past it,
+            min(m, white) where white <= P, the logarithm of 7a to P at
+            white where white > P.
+     ratio = clamp(H(m) / S(m), 1, P),  m = max(R, G, B) after 6a.
+   Map: one ratio per 4x4 block, log2(ratio) / log2(max ratio) in 8 bits,
+   ratio min 1, gamma 1, no offsets, full HDR at a display ratio of the max.
+   Position: after 6a, because the ratio is a function of the scene peak
+   that 7a reads, and the peak is only defined once the matrix and the
+   purity compression have made it -- before the matrix there is no
+   display-referred peak, and a ratio taken after step 8 would be a ratio
+   of gamma-encoded, contrast-curved, 8-bit values, which near white hold a
+   stop of scene in a handful of codes. Beside steps 7-12 rather than in
+   them, because every one of them is either the identity on the ratio or
+   outside its reach:
+   - [local tone] runs before both shoulders, so the ratio is read after
+     it: the branch builds the develop's grid (every 2x2 cell's luminance,
+     as `BilateralGrid.fromFrame`) and scales each block by its gain. It is
+     not the identity above the knee: its compression about the mean pulls
+     a bright neighbourhood down, and a map that left it out read 0.1-0.3
+     stops too bright on the desk (median over the highlight blocks of the
+     dog, the street and the backlit tower).
+   - 7a is hue-preserving: both shoulders scale R, G, B by one factor of m,
+     so the renditions differ by one factor per pixel and the map is
+     single-channel by construction. 7b mixes toward the peak by an amount
+     keyed on the scene luminance, the same in both, and a mix commutes
+     with a scale. 7c takes a clipped pixel to white in SDR; its ratio is
+     white / 1 and the HDR rendition is the clip at `white` times SDR white.
+   - 8 and 8a act on the SDR picture the platform multiplies; the HDR
+     rendition is that picture times the ratio, in linear light.
+   - 9-11 are local and luminance-preserving to within their own
+     tolerances; the map is a quarter of the picture's size and does not
+     resolve them.
+   - 12, and the framing crop and the turn after the develop, move pixels:
+     each gain-map pixel is carried back through the turn, the framing,
+     the inset and the lens model (`HdrGainMap.Placement`) to the sensor
+     block it was measured on.
+   Why identity past the knee and not a curve that fills the headroom: the
+   develop holds white = gain at or under 4, so the scene's clip is always
+   within P and the relaxed shoulder has nothing to compress. Stretching
+   the knee-to-clip range to reach P regardless would put a slope over
+   one at the knee -- a crease in every gradient that crosses it -- and a
+   contrast the scene did not have. The HDR rendition of a daylight frame
+   (gain about two) therefore reaches one stop over SDR white at the clip;
+   of a night frame (gain four), two. The ratio is floored at one: with a
+   white under nominal the SDR shoulder expands, and the HDR rendition is
+   not made darker than the picture.
+   Measured from the merged CFA, not the picture: each 4x4 block's sites
+   through steps 1, 3 and 4 (each site's samples averaged with its largest
+   left out, so a hot pixel at the clip cannot read as a highlight), then
+   6 with the develop's gain, 6a, and the local operator at the block's
+   centre. Step 2 and the demosaic are
+   approximated by the block mean; the shading is read at the block
+   centre. `HdrGainMapTest` holds the ratio, the 2-stop clamp, the
+   placement through each turn and the SDR picture unchanged;
+   `UltraHdrBench` writes the files on the desk.
+  |
+  v
 7. Tone curve (global, hue-preserving), on the scene-linear values
    Three stages applied in order (the contrast curve that completes the
    tone is step 8a, after the gamma; until 20 October this list numbered it
@@ -784,7 +848,8 @@ Merged CFA (uint16, Bayer-patterned)
 12. Fused optics gather (distortion and lateral CA), then valid-region crop
   |
   v
-Output: 8-bit sRGB ARGB int array -> JPEG via libjpeg-turbo
+Output: 8-bit sRGB ARGB int array -> JPEG via libjpeg-turbo, or with the
+        6b gain map -> Ultra HDR JPEG via the platform's encoder
 ```
 
 **The optics, and the border.** The geometric corrections -- Brown–Conrady
@@ -2365,7 +2430,7 @@ with it.
 | **Capture & ZSL** | `ZslRawStream.kt`, `ZslCapture.kt`, `ZslPolicy.kt`, `RawRing.kt`, `BurstBuffer.kt`, `RawCapture.kt`, `RawBurstCapture.kt` |
 | **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt` |
 | **2x canvas** | `SubPixelAccumulator.kt` (reference), `NativeSubPixel.kt` (strips, and the develop entry points), `SubPixelCoverage.kt` (the prediction and its bounds), `LinearDeveloper.kt` (the linear develop, reference), `SuperResCapture.kt` (the outputs) |
-| **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `BilateralGrid.kt` (local tone, reference), `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
+| **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `BilateralGrid.kt` (local tone, reference), `HdrGainMap.kt` (the HDR rendition's gain map, §3.1 step 6b), `UltraHdr.kt` (its platform encode), `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
 | **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` (reads a DNG's colour tags; places the `BaselineExposure` the guard's pull and the `AsShotNeutral` the develop's white balance are written into, §3.7, §3.8) |
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt`, `ShutterCap.kt` (shutter priority under the meter, §3.7) |
 | **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `LensProfile.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |

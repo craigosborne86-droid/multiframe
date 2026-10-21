@@ -635,6 +635,13 @@ A dedicated screen accessible from the last-shot thumbnail in the viewfinder.
 - Sharing defaults to JPEG. A "Share DNG" option is available in the detail view.
 - Storage location: `MediaStore.Images` via `ContentResolver`. No direct file
   access.
+- HDR OUTPUT (Settings, API 34+ only, off by default): the JPEG carries an
+  ISO 21496-1 / Ultra HDR gain map. Its SDR picture is the ordinary
+  rendering, unchanged; on a screen with headroom the highlights the sensor
+  kept are shown up to two stops over SDR white, and never brighter than
+  the scene's own ratio to its midtones (REFERENCE §3.1 step 6b). This is
+  not HDR rendering in the sense of §1.3: nothing is lifted or flattened,
+  and no tone is moved under the knee. HEIF and the DNG are unchanged.
 
 ---
 
