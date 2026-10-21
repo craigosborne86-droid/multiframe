@@ -228,4 +228,28 @@ class SubPixelRefinementTest {
         assertThat((field.dx[j] + field.fracDx[j]).toDouble()).isWithin(0.05).of(0.3)
         assertThat((field.dy[j] + field.fracDy[j]).toDouble()).isWithin(0.05).of(0.4)
     }
+
+    /**
+     * A subject covering a third of the frame, moved eight pixels against the
+     * frame's fraction: the frame's motion is still the frame's. A plain
+     * least-squares start is dragged pixels toward the subject and the edges
+     * near it are then re-seeded to nowhere.
+     */
+    @Test
+    fun aLargeSubjectDoesNotDragTheFramesMotion() {
+        val scene = Scene(24)
+        val subject = Scene(25)
+        val noise = java.util.Random(7)
+        fun frame(ox: Double, oy: Double, mx: Double, my: Double) = ByteArray(width * height) { i ->
+            val x = (i % width).toDouble(); val y = (i / width).toDouble()
+            val v = if (x < 96.0) subject.at(x - mx, y - my) else scene.at(x - ox, y - oy)
+            (v + noise.nextGaussian()).roundToInt().coerceIn(0, 255).toByte()
+        }
+        val field = align(frame(0.0, 0.0, 0.0, 0.0), frame(0.3, 0.4, 8.0, 0.0))
+        for (ty in 1 until tilesY - 1) for (tx in 4 until tilesX - 1) {
+            val i = ty * tilesX + tx
+            assertThat((field.dx[i] + field.fracDx[i]).toDouble()).isWithin(0.1).of(0.3)
+            assertThat((field.dy[i] + field.fracDy[i]).toDouble()).isWithin(0.1).of(0.4)
+        }
+    }
 }

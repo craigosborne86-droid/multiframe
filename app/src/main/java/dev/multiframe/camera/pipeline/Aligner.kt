@@ -606,6 +606,9 @@ object Aligner {
     /** A tile further than this from the frame's motion, proxy pixels, is tried from the frame's motion. */
     const val CONSENSUS_DISAGREEMENT = 0.5
 
+    /** Tiles further than this from the median translation, proxy pixels, are not in the first fit: room for a rotation, none for a lost tile. */
+    const val CONSENSUS_GATE = 4.0
+
     /** A tile further than this from a fit of the frame's motion is not part of the next fit. */
     const val CONSENSUS_TRIM = 1.0
 
@@ -626,9 +629,12 @@ object Aligner {
      * ### What it does
      *
      * A hand-held burst moves as a frame: translation and a little rotation.
-     * The tiles fitted on both axes are fitted in turn with an affine motion,
-     * total displacement against tile centre, by least squares, twice
-     * trimmed of tiles more than [CONSENSUS_TRIM] from the fit. A tile more
+     * The tiles fitted on both axes, starting from those within
+     * [CONSENSUS_GATE] of their median translation, are fitted with an
+     * affine motion, total displacement against tile centre, by least
+     * squares, twice trimmed of tiles more than [CONSENSUS_TRIM] from the
+     * fit. Fewer than a quarter of them left, and the frame has no one
+     * motion to offer, and nothing is changed. A tile more
      * than [CONSENSUS_DISAGREEMENT] from that motion, and every tile fitted
      * as an edge -- whose place along itself its own fit left at the
      * winner's integer -- is refined again from
@@ -675,7 +681,18 @@ object Aligner {
         val cy = DoubleArray(count) { (it / tilesX) * tileH + tileH / 2.0 }
         val totalX = DoubleArray(count) { dx[it] + fracDx[it].toDouble() }
         val totalY = DoubleArray(count) { dy[it] + fracDy[it].toDouble() }
-        val keep = BooleanArray(count) { mode[it] == LK_BOTH }
+        // A robust start: the median translation of the tiles fitted on both
+        // axes, and only those within [CONSENSUS_GATE] of it. A least-squares
+        // fit to all of them is dragged by any tile the search lost by a
+        // hundred pixels -- a television, a fence -- and a photograph has
+        // them; a tripod burst's motion came out sixteen pixels.
+        val both = (0 until count).filter { mode[it] == LK_BOTH }
+        if (both.size < CONSENSUS_MIN_TILES) return
+        val startX = consensusMedian(both.map { totalX[it] })
+        val startY = consensusMedian(both.map { totalY[it] })
+        val keep = BooleanArray(count) {
+            mode[it] == LK_BOTH && kotlin.math.hypot(totalX[it] - startX, totalY[it] - startY) <= CONSENSUS_GATE
+        }
         var motion: DoubleArray? = null
         for (pass in 0..2) {
             motion = affineMotion(cx, cy, totalX, totalY, keep) ?: return
@@ -685,6 +702,8 @@ object Aligner {
                 keep[i] = kotlin.math.hypot(totalX[i] - motionX(motion, cx[i], cy[i]), totalY[i] - motionY(motion, cx[i], cy[i])) <= CONSENSUS_TRIM
             }
         }
+        // A motion most of the frame does not share is not the frame's.
+        if (keep.count { it } * 4 < both.size) return
         val m = motion ?: return
         val fit = LkFit()
         for (i in 0 until count) {
@@ -702,6 +721,12 @@ object Aligner {
             fracDx[i] = (px + fit.fx - dx[i]).toFloat()
             fracDy[i] = (py + fit.fy - dy[i]).toFloat()
         }
+    }
+
+    private fun consensusMedian(values: List<Double>): Double {
+        val sorted = values.sorted()
+        val n = sorted.size
+        return if (n % 2 == 1) sorted[n / 2] else 0.5 * (sorted[n / 2 - 1] + sorted[n / 2])
     }
 
     private fun motionX(m: DoubleArray, x: Double, y: Double) = m[0] + m[1] * (x - m[6]) + m[2] * (y - m[7])

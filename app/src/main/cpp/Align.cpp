@@ -451,6 +451,7 @@ void fitTile(const Plane& ref, const Plane& alt, int x0, int y0, int tileW, int 
 constexpr int kConsensusMinTiles = 6;
 constexpr double kConsensusDisagreement = 0.5;
 constexpr double kConsensusTrim = 1.0;
+constexpr double kConsensusGate = 4.0;
 
 struct Motion { double ax, bx, cx, ay, by, cy, mx, my; };
 
@@ -494,7 +495,21 @@ void consensus(const Plane& ref, const Plane& alt, int tilesX, int tilesY,
         cy[i] = (i / tilesX) * tileH + tileH / 2.0;
         totalX[i] = dx[i] + static_cast<double>(fracDx[i]);
         totalY[i] = dy[i] + static_cast<double>(fracDy[i]);
-        keep[i] = mode[i] == kLkBoth;
+    }
+    // A robust start, as the Kotlin: the median translation of the two-axis
+    // tiles, and only those within the gate of it.
+    std::vector<double> bx, by;
+    for (int i = 0; i < count; ++i) if (mode[i] == kLkBoth) { bx.push_back(totalX[i]); by.push_back(totalY[i]); }
+    const int both = static_cast<int>(bx.size());
+    if (both < kConsensusMinTiles) return;
+    auto median = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        const size_t n = v.size();
+        return n % 2 == 1 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+    };
+    const double startX = median(bx), startY = median(by);
+    for (int i = 0; i < count; ++i) {
+        keep[i] = mode[i] == kLkBoth && std::hypot(totalX[i] - startX, totalY[i] - startY) <= kConsensusGate;
     }
     Motion m{};
     for (int pass = 0; pass <= 2; ++pass) {
@@ -505,6 +520,10 @@ void consensus(const Plane& ref, const Plane& alt, int tilesX, int tilesY,
             keep[i] = std::hypot(totalX[i] - motionX(m, cx[i], cy[i]), totalY[i] - motionY(m, cx[i], cy[i])) <= kConsensusTrim;
         }
     }
+    // A motion most of the frame does not share is not the frame's.
+    int kept = 0;
+    for (int i = 0; i < count; ++i) kept += keep[i] ? 1 : 0;
+    if (kept * 4 < both) return;
     LkFit fit;
     for (int i = 0; i < count; ++i) {
         const double px = motionX(m, cx[i], cy[i]);

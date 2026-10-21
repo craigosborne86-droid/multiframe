@@ -982,9 +982,13 @@ parts of the Siemens star one to five pixels off; with every fraction exact the
 the truth closed the gap. So, after the whole field is refined:
 
 ```
+start from the tiles fitted on both axes within 4 proxy px of their
+    median translation (a photograph has tiles the search lost by a
+    hundred pixels; a least-squares start put a tripod burst's motion at
+    sixteen)
 fit total displacement = a + B (centre - mean centre)          (affine, 6 params)
-    by least squares over the tiles fitted on both axes,
-    refitted twice without tiles > 1 proxy px from the fit
+    by least squares, refitted twice without tiles > 1 proxy px from the fit;
+    fewer than a quarter of the two-axis tiles left: no frame motion, stop
 for each tile that is > 0.5 proxy px from the fit, or was fitted as an edge:
     refine again from the fit's prediction itself (not its rounding)
     keep it if it fits at all, unless the tile's own fit was on both axes
