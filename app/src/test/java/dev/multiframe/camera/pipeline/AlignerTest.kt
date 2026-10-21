@@ -135,4 +135,19 @@ class AlignerTest {
         assertThat(filled.dx[1] + filled.fracDx[1]).isWithin(1e-6f).of(0.3f)
         assertThat(filled.dx[1]).isEqualTo(1)
     }
+
+    @Test
+    fun `a neighbour the search lost lends a flat tile nothing`() {
+        // One row of three: the left neighbour fitted at 0.3, the right one
+        // lost fifty pixels away; the middle declined, winner zero.
+        val filled = AlignmentField(3, 1, intArrayOf(0, 0, 50), IntArray(3),
+            floatArrayOf(0.3f, 0f, 0.2f), floatArrayOf(0.1f, 0f, 0.1f)).withFlatTilesBorrowed()
+        assertThat(filled.fracDx[1]).isWithin(1e-6f).of(0.3f)
+        assertThat(filled.fracDy[1]).isWithin(1e-6f).of(0.1f)
+        // With only the lost one beside it and in the field, nothing at all.
+        val alone = AlignmentField(2, 1, intArrayOf(0, 50), IntArray(2),
+            floatArrayOf(0f, 0.2f), floatArrayOf(0f, 0.1f)).withFlatTilesBorrowed()
+        assertThat(alone.fracDx[0]).isEqualTo(0f)
+        assertThat(alone.fracDy[0]).isEqualTo(0f)
+    }
 }

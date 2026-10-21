@@ -59,8 +59,9 @@ class AlignmentField(
      * a sky scene as a tripod burst and declined the picture, and where it
      * ran, the sky's cells between the reference's sites went unfed. The
      * hand's motion is one motion; a tile that could not measure it
-     * borrows the measurement. A field with no fitted tile at all is a
-     * tripod, and is returned as it is.
+     * borrows the measurement -- from tiles that agree with its own winner
+     * to a pixel, and from none where none do. A field with no fitted tile
+     * at all is a tripod, and is returned as it is.
      */
     fun withFlatTilesBorrowed(): AlignmentField {
         val count = dx.size
@@ -68,13 +69,16 @@ class AlignmentField(
         if (fitted.isEmpty() || fitted.size == count) return this
         val outX = fracDx.copyOf()
         val outY = fracDy.copyOf()
-        // Displacements, not fractions, are what is borrowed: a neighbour
+        // Displacements, not fractions, are what is borrowed -- a neighbour
         // whose winner differs by a pixel carries its fraction from a
-        // different integer. The tile keeps its own integer.
+        // different integer -- and only from fitted tiles within a pixel of
+        // this tile's own winner. The tile keeps its integer, and a
+        // neighbour the search lost by fifty pixels lends it nothing: a
+        // flat tile beside one on a tripod burst once borrowed its fifty.
         fun totalX(j: Int) = dx[j] + fracDx[j]
         fun totalY(j: Int) = dy[j] + fracDy[j]
-        val fieldX = median(fitted.map(::totalX))
-        val fieldY = median(fitted.map(::totalY))
+        fun agrees(j: Int, i: Int) =
+            kotlin.math.abs(totalX(j) - dx[i]) <= 1f && kotlin.math.abs(totalY(j) - dy[i]) <= 1f
         for (i in 0 until count) {
             if (hasSubPixelAt(i)) continue
             val tx = i % tilesX
@@ -86,11 +90,13 @@ class AlignmentField(
                 val ny = ty + oy
                 if (nx < 0 || ny < 0 || nx >= tilesX || ny >= tilesY) continue
                 val j = ny * tilesX + nx
-                if (hasSubPixelAt(j)) near.add(j)
+                if (hasSubPixelAt(j) && agrees(j, i)) near.add(j)
             }
             if (near.isEmpty()) {
-                outX[i] = fieldX - dx[i]
-                outY[i] = fieldY - dy[i]
+                val field = fitted.filter { agrees(it, i) }
+                if (field.isEmpty()) continue
+                outX[i] = median(field.map(::totalX)) - dx[i]
+                outY[i] = median(field.map(::totalY)) - dy[i]
             } else {
                 outX[i] = median(near.map(::totalX)) - dx[i]
                 outY[i] = median(near.map(::totalY)) - dy[i]
