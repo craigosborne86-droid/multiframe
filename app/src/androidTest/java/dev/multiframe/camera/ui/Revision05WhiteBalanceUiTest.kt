@@ -51,7 +51,7 @@ class Revision05WhiteBalanceUiTest {
     }
     @Test fun resetRequiresExplicitConfirmation() {
         var resets = 0
-        ui.setContent { MultiframeTheme { ServiceCaptureSettings(caps, true, {}, true, {}, OutputFormat.JPEG, {}, { resets++ }) } }
+        ui.setContent { MultiframeTheme { ServiceCaptureSettings(caps, true, {}, true, {}, OutputFormat.JPEG, {}, onReset = { resets++ }) } }
         ui.onNodeWithText("RESET ALL SETTINGS").performClick()
         assertEquals(0,resets)
         ui.onNodeWithTag("revision05-reset-cancel").performClick()

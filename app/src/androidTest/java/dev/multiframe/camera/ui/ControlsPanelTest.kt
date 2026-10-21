@@ -54,7 +54,7 @@ class ControlsPanelTest {
         compose.setContent {
             Column(Modifier.fillMaxSize()) {
                 ServiceCaptureSettings(caps, guard, {}, tone.value,
-                    { tone.value = it }, null, {}, { resets.value++ })
+                    { tone.value = it }, null, {}, onReset = { resets.value++ })
             }
         }
         return { tone.value } to { resets.value }
