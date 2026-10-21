@@ -19,7 +19,11 @@ private const val TAG = "Multiframe"
  * inverse-compositional Lucas-Kanade fit of the tile's translation on the
  * proxy, started at the winner and bounded to a pixel either way of it (see
  * [Aligner.refineSubPixel]). Zero on both axes where the fit declined -- a
- * flat or one-directional tile, or an estimate it could not stand behind. The
+ * flat tile, or an estimate it could not stand behind; across the edge only,
+ * on a tile that is an edge. Usually within a pixel of the winner; more
+ * where [Aligner.consensus] found the winner had slid and refitted the tile
+ * from the frame's motion, which leaves [dx] and [dy] as the search found
+ * them. The
  * full sub-pixel displacement of a tile is `dx + fracDx`, in proxy pixels;
  * the merge never reads it, and the sub-pixel accumulation in
  * `docs/REFERENCE.md` §3.6 exists to.
@@ -64,8 +68,13 @@ class AlignmentField(
         if (fitted.isEmpty() || fitted.size == count) return this
         val outX = fracDx.copyOf()
         val outY = fracDy.copyOf()
-        val fieldX = median(fitted.map { fracDx[it] })
-        val fieldY = median(fitted.map { fracDy[it] })
+        // Displacements, not fractions, are what is borrowed: a neighbour
+        // whose winner differs by a pixel carries its fraction from a
+        // different integer. The tile keeps its own integer.
+        fun totalX(j: Int) = dx[j] + fracDx[j]
+        fun totalY(j: Int) = dy[j] + fracDy[j]
+        val fieldX = median(fitted.map(::totalX))
+        val fieldY = median(fitted.map(::totalY))
         for (i in 0 until count) {
             if (hasSubPixelAt(i)) continue
             val tx = i % tilesX
@@ -80,11 +89,11 @@ class AlignmentField(
                 if (hasSubPixelAt(j)) near.add(j)
             }
             if (near.isEmpty()) {
-                outX[i] = fieldX
-                outY[i] = fieldY
+                outX[i] = fieldX - dx[i]
+                outY[i] = fieldY - dy[i]
             } else {
-                outX[i] = median(near.map { fracDx[it] })
-                outY[i] = median(near.map { fracDy[it] })
+                outX[i] = median(near.map(::totalX)) - dx[i]
+                outY[i] = median(near.map(::totalY)) - dy[i]
             }
         }
         return AlignmentField(tilesX, tilesY, dx, dy, outX, outY)
@@ -183,7 +192,9 @@ object Aligner {
         val fracDy = FloatArray(count)
 
         val levels = minOf(refPyramid.size, altPyramid.size)
-        val fraction = FloatArray(2)
+        val fit = LkFit()
+        val mode = IntArray(count)
+        val residual = LongArray(count)
 
         // Coarsest level first; offsets double as we descend.
         for (level in levels - 1 downTo 0) {
@@ -259,19 +270,46 @@ object Aligner {
                     // up would be doubled into the next level's integer search
                     // and lost. See [refineSubPixel].
                     if (level == 0) {
-                        refineSubPixel(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy, fraction)
-                        fracDx[idx] = fraction[0]
-                        fracDy[idx] = fraction[1]
+                        fitTile(ref, alt, x0, y0, tileW, tileH, bestDx.toDouble(), bestDy.toDouble(), fit)
+                        fracDx[idx] = fit.fx.toFloat()
+                        fracDy[idx] = fit.fy.toFloat()
+                        mode[idx] = fit.mode
+                        residual[idx] = fit.ee
                     }
                 }
             }
         }
 
+        // Only where the finest level was searched: it is the one refined.
+        if (refPyramid[0].width / tilesX >= MIN_TILE && refPyramid[0].height / tilesY >= MIN_TILE) {
+            consensus(refPyramid[0], altPyramid[0], tilesX, tilesY, dx, dy, fracDx, fracDy, mode, residual)
+        }
         return AlignmentField(tilesX, tilesY, dx, dy, fracDx, fracDy)
     }
 
     /** Gauss-Newton updates of the translation. Two settle a fraction within a hundredth; the third is margin. */
     const val LK_ITERATIONS = 3
+
+    /** How [fitTile] fitted a tile: not at all, across its edge only, or on both axes. */
+    const val LK_DECLINED = 0
+    const val LK_EDGE = 1
+    const val LK_BOTH = 2
+
+    /** One tile's fit: its fraction from the start it was given, how it was fitted, and its last sum of squared error (1/256 codes)^2. */
+    internal class LkFit {
+        var fx = 0.0
+        var fy = 0.0
+        var mode = LK_DECLINED
+        var ee = 0L
+    }
+
+    /**
+     * Strong-axis over weak-axis gradient energy beyond which a tile is an
+     * edge, whatever texture the weak axis seems to have: a slanted edge's
+     * staircase gives it some, and a two-axis step along the edge on that
+     * little leaves the reach of the fit from the right start.
+     */
+    const val LK_MAX_ANISOTROPY = 16.0
 
     /** A step under this on both axes, proxy pixels, ends the iterations: a quarter of the weights' resolution. */
     const val LK_CONVERGED = 1.0 / 1024
@@ -341,15 +379,32 @@ object Aligner {
      *
      * ### When it declines
      *
-     *  * The weaker eigenvalue of H, per pixel, is under [LK_MIN_GRADIENT]
-     *    (in (codes/pixel)^2 of grad T): a flat tile, or an edge, whose
-     *    translation along itself is not determined.
+     *  * The stronger eigenvalue of H, per pixel, is under [LK_MIN_GRADIENT]
+     *    (in (codes/pixel)^2 of grad T): a flat tile.
+     *
+     * ### An edge
+     *
+     * Where only the weaker eigenvalue is under that, or the stronger is more
+     * than [LK_MAX_ANISOTROPY] times it, the tile has texture in one
+     * direction -- an edge -- and its translation along the edge is not
+     * determined. Each step is then taken along the strong axis u alone,
+     * dp = 2 u (u . sum g e) / lambda_max, the least-squares step of least
+     * norm, and the fraction along the edge stays at the winner's. Declining
+     * here instead cost the 2x canvas its sharpest feature: the integer
+     * search slides along a straight edge (the bench's slanted edges were
+     * found eight pixels along themselves), which a five-degree slant turns
+     * into most of a pixel across, and only this step, on this tile, can
+     * take that back. A borrowed fraction cannot -- it is the frame's, and
+     * this error is the tile's. Along a straight edge the canvas is the same
+     * wherever the sample lands.
      *  * The estimate leaves a pixel either way of the integer winner: the
      *    search was wrong, or the fit diverged, and neither is a fraction.
-     *  * The weaker direction's gradient power, lambda_min / 4N, is less than
-     *    [LK_MIN_SNR] times s^2, the mean squared residual of the last
-     *    iteration: noise, motion within the tile, or a tile that does not
-     *    translate. The estimate's standard error in that direction is
+     *  * The solved direction's gradient power, lambda_min / 4N (or
+     *    lambda_max / 4N for an edge), is less than [LK_MIN_SNR] times s^2,
+     *    the mean squared residual of the last iteration: noise, motion
+     *    within the tile, or a tile that does not translate. A two-axis fit
+     *    that fails this on its weaker axis but passes on its stronger keeps
+     *    the part of its answer along the stronger, as for an edge. The estimate's standard error in that direction is
      *    sqrt(4 s^2 / lambda_min) = 1 / sqrt(N * ratio), so passing bounds it
      *    by 1 / sqrt(N), 0.03 pixels on a 32-pixel tile. Without this a tile
      *    of pure noise passes every other test and pins its fraction near
@@ -372,8 +427,33 @@ object Aligner {
         dy: Int,
         out: FloatArray,
     ) {
-        out[0] = 0f
-        out[1] = 0f
+        val fit = LkFit()
+        fitTile(ref, alt, x0, y0, tileW, tileH, dx.toDouble(), dy.toDouble(), fit)
+        out[0] = fit.fx.toFloat()
+        out[1] = fit.fy.toFloat()
+    }
+
+    /**
+     * [refineSubPixel] from any start ([startX], [startY]), proxy pixels,
+     * with how the tile was fitted and its last residual, for [consensus].
+     * The fraction it reports is from that start, and its reach a pixel
+     * either way of it.
+     */
+    internal fun fitTile(
+        ref: Plane,
+        alt: Plane,
+        x0: Int,
+        y0: Int,
+        tileW: Int,
+        tileH: Int,
+        startX: Double,
+        startY: Double,
+        fit: LkFit,
+    ) {
+        fit.fx = 0.0
+        fit.fy = 0.0
+        fit.mode = LK_DECLINED
+        fit.ee = 0L
         val n = tileW * tileH
         if (n == 0) return
         val rw = ref.width
@@ -403,18 +483,27 @@ object Aligner {
             }
         }
         val det = hxx.toDouble() * hyy.toDouble() - hxy.toDouble() * hxy.toDouble()
-        if (det <= 0.0) return
-        val lambdaMin = lkLambdaMin(hxx, hxy, hyy)
+        val axes = lkAxes(hxx, hxy, hyy)
+        val lambdaMin = axes[0]
+        val lambdaMax = axes[1]
+        val ux = axes[2]
+        val uy = axes[3]
         // H is in (2 grad T)^2: a quarter of it is grad T's.
-        if (lambdaMin / (4.0 * n) < LK_MIN_GRADIENT) return
+        if (lambdaMax / (4.0 * n) < LK_MIN_GRADIENT) return
+        // Texture in one direction only -- an edge -- determines the
+        // translation across it and nothing along it. The step is then taken
+        // along the strong axis alone, the least-squares solution of least
+        // norm, and the fraction along the edge is left at the winner's.
+        val bothAxes = det > 0.0 && lambdaMin / (4.0 * n) >= LK_MIN_GRADIENT &&
+            lambdaMax <= LK_MAX_ANISOTROPY * lambdaMin
 
         val aw = alt.width
         val ah = alt.height
         val ad = alt.data
         fun a(x: Int, y: Int) = ad[y.coerceIn(0, ah - 1) * aw + x.coerceIn(0, aw - 1)].toInt() and 0xFF
 
-        var px = dx.toDouble()
-        var py = dy.toDouble()
+        var px = startX
+        var py = startY
         var ee = 0L
         for (iteration in 0 until LK_ITERATIONS) {
             var ix = kotlin.math.floor(px).toInt()
@@ -441,25 +530,59 @@ object Aligner {
                     ee += e.toLong() * e
                 }
             }
-            val step = lkStep(hxx, hxy, hyy, det, bx, by)
+            val step = if (bothAxes) lkStep(hxx, hxy, hyy, det, bx, by) else lkStepAlong(ux, uy, lambdaMax, bx, by)
             px -= step[0]
             py -= step[1]
-            if (kotlin.math.abs(px - dx) > 1.0 || kotlin.math.abs(py - dy) > 1.0) return
+            if (kotlin.math.abs(px - startX) > 1.0 || kotlin.math.abs(py - startY) > 1.0) return
             // Converged: a further step would move the warp by less than its
             // own weights can express.
             if (kotlin.math.abs(step[0]) < LK_CONVERGED && kotlin.math.abs(step[1]) < LK_CONVERGED) break
         }
-        if (!lkConfident(ee, n, lambdaMin)) return
-        out[0] = (px - dx).toFloat()
-        out[1] = (py - dy).toFloat()
+        val fx = px - startX
+        val fy = py - startY
+        fit.ee = ee
+        if (bothAxes && lkConfident(ee, n, lambdaMin)) {
+            fit.fx = fx
+            fit.fy = fy
+            fit.mode = LK_BOTH
+            return
+        }
+        // Both axes, but the weaker one no stronger than the residual: the
+        // part of the answer across the strong axis still stands. One axis
+        // from the start: that part is the whole answer.
+        if (!lkConfident(ee, n, lambdaMax)) return
+        val along = fx * ux + fy * uy
+        fit.fx = along * ux
+        fit.fy = along * uy
+        fit.mode = LK_EDGE
     }
 
-    /** The smaller eigenvalue of [[hxx, hxy], [hxy, hyy]]. */
-    internal fun lkLambdaMin(hxx: Long, hxy: Long, hyy: Long): Double {
-        val trace = hxx.toDouble() + hyy.toDouble()
-        val diff = hxx.toDouble() - hyy.toDouble()
-        val root = kotlin.math.sqrt(diff * diff + 4.0 * hxy.toDouble() * hxy.toDouble())
-        return 0.5 * (trace - root)
+    /**
+     * The eigen-decomposition of [[hxx, hxy], [hxy, hyy]]: the smaller
+     * eigenvalue, the larger, and the larger's unit eigenvector (x, y).
+     */
+    internal fun lkAxes(hxx: Long, hxy: Long, hyy: Long): DoubleArray {
+        val a = hxx.toDouble()
+        val b = hxy.toDouble()
+        val c = hyy.toDouble()
+        val trace = a + c
+        val diff = a - c
+        val root = kotlin.math.sqrt(diff * diff + 4.0 * b * b)
+        val lambdaMax = 0.5 * (trace + root)
+        // Of the two forms of the eigenvector, the one with the larger
+        // components; the other cancels to nothing when b is small.
+        var vx: Double
+        var vy: Double
+        if (a >= c) { vx = lambdaMax - c; vy = b } else { vx = b; vy = lambdaMax - a }
+        val norm = kotlin.math.sqrt(vx * vx + vy * vy)
+        if (norm > 0.0) { vx /= norm; vy /= norm } else if (a >= c) { vx = 1.0; vy = 0.0 } else { vx = 0.0; vy = 1.0 }
+        return doubleArrayOf(0.5 * (trace - root), lambdaMax, vx, vy)
+    }
+
+    /** dp along the strong axis u alone: 2 u (u . sum g e) / lambda_max, with e in 1/256 of a code. */
+    private fun lkStepAlong(ux: Double, uy: Double, lambdaMax: Double, bx: Long, by: Long): DoubleArray {
+        val along = 2.0 / LK_ONE * (ux * bx.toDouble() + uy * by.toDouble()) / lambdaMax
+        return doubleArrayOf(along * ux, along * uy)
     }
 
     /** dp = 2 H^-1 sum g e, with e in 1/256 of a code. */
@@ -475,6 +598,141 @@ object Aligner {
     private fun lkConfident(ee: Long, n: Int, lambdaMin: Double): Boolean {
         val residual = ee.toDouble() / n / (LK_ONE.toDouble() * LK_ONE)
         return lambdaMin / (4.0 * n) >= LK_MIN_SNR * residual
+    }
+
+    /** Fewer tiles fitted on both axes than this, and there is no frame motion to agree with. */
+    const val CONSENSUS_MIN_TILES = 6
+
+    /** A tile further than this from the frame's motion, proxy pixels, is tried from the frame's motion. */
+    const val CONSENSUS_DISAGREEMENT = 0.5
+
+    /** A tile further than this from a fit of the frame's motion is not part of the next fit. */
+    const val CONSENSUS_TRIM = 1.0
+
+    /**
+     * Where the integer search slid, the frame's own motion takes it back.
+     *
+     * ### What this is for
+     *
+     * The tile search minimises a sum of absolute differences over every other
+     * pixel, and two kinds of tile defeat it however good the fraction after
+     * it: a straight edge, along which every offset costs the same, and a
+     * periodic texture, which matches itself a period away. On the desk's
+     * chart the search found its slanted edges eight to ten pixels along
+     * themselves and parts of its Siemens star a pixel to five off, and with
+     * the fractions exact the 2x canvas still lost to enlargement there --
+     * replacing those tiles alone with the truth closed the whole gap.
+     *
+     * ### What it does
+     *
+     * A hand-held burst moves as a frame: translation and a little rotation.
+     * The tiles fitted on both axes are fitted in turn with an affine motion,
+     * total displacement against tile centre, by least squares, twice
+     * trimmed of tiles more than [CONSENSUS_TRIM] from the fit. A tile more
+     * than [CONSENSUS_DISAGREEMENT] from that motion, and every tile fitted
+     * as an edge -- whose place along itself its own fit left at the
+     * winner's integer -- is refined again from
+     * the motion's own prediction, and the new fit is kept where it fits at
+     * all -- unless the tile's own fit was on both axes and fitted at least a
+     * quarter better: a subject that really moved keeps its own offset.
+     *
+     * An edge's own fit gets no such say. Its residual cannot rank places
+     * along it: the proxy bins 2x2 with no other filter, a sharp edge aliases
+     * there into a staircase, and an integer slide along the edge reproduces
+     * the staircase exactly where the true, fractional place must interpolate
+     * it. On the bench's edges the slid winner fitted ten times better than
+     * the true place. The margin leans toward the frame on purpose: a moving
+     * subject placed by the frame's motion disagrees with the reference and
+     * the canvas's robustness weight rejects it, but an edge slid along
+     * itself agrees everywhere and is kept -- correct values twenty pixels
+     * from where they belong, which leaves the rows they left with the
+     * sub-pixel phases of fewer frames, and the bench measured exactly that
+     * as an edge rendered as soft as a tripod burst's.
+     *
+     * ### What it leaves alone
+     *
+     * [dx] and [dy]. The CFA merge reads the integer winners and nothing
+     * else, and this changes none of them: a re-seeded tile's displacement is
+     * carried in its fraction, which may then exceed a pixel. Only the 2x
+     * canvas reads it.
+     */
+    internal fun consensus(
+        ref: Plane,
+        alt: Plane,
+        tilesX: Int,
+        tilesY: Int,
+        dx: IntArray,
+        dy: IntArray,
+        fracDx: FloatArray,
+        fracDy: FloatArray,
+        mode: IntArray,
+        ee: LongArray,
+    ) {
+        val tileW = ref.width / tilesX
+        val tileH = ref.height / tilesY
+        val count = tilesX * tilesY
+        val cx = DoubleArray(count) { (it % tilesX) * tileW + tileW / 2.0 }
+        val cy = DoubleArray(count) { (it / tilesX) * tileH + tileH / 2.0 }
+        val totalX = DoubleArray(count) { dx[it] + fracDx[it].toDouble() }
+        val totalY = DoubleArray(count) { dy[it] + fracDy[it].toDouble() }
+        val keep = BooleanArray(count) { mode[it] == LK_BOTH }
+        var motion: DoubleArray? = null
+        for (pass in 0..2) {
+            motion = affineMotion(cx, cy, totalX, totalY, keep) ?: return
+            if (pass == 2) break
+            for (i in 0 until count) {
+                if (mode[i] != LK_BOTH) continue
+                keep[i] = kotlin.math.hypot(totalX[i] - motionX(motion, cx[i], cy[i]), totalY[i] - motionY(motion, cx[i], cy[i])) <= CONSENSUS_TRIM
+            }
+        }
+        val m = motion ?: return
+        val fit = LkFit()
+        for (i in 0 until count) {
+            val px = motionX(m, cx[i], cy[i])
+            val py = motionY(m, cx[i], cy[i])
+            // An edge's place along itself is the frame's to give, near or far.
+            if (mode[i] != LK_EDGE && kotlin.math.hypot(totalX[i] - px, totalY[i] - py) <= CONSENSUS_DISAGREEMENT) continue
+            // From the motion's prediction itself, not its rounding: on an
+            // edge the fit moves only across it, and the prediction is the
+            // best word there is on where along it the tile sits.
+            fitTile(ref, alt, (i % tilesX) * tileW, (i / tilesX) * tileH, tileW, tileH, px, py, fit)
+            if (fit.mode == LK_DECLINED) continue
+            // Only a tile fitted on both axes can say its own place is better.
+            if (mode[i] == LK_BOTH && fit.ee * 4 > ee[i] * 5) continue
+            fracDx[i] = (px + fit.fx - dx[i]).toFloat()
+            fracDy[i] = (py + fit.fy - dy[i]).toFloat()
+        }
+    }
+
+    private fun motionX(m: DoubleArray, x: Double, y: Double) = m[0] + m[1] * (x - m[6]) + m[2] * (y - m[7])
+    private fun motionY(m: DoubleArray, x: Double, y: Double) = m[3] + m[4] * (x - m[6]) + m[5] * (y - m[7])
+
+    /**
+     * Least-squares affine motion of the kept tiles about their centroid:
+     * (ax, bx, cx, ay, by, cy, mean x, mean y), with total = a + b (x - mx)
+     * + c (y - my). A translation alone where the tiles do not span two
+     * dimensions; null where too few are kept.
+     */
+    private fun affineMotion(cx: DoubleArray, cy: DoubleArray, tx: DoubleArray, ty: DoubleArray, keep: BooleanArray): DoubleArray? {
+        var n = 0
+        var mx = 0.0; var my = 0.0; var mtx = 0.0; var mty = 0.0
+        for (i in keep.indices) if (keep[i]) { n++; mx += cx[i]; my += cy[i]; mtx += tx[i]; mty += ty[i] }
+        if (n < CONSENSUS_MIN_TILES) return null
+        mx /= n; my /= n; mtx /= n; mty /= n
+        var sxx = 0.0; var sxy = 0.0; var syy = 0.0
+        var sxtx = 0.0; var sytx = 0.0; var sxty = 0.0; var syty = 0.0
+        for (i in keep.indices) if (keep[i]) {
+            val x = cx[i] - mx; val y = cy[i] - my
+            sxx += x * x; sxy += x * y; syy += y * y
+            sxtx += x * tx[i]; sytx += y * tx[i]; sxty += x * ty[i]; syty += y * ty[i]
+        }
+        val det = sxx * syy - sxy * sxy
+        if (det <= 1e-6 * (sxx * syy + 1.0)) return doubleArrayOf(mtx, 0.0, 0.0, mty, 0.0, 0.0, mx, my)
+        return doubleArrayOf(
+            mtx, (syy * sxtx - sxy * sytx) / det, (sxx * sytx - sxy * sxtx) / det,
+            mty, (syy * sxty - sxy * syty) / det, (sxx * syty - sxy * sxty) / det,
+            mx, my,
+        )
     }
 
     /**

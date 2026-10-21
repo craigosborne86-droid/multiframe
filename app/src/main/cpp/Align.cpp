@@ -216,6 +216,7 @@ constexpr int kLkOne = 256;
 constexpr double kLkMinGradient = 0.25;
 constexpr double kLkMinSnr = 1.0;
 constexpr double kLkConverged = 1.0 / 1024;
+constexpr double kLkMaxAnisotropy = 16.0;
 
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -277,11 +278,21 @@ inline void warpRow(const uint8_t* rowA, const uint8_t* rowB, const int32_t* gx,
     }
 }
 
-/** See `Aligner.refineSubPixel`. Writes zero to both where the fit declines. */
-void refineSubPixel(const Plane& ref, const Plane& alt, int x0, int y0, int tileW, int tileH,
-                    int dx, int dy, LkScratch& s, float& outX, float& outY) {
-    outX = 0.0f;
-    outY = 0.0f;
+constexpr int kLkDeclined = 0;
+constexpr int kLkEdge = 1;
+constexpr int kLkBoth = 2;
+
+/** `Aligner.LkFit`: the fraction from the start given, how it was fitted, the last sum of squared error. */
+struct LkFit {
+    double fx = 0.0, fy = 0.0;
+    int mode = kLkDeclined;
+    int64_t ee = 0;
+};
+
+/** See `Aligner.fitTile`. A declined fit reads zero on both axes. */
+void fitTile(const Plane& ref, const Plane& alt, int x0, int y0, int tileW, int tileH,
+             double startX, double startY, LkScratch& s, LkFit& fit) {
+    fit = LkFit();
     const int n = tileW * tileH;
     if (n <= 0) return;
     s.gx.resize(static_cast<size_t>(n));
@@ -340,16 +351,25 @@ void refineSubPixel(const Plane& ref, const Plane& alt, int x0, int y0, int tile
     }
     const double det = static_cast<double>(hxx) * static_cast<double>(hyy) -
                        static_cast<double>(hxy) * static_cast<double>(hxy);
-    if (det <= 0.0) return;
-    const double trace = static_cast<double>(hxx) + static_cast<double>(hyy);
-    const double diff = static_cast<double>(hxx) - static_cast<double>(hyy);
-    const double root = std::sqrt(diff * diff + 4.0 * static_cast<double>(hxy) * static_cast<double>(hxy));
+    // The eigen-decomposition of H, as `Aligner.lkAxes` writes it.
+    const double ha = static_cast<double>(hxx), hb = static_cast<double>(hxy), hc = static_cast<double>(hyy);
+    const double trace = ha + hc;
+    const double diff = ha - hc;
+    const double root = std::sqrt(diff * diff + 4.0 * hb * hb);
+    const double lambdaMax = 0.5 * (trace + root);
     const double lambdaMin = 0.5 * (trace - root);
-    if (lambdaMin / (4.0 * n) < kLkMinGradient) return;
+    double ux, uy;
+    if (ha >= hc) { ux = lambdaMax - hc; uy = hb; } else { ux = hb; uy = lambdaMax - ha; }
+    const double norm = std::sqrt(ux * ux + uy * uy);
+    if (norm > 0.0) { ux /= norm; uy /= norm; } else if (ha >= hc) { ux = 1.0; uy = 0.0; } else { ux = 0.0; uy = 1.0; }
+    if (lambdaMax / (4.0 * n) < kLkMinGradient) return;
+    // An edge: the step along its normal alone. See the Kotlin.
+    const bool bothAxes = det > 0.0 && lambdaMin / (4.0 * n) >= kLkMinGradient &&
+                          lambdaMax <= kLkMaxAnisotropy * lambdaMin;
 
     const int aw = alt.w, ah = alt.h;
     const uint8_t* ad = alt.data.data();
-    double px = dx, py = dy;
+    double px = startX, py = startY;
     int64_t ee = 0;
     for (int iteration = 0; iteration < kLkIterations; ++iteration) {
         int ix = static_cast<int>(std::floor(px));
@@ -386,22 +406,118 @@ void refineSubPixel(const Plane& ref, const Plane& alt, int x0, int y0, int tile
                 ee += static_cast<int64_t>(e) * e;
             }
         }
-        const double scale = 2.0 / kLkOne / det;
-        const double stepX = scale * (static_cast<double>(hyy) * static_cast<double>(bx) -
-                                      static_cast<double>(hxy) * static_cast<double>(by));
-        const double stepY = scale * (static_cast<double>(hxx) * static_cast<double>(by) -
-                                      static_cast<double>(hxy) * static_cast<double>(bx));
+        double stepX, stepY;
+        if (bothAxes) {
+            const double scale = 2.0 / kLkOne / det;
+            stepX = scale * (static_cast<double>(hyy) * static_cast<double>(bx) -
+                             static_cast<double>(hxy) * static_cast<double>(by));
+            stepY = scale * (static_cast<double>(hxx) * static_cast<double>(by) -
+                             static_cast<double>(hxy) * static_cast<double>(bx));
+        } else {
+            const double along = 2.0 / kLkOne * (ux * static_cast<double>(bx) + uy * static_cast<double>(by)) / lambdaMax;
+            stepX = along * ux;
+            stepY = along * uy;
+        }
         px -= stepX;
         py -= stepY;
-        if (std::fabs(px - dx) > 1.0 || std::fabs(py - dy) > 1.0) return;
+        if (std::fabs(px - startX) > 1.0 || std::fabs(py - startY) > 1.0) return;
         // Converged: a further step would move the warp by less than its
         // own weights can express.
         if (std::fabs(stepX) < kLkConverged && std::fabs(stepY) < kLkConverged) break;
     }
     const double residual = static_cast<double>(ee) / n / (static_cast<double>(kLkOne) * kLkOne);
-    if (lambdaMin / (4.0 * n) < kLkMinSnr * residual) return;
-    outX = static_cast<float>(px - dx);
-    outY = static_cast<float>(py - dy);
+    const double fx = px - startX, fy = py - startY;
+    fit.ee = ee;
+    if (bothAxes && lambdaMin / (4.0 * n) >= kLkMinSnr * residual) {
+        fit.fx = fx;
+        fit.fy = fy;
+        fit.mode = kLkBoth;
+        return;
+    }
+    if (lambdaMax / (4.0 * n) < kLkMinSnr * residual) return;
+    const double along = fx * ux + fy * uy;
+    fit.fx = along * ux;
+    fit.fy = along * uy;
+    fit.mode = kLkEdge;
+}
+
+// --- Consensus -------------------------------------------------------------
+//
+// `Aligner.consensus`: where the integer search slid -- along an edge, or a
+// period of a repeating texture -- the frame's affine motion, fitted to the
+// tiles fitted on both axes, seeds the tile again. dx and dy are never
+// changed; the merge reads only them.
+
+constexpr int kConsensusMinTiles = 6;
+constexpr double kConsensusDisagreement = 0.5;
+constexpr double kConsensusTrim = 1.0;
+
+struct Motion { double ax, bx, cx, ay, by, cy, mx, my; };
+
+inline double motionX(const Motion& m, double x, double y) { return m.ax + m.bx * (x - m.mx) + m.cx * (y - m.my); }
+inline double motionY(const Motion& m, double x, double y) { return m.ay + m.by * (x - m.mx) + m.cy * (y - m.my); }
+
+bool affineMotion(const std::vector<double>& cx, const std::vector<double>& cy,
+                  const std::vector<double>& tx, const std::vector<double>& ty,
+                  const std::vector<char>& keep, Motion& out) {
+    int n = 0;
+    double mx = 0.0, my = 0.0, mtx = 0.0, mty = 0.0;
+    for (size_t i = 0; i < keep.size(); ++i) if (keep[i]) { ++n; mx += cx[i]; my += cy[i]; mtx += tx[i]; mty += ty[i]; }
+    if (n < kConsensusMinTiles) return false;
+    mx /= n; my /= n; mtx /= n; mty /= n;
+    double sxx = 0.0, sxy = 0.0, syy = 0.0, sxtx = 0.0, sytx = 0.0, sxty = 0.0, syty = 0.0;
+    for (size_t i = 0; i < keep.size(); ++i) if (keep[i]) {
+        const double x = cx[i] - mx, y = cy[i] - my;
+        sxx += x * x; sxy += x * y; syy += y * y;
+        sxtx += x * tx[i]; sytx += y * tx[i]; sxty += x * ty[i]; syty += y * ty[i];
+    }
+    const double det = sxx * syy - sxy * sxy;
+    if (det <= 1e-6 * (sxx * syy + 1.0)) {
+        out = {mtx, 0.0, 0.0, mty, 0.0, 0.0, mx, my};
+        return true;
+    }
+    out = {mtx, (syy * sxtx - sxy * sytx) / det, (sxx * sytx - sxy * sxtx) / det,
+           mty, (syy * sxty - sxy * syty) / det, (sxx * syty - sxy * sxty) / det, mx, my};
+    return true;
+}
+
+void consensus(const Plane& ref, const Plane& alt, int tilesX, int tilesY,
+               int* dx, int* dy, float* fracDx, float* fracDy,
+               const std::vector<int>& mode, const std::vector<int64_t>& ee, LkScratch& scratch) {
+    const int tileW = ref.w / tilesX;
+    const int tileH = ref.h / tilesY;
+    const int count = tilesX * tilesY;
+    std::vector<double> cx(count), cy(count), totalX(count), totalY(count);
+    std::vector<char> keep(count);
+    for (int i = 0; i < count; ++i) {
+        cx[i] = (i % tilesX) * tileW + tileW / 2.0;
+        cy[i] = (i / tilesX) * tileH + tileH / 2.0;
+        totalX[i] = dx[i] + static_cast<double>(fracDx[i]);
+        totalY[i] = dy[i] + static_cast<double>(fracDy[i]);
+        keep[i] = mode[i] == kLkBoth;
+    }
+    Motion m{};
+    for (int pass = 0; pass <= 2; ++pass) {
+        if (!affineMotion(cx, cy, totalX, totalY, keep, m)) return;
+        if (pass == 2) break;
+        for (int i = 0; i < count; ++i) {
+            if (mode[i] != kLkBoth) continue;
+            keep[i] = std::hypot(totalX[i] - motionX(m, cx[i], cy[i]), totalY[i] - motionY(m, cx[i], cy[i])) <= kConsensusTrim;
+        }
+    }
+    LkFit fit;
+    for (int i = 0; i < count; ++i) {
+        const double px = motionX(m, cx[i], cy[i]);
+        const double py = motionY(m, cx[i], cy[i]);
+        // An edge's place along itself is the frame's to give, near or far.
+        if (mode[i] != kLkEdge && std::hypot(totalX[i] - px, totalY[i] - py) <= kConsensusDisagreement) continue;
+        fitTile(ref, alt, (i % tilesX) * tileW, (i / tilesX) * tileH, tileW, tileH, px, py, scratch, fit);
+        if (fit.mode == kLkDeclined) continue;
+        // Only a tile fitted on both axes can say its own place is better.
+        if (mode[i] == kLkBoth && fit.ee * 4 > ee[i] * 5) continue;
+        fracDx[i] = static_cast<float>(px + fit.fx - dx[i]);
+        fracDy[i] = static_cast<float>(py + fit.fy - dy[i]);
+    }
 }
 
 void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& altPyr,
@@ -410,6 +526,9 @@ void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& a
     const int count = tilesX * tilesY;
     const int levels = static_cast<int>(std::min(refPyr.size(), altPyr.size()));
     LkScratch scratch;
+    LkFit fit;
+    std::vector<int> mode(static_cast<size_t>(count), kLkDeclined);
+    std::vector<int64_t> residual(static_cast<size_t>(count), 0);
 
     for (int level = levels - 1; level >= 0; --level) {
         if (level < levels - 1) {
@@ -477,11 +596,19 @@ void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& a
                 // would be doubled into the next level's integer search and
                 // lost.
                 if (level == 0) {
-                    refineSubPixel(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy, scratch,
-                                   fracDx[idx], fracDy[idx]);
+                    fitTile(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy, scratch, fit);
+                    fracDx[idx] = static_cast<float>(fit.fx);
+                    fracDy[idx] = static_cast<float>(fit.fy);
+                    mode[idx] = fit.mode;
+                    residual[idx] = fit.ee;
                 }
             }
         }
+    }
+
+    // Only where the finest level was searched: it is the one refined.
+    if (!refPyr.empty() && refPyr[0].w / tilesX >= kMinTile && refPyr[0].h / tilesY >= kMinTile) {
+        consensus(refPyr[0], altPyr[0], tilesX, tilesY, dx, dy, fracDx, fracDy, mode, residual, scratch);
     }
 }
 

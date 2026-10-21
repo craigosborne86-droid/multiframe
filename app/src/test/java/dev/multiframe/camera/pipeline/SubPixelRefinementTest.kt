@@ -107,15 +107,43 @@ class SubPixelRefinementTest {
     }
 
     /**
-     * Stripes that vary along x only: the translation along y is not
-     * determined, and the fit declines both axes rather than invent one.
+     * Stripes that vary along x only: the translation across them is
+     * determined and along them is not. The fit takes the first and leaves
+     * the second at the winner's -- it neither declines nor invents one.
      */
     @Test
-    fun aOneDirectionalTileDeclines() {
+    fun aOneDirectionalTileIsFittedAcrossItsStripesOnly() {
         val stripes = { s: Double -> ByteArray(width * height) { i -> (128 + 60 * sin(2 * PI * ((i % width) - s) / 9.0)).roundToInt().toByte() } }
         val out = FloatArray(2) { 9f }
         Aligner.refineSubPixel(Plane(width, height, stripes(0.0)), Plane(width, height, stripes(0.4)), 64, 64, 32, 32, 0, 0, out)
-        assertThat(out.toList()).containsExactly(0f, 0f)
+        assertThat(out[0].toDouble()).isWithin(0.05).of(0.4)
+        assertThat(out[1].toDouble()).isWithin(1e-6).of(0.0)
+    }
+
+    /**
+     * A slanted edge the integer search has slid along: four pixels too far
+     * down it, which a five-degree slant makes 0.35 of a pixel across it.
+     * Fitted across the edge from that winner, the edge lands where it is.
+     */
+    @Test
+    fun anEdgeSlidAlongItselfIsPutBackAcrossIt() {
+        val angle = 5.0 * PI / 180
+        val slope = kotlin.math.tan(angle)
+        // A near-vertical step at x = 120 + slope * y, soft over a couple of pixels.
+        val edge = { s: Double -> ByteArray(width * height) { i ->
+            val x = (i % width) - s; val y = (i / width).toDouble()
+            (60 + 120 / (1 + kotlin.math.exp(-(x - 120 - slope * y) / 0.7))).roundToInt().toByte()
+        } }
+        val out = FloatArray(2)
+        // Truth (0.3, 0); the winner (0, 4). Any p whose difference from the
+        // truth runs along the edge aligns it, so the fit owes the winner its
+        // offset along the normal n = (cos, -sin): (truth - winner) . n.
+        Aligner.refineSubPixel(Plane(width, height, edge(0.0)), Plane(width, height, edge(0.3)), 104, 64, 32, 32, 0, 4, out)
+        val nx = kotlin.math.cos(angle); val ny = -kotlin.math.sin(angle)
+        val owed = 0.3 * nx + (0 - 4) * ny
+        assertThat(out[0] * nx + out[1] * ny).isWithin(0.05).of(owed)
+        // And nothing along the edge.
+        assertThat(out[0] * -ny + out[1] * nx).isWithin(0.02).of(0.0)
     }
 
     /** Pure noise: every other test passes, the gradient is no stronger than the residual, and the fit declines. */
@@ -140,5 +168,64 @@ class SubPixelRefinementTest {
         // From the right integer the same tile resolves.
         Aligner.refineSubPixel(ref, alt, 96, 64, 32, 32, 3, 0, out)
         assertThat(3 + out[0].toDouble()).isWithin(0.05).of(3.3)
+    }
+
+    // --- the frame's motion against a tile's own -----------------------------
+
+    /**
+     * A scene of texture with one column of tiles that is only a slanted
+     * edge, moved by a known fraction. Wherever the search put the edge's
+     * tiles along the edge, their displacement comes back to the frame's --
+     * along the edge as well as across it -- and their integers are the
+     * search's.
+     */
+    @Test
+    fun anEdgeColumnTakesTheFramesMotion() {
+        val scene = Scene(21)
+        val slope = kotlin.math.tan(5.0 * PI / 180)
+        // The band's own sides are soft too: a hard boundary would move by
+        // whole pixels whatever the shift, and be no displacement at all.
+        fun logistic(t: Double) = 1 / (1 + kotlin.math.exp(-t))
+        fun at(x: Double, y: Double): Double {
+            val band = logistic((x - 97) / 0.7) * logistic((127 - x) / 0.7)
+            val edge = 60 + 120 * logistic((x - 112 - slope * (y - 96)) / 0.7)
+            return band * edge + (1 - band) * scene.at(x, y)
+        }
+        val (sx, sy) = 0.35 to -0.6
+        val noise = java.util.Random(5)
+        fun frame(ox: Double, oy: Double) = ByteArray(width * height) { i ->
+            (at((i % width) - ox, (i / width) - oy) + noise.nextGaussian()).roundToInt().coerceIn(0, 255).toByte()
+        }
+        val field = align(frame(0.0, 0.0), frame(sx, sy))
+        for (ty in 1 until tilesY - 1) {
+            val i = ty * tilesX + 3
+            assertThat((field.dx[i] + field.fracDx[i]).toDouble()).isWithin(0.1).of(sx)
+            assertThat((field.dy[i] + field.fracDy[i]).toDouble()).isWithin(0.1).of(sy)
+        }
+    }
+
+    /**
+     * A textured patch that moved on its own, three pixels against the
+     * frame's fraction of one: fitted on both axes, it fits its own offset
+     * far better than the frame's, and keeps it.
+     */
+    @Test
+    fun aSubjectThatMovedKeepsItsOwnMotion() {
+        val scene = Scene(22)
+        val subject = Scene(23)
+        val noise = java.util.Random(6)
+        fun frame(ox: Double, oy: Double, mx: Double, my: Double) = ByteArray(width * height) { i ->
+            val x = (i % width).toDouble(); val y = (i / width).toDouble()
+            val v = if (x in 48.0..112.0 && y in 48.0..112.0) subject.at(x - mx, y - my) else scene.at(x - ox, y - oy)
+            (v + noise.nextGaussian()).roundToInt().coerceIn(0, 255).toByte()
+        }
+        val field = align(frame(0.0, 0.0, 0.0, 0.0), frame(0.3, 0.4, 3.4, -2.2))
+        val i = 2 * tilesX + 2
+        assertThat((field.dx[i] + field.fracDx[i]).toDouble()).isWithin(0.1).of(3.4)
+        assertThat((field.dy[i] + field.fracDy[i]).toDouble()).isWithin(0.1).of(-2.2)
+        // The frame around it is the frame's.
+        val j = 4 * tilesX + 5
+        assertThat((field.dx[j] + field.fracDx[j]).toDouble()).isWithin(0.05).of(0.3)
+        assertThat((field.dy[j] + field.fracDy[j]).toDouble()).isWithin(0.05).of(0.4)
     }
 }

@@ -941,15 +941,25 @@ the only floating point, in double and written alike on both sides. The
 rounding moves the warp by at most 1/512 pixel, and that is all it can leave in
 the answer, since each step is measured from where the warp actually was.
 
-*When it declines* (zero on both axes; `withFlatTilesBorrowed` then gives the
-tile its fitted neighbours' median for the 2x canvas):
+*An edge* -- lambda_min(H) / 4N < 0.25 (codes/pixel)^2, or lambda_max more
+than 16 lambda_min -- determines its translation across itself and nothing
+along it. Each step is then taken along the strong eigenvector u alone,
+`dp = 2 u (u . sum g e) / lambda_max`, the least-squares step of least norm,
+and the place along the edge is left where it started. (A slanted edge's
+staircase gives the weak axis a little energy; a two-axis step on that little
+runs along the edge out of reach. Hence the anisotropy bound.)
 
-- lambda_min(H) / 4N < 0.25 (codes/pixel)^2: the weaker direction of grad T
-  carries no texture -- a flat tile, or an edge, whose translation along
-  itself is undetermined;
+*When it declines* (zero on both axes; `withFlatTilesBorrowed` then gives the
+tile its fitted neighbours' median displacement for the 2x canvas, carried
+from the tile's own integer):
+
+- lambda_max(H) / 4N < 0.25 (codes/pixel)^2: a flat tile;
 - |p - (dx, dy)| > 1 on either axis after any step: the integer search was
   wrong or the fit diverged, and neither is a fraction;
-- lambda_min / 4N < s^2, s^2 the mean squared residual of the last iteration.
+- lambda / 4N < s^2, s^2 the mean squared residual of the last iteration and
+  lambda the solved axis's eigenvalue (lambda_min, or lambda_max for an edge;
+  a two-axis fit that fails on lambda_min but passes on lambda_max keeps the
+  part of its answer along u).
   The estimate's standard error in the weaker direction is
   sqrt(4 s^2 / lambda_min) = 1 / sqrt(N * ratio), so the test bounds it by
   1 / sqrt(N), 0.03 pixels on a 32-pixel tile. Its purpose is the tile of pure
@@ -958,9 +968,42 @@ tile its fitted neighbours' median for the 2x canvas):
   residual and pass with a fraction of exactly zero.
 
 Cost: the integer search samples every other pixel of a level-0 tile; the
-refinement reads every pixel three times, through the NEON warp in
-`Align.cpp`. The four extra SAD evaluations of the three-point fit it replaced
-are gone.
+refinement reads every pixel up to three times, through the NEON warp in
+`Align.cpp`, and the consensus refits only edges and tiles that disagree. The
+four extra SAD evaluations of the three-point fit it replaced are gone.
+
+**The frame's motion (`Aligner.consensus`).** The integer search minimises a
+SAD over every other pixel, and two kinds of tile defeat it however good the
+fraction after it: a straight edge, along which every offset costs the same,
+and a periodic texture, which matches itself a period away. On the desk's
+chart it put the slanted edges eight to twenty pixels along themselves and
+parts of the Siemens star one to five pixels off; with every fraction exact the
+2x canvas still lost to enlargement there, and replacing those tiles alone with
+the truth closed the gap. So, after the whole field is refined:
+
+```
+fit total displacement = a + B (centre - mean centre)          (affine, 6 params)
+    by least squares over the tiles fitted on both axes,
+    refitted twice without tiles > 1 proxy px from the fit
+for each tile that is > 0.5 proxy px from the fit, or was fitted as an edge:
+    refine again from the fit's prediction itself (not its rounding)
+    keep it if it fits at all, unless the tile's own fit was on both axes
+    and its residual at least a quarter lower (a subject that moved)
+```
+
+dx and dy are never changed -- the CFA merge reads only them -- so a re-seeded
+tile's displacement is carried in its fraction, which may then exceed a pixel.
+An edge's own fit gets no say against the frame's, because its residual cannot
+rank places along it: the proxy is a 2x2 bin with no other filter, a sharp edge
+aliases there into a staircase, and an integer slide along the edge
+reproduces the staircase exactly where the true, fractional place has to
+interpolate it -- on the bench's edges the slid winner fitted ten times better
+than the truth. The lean toward the frame is deliberate: a moving subject
+placed by the frame's motion disagrees with the reference and the 2x canvas's
+robustness weight rejects it, whereas an edge slid along itself agrees
+everywhere and is kept, its correct values twenty pixels from where they
+belong, and the rows they left reconstructed from fewer frames' phases -- an
+edge rendered as soft as a tripod burst's, which is what the bench measured.
 
 **Why it replaced the three-point fit.** The fit described next read the
 fraction from the SAD at the winner and its four neighbours, sampled every

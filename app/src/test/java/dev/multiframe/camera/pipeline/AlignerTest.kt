@@ -123,4 +123,16 @@ class AlignerTest {
         assertThat(filled.fracDx[1]).isEqualTo(0.4f)
         assertThat(filled.fracDx[3]).isEqualTo(0.1f)
     }
+
+    @Test
+    fun `a tile borrows its neighbours' displacement, not their fraction, where its winner differs`() {
+        // One row of three; the middle tile slid a pixel and declined.
+        val dx = intArrayOf(0, 1, 0)
+        val fx = floatArrayOf(0.3f, 0f, 0.3f)
+        val fy = floatArrayOf(0.1f, 0f, 0.1f)
+        val filled = AlignmentField(3, 1, dx, IntArray(3), fx, fy).withFlatTilesBorrowed()
+        // Displacement 0.3 from its neighbours, carried from its own integer.
+        assertThat(filled.dx[1] + filled.fracDx[1]).isWithin(1e-6f).of(0.3f)
+        assertThat(filled.dx[1]).isEqualTo(1)
+    }
 }
