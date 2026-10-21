@@ -7,10 +7,12 @@ import kotlin.math.min
 import kotlin.math.pow
 
 /**
- * Tone settings for the raw back end.
- *
- * Same philosophy as the YUV path: linear below the knee, gentle exponential
- * roll-off above it, no local tone mapping, no sharpening, no saturation boost.
+ * Tone settings for the raw back end, in the order REFERENCE.md §3.1 runs
+ * them: a global exposure gain held near the meter's, the purity
+ * compression after the matrix, the local operator (off unless asked for),
+ * the filmic shoulder with its white at the sensor's clip, the contrast
+ * curve after gamma, then chroma smoothing, defringe, capture sharpening
+ * and the optics correction with its crop. No saturation boost.
  */
 data class DevelopParams(
     /**
@@ -100,7 +102,11 @@ data class DevelopParams(
      * scale difference that shows as coloured fringing.
      *
      * Null on a lens that published no calibration, and on every path that has
-     * no lens to describe. See [Optics].
+     * no lens to describe. See [Optics]. The last step of the develop, after
+     * the sharpen, and it crops the border it cannot read
+     * ([LensDistortion.validInset]), so only [RawDeveloper.developCropped]
+     * takes it; production corrects the developed bitmap the same way
+     * ([Optics.applyCropped]).
      */
     val optics: Optics.Params? = null,
     /**
@@ -135,16 +141,6 @@ data class DevelopParams(
     val purityCeiling: Float = PURITY_CEILING,
 ) {
     /**
-     * The same rendering, adapted to the sensor gain the frame was taken at.
-     *
-     * Capture sharpening restores acutance the demosaic cost; on a frame at
-     * ISO 3200 what it restores is grain, and sharpened grain is static. The
-     * sharpen fades from full at [LOW_ISO] to nothing at [HIGH_ISO], and the
-     * chroma smoothing widens its luminance tolerance over the same range,
-     * since the speckle it removes is larger. Below [LOW_ISO] nothing
-     * changes, so a daylight frame renders exactly as before.
-     */
-    /**
      * These parameters with the exposure resolved to [gain], and the
      * shoulder placed for it: an automatic white becomes the sensor's clip
      * at that gain, and the knee is kept under it. Every develop path goes
@@ -159,6 +155,16 @@ data class DevelopParams(
         )
     }
 
+    /**
+     * The same rendering, adapted to the sensor gain the frame was taken at.
+     *
+     * Capture sharpening restores acutance the demosaic cost; on a frame at
+     * ISO 3200 what it restores is grain, and sharpened grain is static. The
+     * sharpen fades from full at [LOW_ISO] to nothing at [HIGH_ISO], and the
+     * chroma smoothing widens its luminance tolerance over the same range,
+     * since the speckle it removes is larger. Below [LOW_ISO] nothing
+     * changes, so a daylight frame renders exactly as before.
+     */
     fun adaptedTo(iso: Int?): DevelopParams {
         if (iso == null || iso <= LOW_ISO) return this
         val t = ((iso - LOW_ISO).toFloat() / (HIGH_ISO - LOW_ISO)).coerceIn(0f, 1f)
@@ -172,14 +178,6 @@ data class DevelopParams(
         const val AUTO_EXPOSURE = -1f
 
         /**
-         * How far the automatic gain may fall under, or rise over, the
-         * meter's own: half a stop under (a bright end already high is
-         * brought down a little), three quarters over (the highlights'
-         * placement may lift a low-key scene a little, and no more). A night
-         * scene is then a night scene: the meter made it dark, and the
-         * develop keeps it within a stop of that.
-         */
-        /**
          * Where the purity compression begins and what it approaches. Seven
          * tenths is over every ordinary colour -- a clear sky sits at six
          * to seven tenths after the matrix and is not touched -- and under a
@@ -190,6 +188,14 @@ data class DevelopParams(
         const val PURITY_THRESHOLD = 0.7f
         const val PURITY_CEILING = 0.85f
 
+        /**
+         * How far the automatic gain may fall under, or rise over, the
+         * meter's own: half a stop under (a bright end already high is
+         * brought down a little), three quarters over (the highlights'
+         * placement may lift a low-key scene a little, and no more). A night
+         * scene is then a night scene: the meter made it dark, and the
+         * develop keeps it within a stop of that.
+         */
         const val METERED_GAIN_BELOW_STOPS = 0.5f
         const val METERED_GAIN_ABOVE_STOPS = 0.75f
 
@@ -277,9 +283,9 @@ object RawDeveloper {
     /**
      * Measures a global exposure multiplier from the frame.
      *
-     * Deliberately one number for the whole image: a global scale plus the
-     * highlight roll-off, with no local tone mapping, which is what keeps the
-     * result looking photographic rather than processed.
+     * One number for the whole image, from the bright end of the green
+     * sites: the global scale the shoulder and the local operator work
+     * from. Callers hold it near the meter's own with [boundedGain].
      */
     fun autoExposureGain(
         frame: BayerFrame,
@@ -362,6 +368,9 @@ object RawDeveloper {
         bandRows: Int = 128,
         shading: ShadingMap? = null,
     ): android.graphics.Bitmap {
+        // The optics run on the bitmap this returns, through
+        // Optics.applyCropped, as RawBurstCapture does after the native develop.
+        require(params.optics?.hasWork != true) { "the optics crop; correct the returned bitmap with Optics.applyCropped" }
         val w = frame.width
         val h = frame.height
         val bitmap = android.graphics.Bitmap.createBitmap(
@@ -380,18 +389,11 @@ object RawDeveloper {
             y += rows
         }
         // Applied after the whole image exists, since all of them need each
-        // pixel's neighbours and a band does not have them at its edges. The
-        // optics correction needs more than neighbours -- it gathers from
-        // several pixels away -- so it could not be banded at all.
-        val optics = params.optics?.takeIf { it.hasWork }
-        if (params.sharpen.enabled || params.defringe.enabled || params.chroma.enabled || optics != null) {
+        // pixel's neighbours and a band does not have them at its edges.
+        if (params.sharpen.enabled || params.defringe.enabled || params.chroma.enabled) {
             val all = IntArray(w * h)
             bitmap.getPixels(all, 0, w, 0, 0, w, h)
-            // Geometry first, for the reason in `develop`: the passes below
-            // read neighbourhoods, and correcting after them would be deciding
-            // pixels from neighbours that are about to move.
-            optics?.let { Optics.apply(all, w, h, it) }
-            // The colour speckle next, before anything reads chroma: the
+            // The colour speckle first, before anything reads chroma: the
             // defringe judges outliers and the sharpen must not see noise.
             if (params.chroma.enabled) ChromaSmooth.apply(all, w, h, params.chroma)
             // Defringe next: sharpening a fringe would make it worse.
@@ -423,7 +425,8 @@ object RawDeveloper {
 
     /**
      * Returns packed ARGB pixels for the whole frame. Used by tests, where the
-     * images are small; production goes through [developIntoBitmap].
+     * images are small; production goes through [developIntoBitmap]. No
+     * optics: they crop, and [developCropped] says to what.
      */
     fun develop(
         frame: BayerFrame,
@@ -435,6 +438,27 @@ object RawDeveloper {
         recoverSensorSaturation: Boolean = true,
         observer: DevelopObserver? = null,
     ): IntArray {
+        require(params.optics?.hasWork != true) { "the optics crop; use developCropped" }
+        return developCropped(frame, sensor, color, params, shading, recoverSensorSaturation, observer).pixels
+    }
+
+    /**
+     * The Kotlin reference develop, the whole of REFERENCE.md §3.1 including
+     * its last step: the optics of [DevelopParams.optics], when there are
+     * any, corrected after the sharpen and the picture cropped to what the
+     * correction could read. The result's size is the frame's less
+     * [Optics.CorrectedPixels.inset].
+     */
+    fun developCropped(
+        frame: BayerFrame,
+        sensor: SensorProfile,
+        color: ColorProfile,
+        params: DevelopParams = DevelopParams(),
+        shading: ShadingMap? = null,
+        /** Reference-only ablation for the offline bench. Production always enables this. */
+        recoverSensorSaturation: Boolean = true,
+        observer: DevelopObserver? = null,
+    ): Optics.CorrectedPixels {
         val w = frame.width
         val h = frame.height
         val out = IntArray(w * h)
@@ -445,14 +469,6 @@ object RawDeveloper {
         parallelRows(h) { yStart, yEnd ->
             renderRows(frame, sensor, color, resolved, w, h, yStart, yEnd, out, 0, shading, grid, recoverSensorSaturation, clipFrame, observer)
         }
-        // Geometry before anything that reads a neighbourhood. Both of the
-        // passes below decide what a pixel is from the pixels around it, and
-        // doing that before the optics are corrected means deciding it from
-        // neighbours that are about to move.
-        //
-        // It also removes most of the work Defringe would otherwise have: a
-        // fringe that has been put back where it belongs is not a fringe.
-        resolved.optics?.takeIf { it.hasWork }?.let { Optics.apply(out, w, h, it) }
         observer?.display(DevelopObserver.DisplayStage.PRE_CHROMA, out, w, h)
         // The colour speckle, before anything reads chroma.
         if (resolved.chroma.enabled) ChromaSmooth.apply(out, w, h, resolved.chroma)
@@ -463,7 +479,14 @@ object RawDeveloper {
         observer?.display(DevelopObserver.DisplayStage.POST_DEFRINGE, out, w, h)
         if (resolved.sharpen.enabled) Sharpen.apply(out, w, h, resolved.sharpen)
         observer?.display(DevelopObserver.DisplayStage.POST_SHARPEN, out, w, h)
-        return out
+        // The optics last, and the border they cannot read cropped off: §3.1
+        // step 12, where production runs them -- on the developed bitmap,
+        // after the native develop's sharpen (Optics.applyCropped). Ideally
+        // they would follow the demosaic, before anything reads a
+        // neighbourhood; why they do not is on Optics.
+        val optics = resolved.optics?.takeIf { it.hasWork }
+            ?: return Optics.CorrectedPixels(out, w, h, ChromaticAberration.NONE, LensDistortion.Inset.NONE)
+        return Optics.applyCropped(out, w, h, optics)
     }
 
     /** Shared per-pixel render. [rowBase] lets a band write into a smaller buffer. */

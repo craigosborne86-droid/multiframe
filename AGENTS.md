@@ -92,7 +92,7 @@ picture, the sensor saw it in the scene."
 - **Sensor clipping is measured before balance and shading.** All-channel
   saturation fades smoothly to neutral white after the linear tone chain.
   A clipped channel with near-white WB-balanced companions also fades;
-  isolated spectral-channel saturation must not bleach flowers. See REFERENCE §3.1 step 7d.
+  isolated spectral-channel saturation must not bleach flowers. See REFERENCE §3.1 step 7c.
 - **The optics correction crops what it cannot read** (`LensDistortion.
   validInset`, `Optics.applyCropped`). Do not invent border pixels --
   repeating the edge made ribs, mirroring made reflections.

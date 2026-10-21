@@ -4,6 +4,8 @@ import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.TotalCaptureResult
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 
 private const val TAG = "Multiframe"
@@ -42,7 +44,7 @@ object SuperResCapture {
      * outputs from [mergedBuffer] instead -- the DNG is *not* written here on
      * that path, so the ordinary writer can write both halves under one name.
      */
-    fun finishOutputs(
+    suspend fun finishOutputs(
         context: Context,
         canvas: NativeSubPixel,
         mergedBuffer: ByteBuffer,
@@ -69,14 +71,16 @@ object SuperResCapture {
         // The rendering, adapted to the gain the burst was taken at.
         val params = params.adaptedTo(captureResult?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY))
 
-        // The JPEG first, on this thread, because it is the one that can
-        // decline. The DNG is written only once the 2x JPEG exists, so a
-        // decline leaves nothing under this name for the ordinary path to
-        // collide with.
+        // The JPEG first, because it is the one that can decline. The DNG is
+        // written only once the 2x JPEG exists, so a decline leaves nothing
+        // under this name for the ordinary path to collide with. Both on the
+        // IO dispatcher: the develop streams into the descriptor the file is
+        // published from, on its own native workers, and the caller waits on
+        // those and the storage.
         val tJpeg = System.currentTimeMillis()
         var stats: NativeSubPixel.DevelopStats? = null
         val jpegName = "$baseName.jpg"
-        val jpegUri = ImageSaver.saveJpegFrom(
+        val jpegUri = withContext(Dispatchers.IO) { ImageSaver.saveJpegFrom(
             context, jpegName,
             metadata = ExifWriter.from(
                 result = captureResult,
@@ -89,7 +93,7 @@ object SuperResCapture {
         ) { fd ->
             stats = canvas.developToJpeg(fd, profile, color, params, shading, quality, RenderCrop.from(characteristics, captureResult))
             stats != null
-        }
+        } }
         val jpegMillis = System.currentTimeMillis() - tJpeg
         if (jpegUri == null) {
             Log.w(TAG, "2x develop declined; the ordinary outputs will be written")
@@ -108,7 +112,7 @@ object SuperResCapture {
 
         val tDng = System.currentTimeMillis()
         val dngName = "$baseName.dng"
-        val dngUri = if (writeDng && captureResult != null) {
+        val dngUri = if (writeDng && captureResult != null) withContext(Dispatchers.IO) {
             RawBurstCapture.writeDng(
                 context, mergedBuffer.duplicate(), mergedWidth, mergedHeight,
                 characteristics, captureResult, dngName,

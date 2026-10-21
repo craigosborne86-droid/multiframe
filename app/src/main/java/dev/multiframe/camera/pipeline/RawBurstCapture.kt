@@ -14,7 +14,11 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
 import java.text.SimpleDateFormat
@@ -111,7 +115,7 @@ object RawBurstCapture {
     private const val EXPECTED_IMAGES = 2
     private const val RAW_FRAME_TIMEOUT_MS = 15_000L
 
-    suspend fun captureAndMerge(
+    internal suspend fun captureAndMerge(
         context: Context,
         imageCapture: ImageCapture,
         characteristics: CameraCharacteristics,
@@ -126,6 +130,12 @@ object RawBurstCapture {
         develop: DevelopParams = DevelopParams(),
         /** Whether the merged raw is written as a DNG beside the JPEG. */
         writeDng: Boolean = true,
+        /**
+         * The still captures' results by sensor timestamp, for each frame's
+         * gain scale. Null, or a frame whose result never arrives, merges
+         * that frame unscaled, as before there was one.
+         */
+        frameResults: FrameMetadataStore<TotalCaptureResult>? = null,
         onProgress: (String) -> Unit,
     ): RawBurstResult {
         val profile = SensorProfile.from(characteristics)
@@ -144,13 +154,19 @@ object RawBurstCapture {
         var tilesY = 0
         var captured = 0
         var mergeMillis = 0L
+        // The first frame's light: the sequential burst's reference.
+        var referenceLight = 0.0
         val captureStart = System.currentTimeMillis()
 
         try {
             for (i in 0 until frameCount) {
                 onProgress("raw ${i + 1}/$frameCount")
                 val ok = try {
-                    withRawImage(context, imageCapture) { image ->
+                    val raw = takeRawImage(context, imageCapture)
+                    raw?.use { image ->
+                        // The frame's own result, by its sensor timestamp; never
+                        // the newest one, which may be the next frame's.
+                        val light = FrameLight.of(frameResults?.let { resultFor(it, image.imageInfo.timestamp) })
                         val t0 = System.currentTimeMillis()
                         val plane = image.planes[0]
                         val buffer = plane.buffer
@@ -165,23 +181,29 @@ object RawBurstCapture {
                             tilesY = max(1, m.proxyHeight / TILE_TARGET)
                             m.setReference(buffer, stride)
                             refProxy = m.lumaProxy(buffer, stride)
+                            referenceLight = light
                         } else {
+                            // A frame the meter moved is brought to the
+                            // reference's scale by its light, black + (raw -
+                            // black) / g, as the ZSL merge does (§3.2). One
+                            // where either light is unknown: the merge unscaled.
+                            val gainScale = FrameLight.gainScale(referenceLight, light)
                             // Alignment runs on the small luma proxy. Native
                             // where it can, which is where nearly all of the
                             // merge's time used to go; the Kotlin behind it is
                             // the reference the parity test holds it to.
-                            val proxy = m.lumaProxy(buffer, stride)
+                            val proxy = m.lumaProxy(buffer, stride, gainScale)
                             val field = Aligner.alignNative(refProxy!!, proxy, tilesX, tilesY)
                                 ?: Aligner.align(
                                     Aligner.buildPyramid(refProxy!!),
                                     Aligner.buildPyramid(proxy),
                                     tilesX, tilesY,
                                 )
-                            m.addFrame(buffer, stride, field)
+                            m.addFrame(buffer, stride, field, gainScale)
                         }
                         mergeMillis += System.currentTimeMillis() - t0
                         captured++
-                    }
+                    } != null
                 } catch (e: Exception) {
                     Log.e(TAG, "raw frame ${i + 1} failed", e)
                     false
@@ -221,7 +243,7 @@ object RawBurstCapture {
 
     private const val TILE_TARGET = 32
 
-    internal fun finishOutputs(
+    internal suspend fun finishOutputs(
         context: Context,
         merger: NativeMerge,
         mergedBuffer: java.nio.ByteBuffer,
@@ -249,7 +271,7 @@ object RawBurstCapture {
         writeDng: Boolean = true,
         /** Stops the DNG tells a converter to add back: the guard's pull, undone. */
         baselineExposureStops: Float = 0f,
-    ): RawBurstResult {
+    ): RawBurstResult = coroutineScope {
         val stamp = stamp()
 
         // One merged raw image feeds both outputs, so the DNG and the JPEG
@@ -276,21 +298,21 @@ object RawBurstCapture {
         // From the sensor's own characterisation rather than the ISP's
         // rendering matrix, which is tuned to the manufacturer's look. Read
         // before the DNG writer starts: the DNG carries the same white balance.
+        // On the IO dispatcher: it is a file write, and the develop beside it
+        // keeps the computation's threads.
         val color = ColorProfile.calibrated(characteristics, captureResult)
-        var dngUri: android.net.Uri? = null
-        var dngMillis = 0L
         val dngWriter = if (writeDng && captureResult != null) {
-            Thread {
+            async(Dispatchers.IO) {
                 val started = System.currentTimeMillis()
-                dngUri = writeDng(
+                val uri = writeDng(
                     context, mergedBuffer.duplicate(), width, height,
                     characteristics, captureResult, dngName,
                     baselineExposureStops = baselineExposureStops,
                     whiteBalanceNeutral = ColorProfile.cameraNeutral(captureResult, color.gains),
                     rotationDegrees = rotationDegrees,
                 )
-                dngMillis = System.currentTimeMillis() - started
-            }.apply { name = "dng-write"; start() }
+                uri to System.currentTimeMillis() - started
+            }
         } else {
             null
         }
@@ -381,15 +403,19 @@ object RawBurstCapture {
         // photograph arrives in a library with no camera, no lens and no
         // exposure. The DNG needs none of it -- DngCreator has already written
         // full metadata from the same capture result.
-        val saved = ImageSaver.saveImage(
-            context, bitmap, baseName, outputFormat,
-            metadata = ExifWriter.from(
-                result = captureResult,
-                characteristics = characteristics,
-                lens = lens,
-                frames = captured,
-            ),
-        )
+        // The encode streams into the file it publishes; the calling thread
+        // waits on the encoder's workers and the storage, so it waits on IO.
+        val saved = withContext(Dispatchers.IO) {
+            ImageSaver.saveImage(
+                context, bitmap, baseName, outputFormat,
+                metadata = ExifWriter.from(
+                    result = captureResult,
+                    characteristics = characteristics,
+                    lens = lens,
+                    frames = captured,
+                ),
+            )
+        }
         val jpegOk = saved != null
         val jpegName = saved?.second ?: "$baseName.jpg"
         bitmap.recycle()
@@ -397,7 +423,7 @@ object RawBurstCapture {
         val developMillis = System.currentTimeMillis() - t3
 
         // Nothing may be reported until the DNG is actually on disk.
-        dngWriter?.join()
+        val (dngUri, dngMillis) = dngWriter?.await() ?: (null to 0L)
         val dngOk = dngUri != null
         val writeMillis = dngMillis
         val outputsMillis = System.currentTimeMillis() - t2
@@ -434,7 +460,7 @@ object RawBurstCapture {
             if (dngOk) add("DNG")
             if (jpegOk) add("JPEG")
         }
-        return RawBurstResult(
+        RawBurstResult(
             frameCount, captured, stats, captureMillis, mergeMillis,
             developMillis, writeMillis,
             if (dngOk) dngName else null,
@@ -448,21 +474,39 @@ object RawBurstCapture {
     }
 
     /**
-     * Runs [consume] while the raw image is still open, then closes it.
+     * The result whose sensor timestamp is [timestampNs], waited for briefly:
+     * the image and its result arrive on separate callbacks in either order.
+     */
+    private suspend fun resultFor(store: FrameMetadataStore<TotalCaptureResult>, timestampNs: Long): TotalCaptureResult? {
+        if (timestampNs <= 0) return null
+        return store.retain(longArrayOf(timestampNs)).use { ticket ->
+            if (!ticket.awaitComplete(RESULT_WAIT_MS)) {
+                Log.w(TAG, "no capture result for raw frame at $timestampNs; merged unscaled")
+            }
+            ticket.values()[0]
+        }
+    }
+
+    private const val RESULT_WAIT_MS = 2_000L
+
+    /**
+     * The next raw image, still open; the caller merges it and closes it.
      *
      * The image is not copied. Its plane buffer is a direct buffer owned by the
      * camera, so native code reads the sensor data in place; copying it would
-     * put 25 MB per frame on the Java heap for no reason.
+     * put 25 MB per frame on the Java heap for no reason. Handed back rather
+     * than consumed in the callback, so the merge runs on the caller's
+     * dispatcher and not the main thread the callback arrives on.
      *
      * With OUTPUT_FORMAT_RAW_JPEG the callback fires twice, once per image, and
      * the JPEG usually arrives first. Only the RAW_SENSOR image is wanted.
+     * Null when no raw image arrived in time.
      */
-    private suspend fun withRawImage(
+    private suspend fun takeRawImage(
         context: Context,
         imageCapture: ImageCapture,
-        consume: (ImageProxy) -> Unit,
-    ): Boolean = withTimeoutOrNull(RAW_FRAME_TIMEOUT_MS) {
-        suspendCancellableCoroutine { cont ->
+    ): ImageProxy? = withTimeoutOrNull(RAW_FRAME_TIMEOUT_MS) {
+        suspendCancellableCoroutine<ImageProxy?> { cont ->
             val settled = AtomicBoolean(false)
             var seen = 0
 
@@ -470,24 +514,17 @@ object RawBurstCapture {
                 ContextCompat.getMainExecutor(context),
                 object : ImageCapture.OnImageCapturedCallback() {
                     override fun onCaptureSuccess(image: ImageProxy) {
-                        try {
-                            seen++
-                            if (image.format == ImageFormat.RAW_SENSOR) {
-                                if (settled.compareAndSet(false, true)) {
-                                    consume(image)
-                                    cont.resume(true)
-                                }
-                            } else if (seen >= EXPECTED_IMAGES && !settled.get()) {
-                                Log.w(TAG, "no RAW_SENSOR image in this capture")
-                                if (settled.compareAndSet(false, true)) cont.resume(false)
-                            }
-                        } catch (e: Exception) {
-                            if (settled.compareAndSet(false, true)) {
-                                cont.resumeWithException(e)
-                            }
-                        } finally {
-                            image.close()
+                        seen++
+                        if (image.format == ImageFormat.RAW_SENSOR && settled.compareAndSet(false, true)) {
+                            // Closed by the caller, or here if the wait was abandoned.
+                            cont.resume(image) { _, value, _ -> value.close() }
+                            return
                         }
+                        if (seen >= EXPECTED_IMAGES && settled.compareAndSet(false, true)) {
+                            Log.w(TAG, "no RAW_SENSOR image in this capture")
+                            cont.resume(null)
+                        }
+                        image.close()
                     }
 
                     override fun onError(exception: ImageCaptureException) {
@@ -498,7 +535,7 @@ object RawBurstCapture {
                 },
             )
         }
-    } ?: false
+    }
 
     /**
      * Writes the merged CFA straight from the native buffer. DngCreator takes a

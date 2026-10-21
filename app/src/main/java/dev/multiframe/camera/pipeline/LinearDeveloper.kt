@@ -12,8 +12,11 @@ import kotlin.math.pow
  *
  * ```
  * Black subtract -> Lens shading -> White balance -> Colour matrix
- *   -> Tone curve -> sRGB gamma -> Chroma smooth -> Sharpen
+ *   -> Purity compression -> [Local tone] -> Tone curve -> Clip recovery
+ *   -> sRGB gamma -> Contrast -> Chroma smooth -> Sharpen
  * ```
+ *
+ * No optics correction or valid-region crop: REFERENCE.md §3.6.5 says why.
  *
  * Hot pixels are not here because they were dealt with before the samples
  * were placed -- see [SubPixelAccumulator.setReference] -- and defringe is not

@@ -25,9 +25,11 @@ private const val TAG = "Optics"
  *
  * ### Where this runs, and the compromise in it
  *
- * On the developed sRGB buffer, alongside [Defringe] and [Sharpen] — not on
- * linear RGB immediately after the demosaic, which is where the geometry
- * argument says it belongs and where `docs/REFERENCE.md` §3.1 places it.
+ * On the developed sRGB buffer, after [ChromaSmooth], [Defringe] and
+ * [Sharpen], with the border it cannot read cropped off (`docs/REFERENCE.md`
+ * §3.1 step 12) — not on linear RGB immediately after the demosaic, which is
+ * where the geometry argument says it belongs and where §3.1 marks it as a
+ * future insertion.
  *
  * The reason is memory, and it is worth stating rather than hiding. The develop
  * is a single fused pass: demosaic, colour matrix, tone curve, gamma encode and
@@ -178,6 +180,42 @@ object Optics {
         applyReference(source, pixels, width, height, model, scale)
         logApplied(params, model, width, height)
         return scale
+    }
+
+    /** What [applyCropped] did to a packed frame: the corrected window, its size, the aberration used and the border taken off. */
+    class CorrectedPixels(
+        val pixels: IntArray,
+        val width: Int,
+        val height: Int,
+        val scale: ChromaticAberration.Scale,
+        val inset: LensDistortion.Inset,
+    )
+
+    /**
+     * Corrects a packed ARGB frame into a new array cropped to the pixels
+     * the correction could read -- see [LensDistortion.validInset] -- as
+     * the bitmap overload does on the device. The Kotlin reference develop's
+     * last step. A frame that needs no correction comes back as itself,
+     * uncropped.
+     */
+    fun applyCropped(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        params: Params,
+    ): CorrectedPixels {
+        val scale = resolveAberration(pixels, width, height, params)
+        val model = params.distortion?.takeIf { !it.isIdentity }
+        if (model == null && scale.isIdentity) {
+            return CorrectedPixels(pixels, width, height, scale, LensDistortion.Inset.NONE)
+        }
+        val inset = LensDistortion.validInset(model, width, height, scale)
+        val outWidth = inset.width(width)
+        val outHeight = inset.height(height)
+        val out = IntArray(outWidth * outHeight)
+        applyReference(pixels, out, width, height, model, scale, outWidth, outHeight, inset.left, inset.top)
+        logApplied(params, model, width, height, inset)
+        return CorrectedPixels(out, outWidth, outHeight, scale, inset)
     }
 
     /**

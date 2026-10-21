@@ -199,7 +199,7 @@ object ZslCapture {
             // ISO times exposure: the frame's gathered light, which is what a
             // frame at other settings is brought to the reference's scale by.
             // The shutter cap can move the exposure as well as the gain.
-            val referenceLight = lightOf(results[refIndex])
+            val referenceLight = FrameLight.of(results[refIndex])
 
             val refBuffer = burst.frames.buffer(refIndex)
                 ?: error("reference slot unreadable")
@@ -233,9 +233,7 @@ object ZslCapture {
                 onProgress("merging ${captured + 1}/${burst.count}")
                 val buffer = burst.frames.buffer(i) ?: continue
 
-                val frameLight = lightOf(results[i])
-                val gainScale = if (referenceLight > 0.0 && frameLight > 0.0)
-                    (frameLight / referenceLight).toFloat() else 1f
+                val gainScale = FrameLight.gainScale(referenceLight, FrameLight.of(results[i]))
 
                 var mark = System.nanoTime()
                 val proxy = m.lumaProxy(buffer, stride, gainScale)
@@ -393,14 +391,6 @@ object ZslCapture {
             canvas?.close()
             merger?.close()
         }
-    }
-
-    /** ISO times exposure time, or zero where the result does not say. */
-    private fun lightOf(result: android.hardware.camera2.TotalCaptureResult?): Double {
-        val iso = result?.get(CaptureResult.SENSOR_SENSITIVITY) ?: return 0.0
-        val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return 0.0
-        if (iso <= 0 || exposure <= 0L) return 0.0
-        return iso.toDouble() * exposure.toDouble()
     }
 
     /** One alternate frame, aligned onto the reference, ready to be placed. */

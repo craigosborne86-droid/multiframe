@@ -217,6 +217,9 @@ private const val DESIRED_BURST = 12
 /** How long a refused or released raw ring waits before it is tried again. */
 private const val RING_RETRY_MILLIS = 30_000L
 
+/** Still results kept for pairing: a sequential frame looks its own up as its image arrives, so a few suffice. */
+private const val STILL_RESULTS = 8
+
 /** Side of the focus reticle, in pixels. */
 private const val RETICLE_PX = 180f
 
@@ -288,6 +291,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // DngCreator needs the capture metadata that produced the frame, which
     // CameraX does not surface directly.
     val lastCaptureResult = remember { AtomicReference<TotalCaptureResult?>(null) }
+    // Every still capture's result by sensor timestamp, so the sequential
+    // burst scales each frame by its own exposure (RawBurstCapture).
+    val stillResults = remember { dev.multiframe.camera.pipeline.FrameMetadataStore<TotalCaptureResult>(STILL_RESULTS) }
     var burstFrames by remember { mutableIntStateOf(restored.burstFrames) }
     // Busy is the sequential camera's and the self-timer's: the shutter is
     // theirs until they are done. A ZSL shot is never busy -- its frames
@@ -561,7 +567,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // written one at a time on a worker while the viewfinder runs on. One
     // at a time because the merge already spans every core; two at once
     // would only contend. A shot in hand is a photograph owed, so a develop
-    // is not cancelled once begun.
+    // is not cancelled once begun. The merge and render run on Default; the
+    // DNG and JPEG writes inside them move to IO (RawBurstCapture and
+    // SuperResCapture.finishOutputs).
     val developQueue = remember { Channel<PendingShot>(Channel.UNLIMITED) }
     LaunchedEffect(Unit) {
         for (pending in developQueue) {
@@ -822,6 +830,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             result: TotalCaptureResult,
                         ) {
                             lastCaptureResult.set(result)
+                            result.get(CaptureResult.SENSOR_TIMESTAMP)?.takeIf { it > 0 }?.let { stillResults.put(it, result) }
                         }
                     }
                 )
@@ -2318,6 +2327,7 @@ MechanicalShutter(
                                             rotationDegrees = rotation,
                                             develop = shotDevelop,
                                             writeDng = shotDng,
+                                            frameResults = stillResults,
                                             onProgress = { },
                                             )
                                         } },
