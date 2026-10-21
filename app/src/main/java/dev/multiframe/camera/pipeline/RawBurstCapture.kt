@@ -310,6 +310,11 @@ object RawBurstCapture {
                     baselineExposureStops = baselineExposureStops,
                     whiteBalanceNeutral = ColorProfile.cameraNeutral(captureResult, color.gains),
                     rotationDegrees = rotationDegrees,
+                    develop = DevelopSource(
+                        profile, color,
+                        develop.adaptedTo(captureResult.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)),
+                        ShadingMap.from(captureResult, profile),
+                    ),
                 )
                 uri to System.currentTimeMillis() - started
             }
@@ -401,7 +406,7 @@ object RawBurstCapture {
         val baseName = "MF_${stamp}_${tag}_${captured}f"
         // Bitmap.compress writes no metadata at all, so without this every
         // photograph arrives in a library with no camera, no lens and no
-        // exposure. The DNG needs none of it -- DngCreator has already written
+        // exposure. The DNG needs none of it -- DngWriter has already written
         // full metadata from the same capture result.
         // The encode streams into the file it publishes; the calling thread
         // waits on the encoder's workers and the storage, so it waits on IO.
@@ -538,20 +543,12 @@ object RawBurstCapture {
     }
 
     /**
-     * Writes the merged CFA straight from the native buffer. DngCreator takes a
-     * ByteBuffer, so the raw payload never needs a Java-side copy.
-     */
-    /**
-     * Writes [stops] into the DNG's BaselineExposure tag in place. The tag
-     * is found from the file's first pages; the file is otherwise untouched.
-     * A DNG without the tag is left as it is, and says so in the log.
-     */
-    /**
      * Rewrites the tags `DngCreator` gives no way to set, in the bytes it
      * left for them: BaselineExposure with the guard's pull undone
      * ([DngMetadata.baselineExposureOffset]) and AsShotNeutral with the
      * camera neutral used by the JPEG matrix ([DngMetadata.asShotNeutralOffset]).
-     * The pixels are untouched.
+     * The pixels are untouched. Only the fallback's file needs it: ours is
+     * written with both.
      */
     private fun patchTags(resolver: android.content.ContentResolver, uri: android.net.Uri, stops: Float, neutral: FloatArray?) {
         try {
@@ -593,7 +590,29 @@ object RawBurstCapture {
     /** More than any `DngCreator` IFD0 and its values occupy: the raw data starts well past this. */
     private const val DNG_HEADER_BYTES = 64 * 1024
 
-    internal fun writeDng(
+    /**
+     * What the develop of a shot was, for the DNG to carry its local tone
+     * operator as a gain table map ([ProfileGainTableMap]).
+     */
+    internal class DevelopSource(
+        val profile: SensorProfile,
+        val color: ColorProfile,
+        /** Adapted to the shot's ISO, the exposure gain still automatic. */
+        val params: DevelopParams,
+        val shading: ShadingMap?,
+    )
+
+    /**
+     * Writes the merged CFA, from the native buffer, as a DNG of our own
+     * ([DngWriter], REFERENCE §3.9): the raw goes from [merged] to the file
+     * with no Java copy.
+     *
+     * `DngCreator` writes it instead only where [DngCamera2.record] says
+     * ours cannot represent the camera -- a non-Bayer sensor, or colour
+     * calibration the characteristics do not publish -- and then the two
+     * tags it cannot set are patched in as before.
+     */
+    internal suspend fun writeDng(
         context: Context,
         merged: java.nio.ByteBuffer,
         width: Int,
@@ -603,18 +622,39 @@ object RawBurstCapture {
         displayName: String,
         /**
          * Stops a converter should add to the as-shot exposure: the highlight
-         * guard's pull, undone. Zero leaves the DNG as `DngCreator` wrote it.
-         * See [DngMetadata.baselineExposureOffset].
+         * guard's pull, undone. See [DngMetadata.baselineExposureOffset].
          */
         baselineExposureStops: Float = 0f,
         /**
          * The camera-space scene white used by the JPEG matrix, written as
-         * the DNG's AsShotNeutral so the two outputs agree; null
-         * leaves `DngCreator`'s. See [DngMetadata.asShotNeutralOffset].
+         * the DNG's AsShotNeutral so the two outputs agree; null keeps the
+         * HAL's. See [DngMetadata.asShotNeutralOffset].
          */
         whiteBalanceNeutral: FloatArray? = null,
         rotationDegrees: Int = 0,
+        /** The shot's develop, for its gain table map; null writes none. */
+        develop: DevelopSource? = null,
     ): android.net.Uri? = try {
+        val orientation = CaptureOrientation.exif(rotationDegrees)
+        // The operator's tables from every other cell of the merge: the same
+        // neighbourhoods at a quarter of the reads, on the computation's
+        // threads. A failure costs the tag, never the file.
+        val gainTables = develop?.let { d ->
+            withContext(Dispatchers.Default) {
+                val started = System.currentTimeMillis()
+                runCatching {
+                    ProfileGainTableMap.forCapture(
+                        ProfileGainTableMap.halfScale(merged, width, height), d.profile, d.color, d.params,
+                        d.shading, baselineExposureStops,
+                    )
+                }.onFailure { Log.w(TAG, "no gain table map", it) }.getOrNull()
+                    ?.also { Log.i(TAG, "gain table map %dms".format(System.currentTimeMillis() - started)) }
+            }
+        }
+        val record = DngCamera2.record(
+            characteristics, result, width, height, orientation,
+            neutral = whiteBalanceNeutral, baselineExposureStops = baselineExposureStops, gainTables = gainTables,
+        )
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
             put(MediaStore.MediaColumns.MIME_TYPE, MIME_DNG)
@@ -628,15 +668,24 @@ object RawBurstCapture {
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: error("MediaStore insert returned null")
 
-        merged.rewind()
-        DngCreator(characteristics, result).use { dng ->
-            dng.setOrientation(CaptureOrientation.exif(rotationDegrees))
-            resolver.openOutputStream(uri)?.use { out ->
-                dng.writeByteBuffer(out, Size(width, height), merged, 0)
-            } ?: error("openOutputStream returned null")
-        }
-        if (kotlin.math.abs(baselineExposureStops) >= 0.005f || whiteBalanceNeutral != null) {
-            patchTags(resolver, uri, baselineExposureStops, whiteBalanceNeutral)
+        if (record != null) {
+            val pfd = resolver.openFileDescriptor(uri, "w") ?: error("openFileDescriptor returned null")
+            // The stream owns the descriptor and closes it once.
+            android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd).channel.use { channel ->
+                DngWriter.write(channel, record, merged)
+            }
+        } else {
+            Log.i(TAG, "the DNG writer cannot represent this camera; DngCreator writes the file")
+            merged.rewind()
+            DngCreator(characteristics, result).use { dng ->
+                dng.setOrientation(orientation)
+                resolver.openOutputStream(uri)?.use { out ->
+                    dng.writeByteBuffer(out, Size(width, height), merged, 0)
+                } ?: error("openOutputStream returned null")
+            }
+            if (kotlin.math.abs(baselineExposureStops) >= 0.005f || whiteBalanceNeutral != null) {
+                patchTags(resolver, uri, baselineExposureStops, whiteBalanceNeutral)
+            }
         }
 
         values.clear()
@@ -654,6 +703,8 @@ object RawBurstCapture {
         CaptureLog.record(context, uri, displayName)
         Log.i(TAG, "merged DNG written: $uri")
         uri
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
     } catch (e: Exception) {
         Log.e(TAG, "merged DNG write failed", e)
         null

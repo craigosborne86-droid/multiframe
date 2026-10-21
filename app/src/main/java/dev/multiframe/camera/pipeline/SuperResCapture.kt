@@ -18,7 +18,7 @@ private const val TAG = "Multiframe"
  *
  * A DNG is a raw file, and the canvas is not raw in the sense a DNG means: it
  * is three measured channels per cell, at a resolution the sensor does not
- * have, with holes filled from neighbours. `DngCreator` writes the sensor's
+ * have, with holes filled from neighbours. A DNG carries the sensor's
  * CFA and nothing else. So the DNG written beside a 2x JPEG is the merged CFA
  * of the same burst -- the same frames, the same alignment, accumulated the
  * ordinary way -- which is a raw file that is true, and which is why the 2x
@@ -119,6 +119,7 @@ object SuperResCapture {
                 baselineExposureStops = baselineExposureStops,
                 whiteBalanceNeutral = ColorProfile.cameraNeutral(captureResult, color.gains),
                 rotationDegrees = rotationDegrees,
+                develop = RawBurstCapture.DevelopSource(profile, color, params, shading),
             )
         } else {
             null

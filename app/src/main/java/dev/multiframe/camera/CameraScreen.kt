@@ -288,7 +288,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     } else null
     var rawCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var characteristics by remember { mutableStateOf<CameraCharacteristics?>(null) }
-    // DngCreator needs the capture metadata that produced the frame, which
+    // The DNG writer needs the capture metadata that produced the frame, which
     // CameraX does not surface directly.
     val lastCaptureResult = remember { AtomicReference<TotalCaptureResult?>(null) }
     // Every still capture's result by sensor timestamp, so the sequential

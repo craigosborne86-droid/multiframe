@@ -55,7 +55,7 @@ data class CaptureMetadata(
  * a photographer's result, that is a conspicuous omission: the first thing
  * anyone does with a picture they care about is look at how it was taken.
  *
- * The DNG needs none of this. `DngCreator` writes full metadata from the same
+ * The DNG needs none of this. `DngWriter` writes full metadata from the same
  * capture result already.
  */
 object ExifWriter {
