@@ -47,6 +47,14 @@ picture, the sensor saw it in the scene."
   the white balance turns that green. The reference frame is the newest
   (lowest-ISO only under DCG). The DNG carries the guard's pull undone in
   `BaselineExposure`; do not brighten the raw pixels instead.
+- **The DNG is written by our own writer** (`DngWriter`, `TiffDirectory`,
+  `DngCamera2`, REFERENCE §3.9): DNG 1.7.1, the tags `DngCreator` wrote with
+  their encodings held tag by tag (`DngWriterParityTest`), the raw strip
+  written from the merge's native buffer with no Java copy. Its
+  `ProfileGainTableMap`/`ProfileGainTableMap2` are the local tone
+  operator's own grid sampled (`ProfileGainTableMap`), never a model.
+  `DngCreator` writes the file only where `DngCamera2.record` returns null;
+  do not go back to writing with it and patching the bytes.
 - **The develop stays near the meter.** The automatic gain is held within
   half a stop under and three quarters over the meter's own gain
   (`DevelopParams.meteredGain`, `RawDeveloper.boundedGain`, the same bound

@@ -32,7 +32,7 @@ private const val TAG = "Multiframe"
  * Frames locked for one shutter press, with the capture metadata that produced
  * each of them.
  *
- * The metadata matters as much as the pixels: DngCreator needs the
+ * The metadata matters as much as the pixels: the DNG writer needs the
  * TotalCaptureResult of the frame it is writing, and white balance comes from
  * the same place. Pairing is by sensor timestamp, because a streaming ring has
  * many results in flight at once and "the last one seen" would be a race.

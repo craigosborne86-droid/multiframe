@@ -345,6 +345,7 @@ object RawDeveloper {
     private const val MIN_AUTO_GAIN = 0.25f
     private const val MAX_AUTO_GAIN = 64f
 
+    /** The exposure gain a develop of [frame] with [params] renders at; the DNG's gain table map indexes by it. */
     internal fun resolveGain(
         frame: BayerFrame,
         sensor: SensorProfile,

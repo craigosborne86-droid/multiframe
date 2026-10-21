@@ -2230,8 +2230,8 @@ sibling render the same tone; `LinearDeveloper.kt` is the Kotlin reference and
 with the sharpen off. On the full-size synthetic burst the develop took 850 ms,
 the sharpen 150 ms and the encode 220 ms.
 
-**The DNG beside it is the ordinary merge's.** A DNG is the sensor's CFA;
-`DngCreator` writes nothing else, and the canvas is not that. So the 2x path
+**The DNG beside it is the ordinary merge's.** A DNG is the sensor's CFA,
+and the canvas is not that. So the 2x path
 runs the ordinary merge as well -- the same frames placed by the same
 alignment fields, accumulated the §3.2 way -- and writes its DNG under the
 same name as the 2x JPEG. That DNG is a raw file that is true, and it is also
@@ -2484,12 +2484,13 @@ the DNG is the merged raw as exposed, a stop or more under, and a viewer
 renders it at the exposure its metadata describes -- which read as "the
 RAW files have regressed". DNG has the word for this: `BaselineExposure`
 (tag 50730), in stops, which a converter adds to the as-shot exposure
-before its own tone curve. `DngCreator` writes it as zero and gives no way
-to set it, so `RawBurstCapture.writeDng` writes the value after the fact
-into the eight bytes it left (`DngMetadata.baselineExposureOffset`,
-positioned read and write on the descriptor), with the shot's pull
-(`ZslCapture.Shot.pullStops`, read at the press) negated. The pixels are
-untouched; only the rendering intent is corrected.
+before its own tone curve. The writer (§3.9) writes it with the shot's pull
+(`ZslCapture.Shot.pullStops`, read at the press) negated. `DngCreator`
+wrote it as zero and gave no way to set it, so until the writer was ours the
+value was patched into the eight bytes it left
+(`DngMetadata.baselineExposureOffset`); the patch survives only on the
+writer's fallback. The pixels are untouched; only the rendering intent is
+corrected.
 
 ### 3.8 The Rendering, Calibrated on the Desk
 
@@ -2587,13 +2588,154 @@ in the raw -- the lens's flare -- not the grid's quantisation, and the
 phone's JPEG has them too).
 
 The DNG now says what the JPEG did in one more way: `AsShotNeutral` is
-rewritten with the reciprocal of the develop's white balance gains
-(`DngMetadata.asShotNeutralOffset`, patched beside `BaselineExposure`), since
+the develop's camera neutral (written by §3.9's writer; patched beside
+`BaselineExposure` on its fallback, `DngMetadata.asShotNeutralOffset`), since
 on the 11 Pro's telephoto the HAL's neutral colour point and its gains
 disagreed by a fifth of a stop in blue and the bench -- and every converter
 -- rendered the telephoto's clouds warm where the phone's were white. DNGs
 written before that carry the neutral point, and the bench renders them
 with it.
+
+### 3.9 The DNG, Written by Hand
+
+The DNG is ours: `DngWriter` lays a `DngRecord` into one little-endian TIFF
+directory (`TiffDirectory`), and `DngCamera2` reads the record's values from
+the camera. No framework class and no library sits between the merge and the
+file. `DngCreator` wrote DNG 1.4 that the app then patched in place
+(`BaselineExposure`, `AsShotNeutral`), and it cannot write a gain table map at
+all.
+
+**The file.** The header, IFD0 at offset 8 with its entries sorted, every value
+longer than four bytes after it on a word boundary, then the raw. The raw is the
+merged CFA as the merge left it: 16-bit little-endian, a row to a strip,
+starting on a sixteen-byte boundary. It is handed to the descriptor's
+`FileChannel` as the merge's direct buffer, so it reaches the file with no Java
+copy (`ParcelFileDescriptor.AutoCloseOutputStream(...).channel`). Opcode lists
+and the gain table maps are big-endian, as the specification gives opcode lists.
+
+**What it says, and where each value comes from.** These are the tags `DngCreator`
+wrote on every September file, read from the keys it read:
+
+| Tags | Value | Source |
+|---|---|---|
+| 254, 256-259, 262, 277, 284 | main image, W x H, 16 bit, uncompressed, CFA, 1 sample, chunky | the raw |
+| 270, 33432 | empty ImageDescription, Copyright | -- |
+| 271, 272, 50708, 305 | Make, Model, `MODEL-MANUFACTURER-BRAND`, the build fingerprint | `Build` |
+| 274 | Orientation | `CaptureOrientation.exif` of the shot's rotation |
+| 282, 283, 296 | 72/1 dpi, inches | -- |
+| 306, 36867 | DateTime, DateTimeOriginal | now, less the frame's age on the realtime clock |
+| 33421, 33422, 50710, 50711 | 2x2 pattern, CFAPattern, planes R G B, rectangular | `SENSOR_INFO_COLOR_FILTER_ARRANGEMENT` |
+| 33434, 33437, 34855, 37386 | exposure (ns/1e9), f-number, ISO, focal length (hundredths) | the result |
+| 37398, 50706, 50707 | TIFF/EP 1.0.0.0; DNG 1.7.1.0; backward 1.1.0.0 | -- |
+| 50713, 50714, 50717 | black per site in hundredths; white | `SENSOR_DYNAMIC_BLACK_LEVEL`/`_WHITE_LEVEL`, else the static ones |
+| 50718-50720, 50829 | scale 1; crop 8 px each side; ActiveArea the whole raw | -- |
+| 50721-50724, 50964, 50965, 50778, 50779 | colour, calibration and forward matrices; their illuminants | the characteristics, rationals as given |
+| 50728 | AsShotNeutral | the develop's camera neutral in millionths (§3.8); the HAL's neutral where none is given |
+| 50730 | BaselineExposure | the guard's pull undone, hundredths of a stop (§3.7) |
+| 51009 | OpcodeList2: a GainMap per site, red, even green, odd green, blue | `STATISTICS_LENS_SHADING_CORRECTION_MAP` |
+| 51022 | OpcodeList3: WarpRectilinear | `LENS_DISTORTION`, `LENS_INTRINSIC_CALIBRATION` |
+| 51041 | NoiseProfile, a pair per plane from its first site | `SENSOR_NOISE_PROFILE` |
+| 52525, 52544 | ProfileGainTableMap, ProfileGainTableMap2 | the local operator, below |
+
+The warp: Camera2's model is in units of the focal length, DNG's in units of the
+centre-to-farthest-corner distance `d`, so with `m = d / fx`, `kr_i = k_i m^2i`
+and `kt = p m`. The whole warp is then scaled by the largest zoom `kr0 = 1 -
+0.002 n` that keeps the source of every corner and edge midpoint on the array
+(a hundred-thousandth of `d` of slack), so the correction reads no pixel the
+sensor did not. `DngCreator` zooms the same way; on 86 of the 93 September files
+the zoom is its, on the other 7 one step (0.2 %) larger.
+
+**Held tag by tag.** `DngWriterParityTest` rebuilds each September file's record
+from its own tags, writes it, and compares: on all 93 files every one of the 52
+compared tags has the same type, count and value bytes, and the raw is identical
+byte for byte. The lens shading opcodes, rebuilt from the decoded shading, are
+DngCreator's byte for byte. `DngWriterDeviceTest` is the other half -- our
+record of a live capture against `DngCreator`'s, tag by tag -- and needs the
+phone.
+
+**Intended differences from a `DngCreator` file.**
+
+- DNGVersion 1.7.1.0, not 1.4.0.0: ProfileGainTableMap2, the tag with the gamma,
+  is a 1.7 tag. DNGBackwardVersion stays 1.1.0.0, as the specification asks of
+  optional tags (compatibility issues 15 and 16).
+- StripOffsets: the raw starts on a sixteen-byte boundary after a directory laid
+  out in our own order. The strips themselves are identical.
+- BaselineExposure and AsShotNeutral carry the develop's values from the start
+  (on September files they were patched, or carried the HAL's neutral in 1/1024).
+- The WarpRectilinear's zoom, as above.
+- The two gain table maps, when the shot was developed with LOCAL TONE.
+- Orientation is the shot's: the September files carry 9, `DngCreator`'s value
+  when it is not told; production has set it since.
+- No thumbnail or preview: `DngCreator` wrote none for us either (it writes one
+  only when given a bitmap, and the app never gave it one).
+
+**The fallback.** `DngCamera2.record` returns null, and `DngCreator` writes the
+file with the two tags patched in as before, in two cases the writer cannot
+represent: a sensor that is not a 2x2 Bayer mosaic, and a camera that publishes
+no `SENSOR_COLOR_TRANSFORM1` through its characteristics -- where `DngCreator`
+reaches the calibration by a route an application does not have (`DngMetadata`).
+Neither development phone is either.
+
+#### 3.9.1 The Local Operator as a Gain Table Map
+
+The operator of §3.5 scales a pixel by `2 ^ lift(base)`, where the base is the
+grid sliced at the pixel's position and its own luminance: a function of where
+the pixel is and how bright it is, and of nothing else. That is the shape of a
+DNG gain table map -- a grid of one-dimensional gain tables, bilinearly
+interpolated in space, indexed by the pixel's own colour, the gain multiplying R,
+G and B equally -- so one table per grid node, sampled along the luminance axis,
+is the operator. It is computed from the same splats and parameters as the
+JPEG's (`ProfileGainTableMap.forCapture`, on every other 2x2 cell of the merge,
+which reads the same neighbourhoods, §3.5), deterministically and with no model.
+
+- *Space.* Node `i` sits at pixel `(i + 0.5) cell`, so in the map's half-pixel
+  relative coordinates the origin is half a cell and the spacing one cell
+  (`cell / W`, `cell / H`); past the outer nodes both grid and map hold the edge.
+- *Index.* `MapInputWeights` are the Y row of ROMM RGB to XYZ (0.2880, 0.7119,
+  0.0001, 0, 0): the index is luminance, the quantity the operator splats, in
+  RIMM, whose white is the develop's white. A converter's linear values are the
+  develop's divided by `exposureGain / 2^BaselineExposure`, so the table at
+  index `t` holds the operator's gain at luminance `u(t) exposureGain /
+  2^BaselineExposure`.
+- *ProfileGainTableMap2* (52544, DNG 1.7): 128 float gains per node, `Gamma` =
+  1/4, so `u(t) = (t / 128)^4` and the shadows -- where the lift is -- have the
+  table's resolution. *ProfileGainTableMap* (52525, DNG 1.6, no gamma): the same
+  nodes, `u(t) = t / 128`, for a reader that knows only 1.6. A 1.7 reader
+  applies only the 1.7 tag.
+- *Index 0* is black, where the operator returns 1 for want of a luminance; it
+  holds the gain just above the operator's floor, so the first interval does not
+  ramp from 1.
+
+Size: a 4080x3064 frame has 32 x 24 nodes, so each tag is about 393 KB beside
+the 25 MB raw. Only a shot developed with LOCAL TONE carries them.
+
+**The desk proof** (`ProfileGainTableMapTest`): a reader of the tag written from
+the specification's text alone, fed the pixel's linear RIMM colour at
+BaselineExposure, against the operator on the same pixel, every third pixel of
+the five representative September fixtures at half scale, pixels with RIMM
+luminance under one. Two comparisons, in stops of |log2(tag / operator)|:
+
+| | 1.7 encoding median / p99 | 1.7 total median / p99 | 1.6 total p99 |
+|---|---|---|---|
+| Backlit tower (ceiling 2.95) | 0.0004 / 0.0087 | 0.0005 / 0.072 | 0.71 |
+| Flower | 0.0003 / 0.0033 | 0.0010 / 0.040 | 0.048 |
+| Dog | 0.0001 / 0.0031 | 0.0001 / 0.0033 | 0.0036 |
+| Street (ceiling 3.00) | 0.0008 / 0.0206 | 0.0011 / 0.118 | 0.14 |
+| ISO 918 | 0.0002 / 0.0028 | 0.0003 / 0.0032 | 0.0036 |
+
+*Encoding* asks the operator at the tag's own luminance: what the tag can
+represent, held under 0.002 / 0.03 stop. *Total* asks it as the develop does --
+after purity compression, on sRGB luminance -- which is what a converter will
+differ by, held under 0.005 / 0.15 stop; the difference is the saturated sky and
+foliage, whose luminance purity compression moves and a converter does not. The
+1.6 tag is reported, not held: without a gamma its first sample is seven stops
+under white, and the tower's facade is under that.
+
+**An open question for a converter.** The specification gives the gain table
+maps no byte order of their own. Ours are big-endian, like the GainMap opcode
+whose fields they share; a reader that takes the file's order would read them
+wrongly. `work/dng-writer-20261021/` has the tower with the payload each way,
+for Lightroom to answer.
 
 ## Appendix: File Inventory by Subsystem
 
@@ -2605,7 +2747,7 @@ with it.
 | **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt` |
 | **2x canvas** | `SubPixelAccumulator.kt` (reference), `NativeSubPixel.kt` (strips, and the develop entry points), `SubPixelCoverage.kt` (the prediction and its bounds), `LinearDeveloper.kt` (the linear develop, reference), `SuperResCapture.kt` (the outputs) |
 | **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `BilateralGrid.kt` (local tone, reference), `HdrGainMap.kt` (the HDR rendition's gain map, §3.1 step 6b), `UltraHdr.kt` (its platform encode), `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
-| **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngMetadata.kt` (reads a DNG's colour tags; places the `BaselineExposure` the guard's pull and the `AsShotNeutral` the develop's white balance are written into, §3.7, §3.8) |
+| **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngWriter.kt` (the DNG, §3.9), `TiffDirectory.kt` (its IFD), `DngCamera2.kt` (its values from the camera), `DngOpcodes.kt` (shading and warp opcodes), `ProfileGainTableMap.kt` (the local operator as a gain table map), `DngMetadata.kt` (reads a DNG's colour tags; places `BaselineExposure` and `AsShotNeutral` for the `DngCreator` fallback, §3.7, §3.8) |
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt`, `ShutterCap.kt` (shutter priority under the meter, §3.7) |
 | **Camera** | `CameraCapabilities.kt`, `LensCatalog.kt`, `LensProfile.kt`, `ManualSettings.kt`, `TouchFocus.kt`, `FocusPeaking.kt`, `OrientationTracker.kt` |
 | **DCG calibration** | `DcgCalibration.kt`, `DcgProfiler.kt`, `DcgCalibrationStore.kt` |

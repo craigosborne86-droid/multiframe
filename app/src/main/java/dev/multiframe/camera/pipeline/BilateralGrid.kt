@@ -149,9 +149,17 @@ class BilateralGrid private constructor(
     }
 
     /** The base at a pixel: its neighbourhood's mean log luminance near its own. */
-    fun slice(x: Int, y: Int, logL: Float): Float {
-        val fx = ((x + 0.5f) / cell - 0.5f).coerceIn(0f, (cellsX - 1).toFloat())
-        val fy = ((y + 0.5f) / cell - 0.5f).coerceIn(0f, (cellsY - 1).toFloat())
+    fun slice(x: Int, y: Int, logL: Float): Float =
+        sliceAt((x + 0.5f) / cell - 0.5f, (y + 0.5f) / cell - 0.5f, logL)
+
+    /**
+     * [slice] at a position in cells rather than pixels: cell `i`'s node is
+     * at `i`, which is pixel `(i + 0.5) * cell - 0.5`. What the DNG's gain
+     * table map samples the operator at ([ProfileGainTableMap]).
+     */
+    fun sliceAt(cellX: Float, cellY: Float, logL: Float): Float {
+        val fx = cellX.coerceIn(0f, (cellsX - 1).toFloat())
+        val fy = cellY.coerceIn(0f, (cellsY - 1).toFloat())
         val fb = binOf(logL)
         val x0 = fx.toInt(); val y0 = fy.toInt(); val b0 = fb.toInt()
         val x1 = min(x0 + 1, cellsX - 1); val y1 = min(y0 + 1, cellsY - 1); val b1 = min(b0 + 1, BINS - 1)
@@ -186,10 +194,14 @@ class BilateralGrid private constructor(
      * end is raised by up to [ceiling] stops. See [ceiling] for how much
      * the scene earns and [lift] for how it is spent.
      */
-    fun gain(x: Int, y: Int, luminance: Float, highlight: Float, shadowLift: Float, shadowLiftMax: Float): Float {
+    fun gain(x: Int, y: Int, luminance: Float, highlight: Float, shadowLift: Float, shadowLiftMax: Float): Float =
+        gainAt((x + 0.5f) / cell - 0.5f, (y + 0.5f) / cell - 0.5f, luminance, highlight, shadowLift, shadowLiftMax)
+
+    /** [gain] at a position in cells: see [sliceAt]. */
+    fun gainAt(cellX: Float, cellY: Float, luminance: Float, highlight: Float, shadowLift: Float, shadowLiftMax: Float): Float {
         if (!ready || (highlight <= 0f && shadowLift <= 0f) || luminance <= MIN_LUMINANCE) return 1f
         val logL = logOf(luminance)
-        val base = slice(x, y, logL)
+        val base = sliceAt(cellX, cellY, logL)
         return 2f.pow(lift(base - pivot, brightEnd - base, highlight, ceiling(shadowLift, shadowLiftMax)))
     }
 

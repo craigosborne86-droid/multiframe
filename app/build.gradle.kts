@@ -110,7 +110,7 @@ android {
                 test.systemProperty("mf.dng.dir", project.file("src/test/resources/dng_samples/september").absolutePath)
             }
             listOf("mf.dng.dir", "mf.out.dir", "mf.variants", "mf.crop", "mf.scale", "mf.mosaic", "mf.stages", "mf.burst.dir", "mf.burst.out", "mf.burst.sr", "mf.burst.quant", "mf.burst.noise", "mf.burst.refine",
-                "mf.sr.synthetic", "mf.sr.real", "mf.sr.out", "mf.sr.rois", "mf.sr.only", "mf.align.timing", "mf.align.label", "mf.hdr.dir", "mf.hdr.out", "mf.hdr.only", "mf.hdr.nolocal").forEach { key ->
+                "mf.sr.synthetic", "mf.sr.real", "mf.sr.out", "mf.sr.rois", "mf.sr.only", "mf.align.timing", "mf.align.label", "mf.hdr.dir", "mf.hdr.out", "mf.hdr.only", "mf.hdr.nolocal", "mf.dngwriter.out").forEach { key ->
                 project.findProperty(key)?.let { test.systemProperty(key, it.toString()) }
             }
             // Opt-in ARM64 desktop replay; never changes the device APK/runtime.
