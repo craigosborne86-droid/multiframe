@@ -203,6 +203,7 @@ object Haptics {
     fun tick(view: View)       = view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
     // dialDetent uses the device vibrator's predefined EFFECT_CLICK;
     // see Theme.kt for the unsupported-device fallback.
+    // SEGMENT_FREQUENT_TICK on API 34+, CLOCK_TICK on API 33, which lacks it.
     fun segment(view: View)    = view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK)
     fun reject(view: View)     = view.performHapticFeedback(HapticFeedbackConstants.REJECT)
     fun confirm(view: View)    = view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
