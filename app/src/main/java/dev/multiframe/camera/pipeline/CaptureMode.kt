@@ -26,6 +26,12 @@ data class CapturePlan(
     /** What the mode resolved to, which for AUTO is the interesting part. */
     val resolved: CaptureMode,
     val reason: String,
+    /**
+     * NIGHT's still burst, solved from the hand ([NightPlanner]), or null
+     * where NIGHT is the fixed plan: no gyroscope, no manual sensor, or a
+     * NIGHT that AUTO resolved to rather than the user chose.
+     */
+    val night: NightPlan? = null,
 )
 
 /**
@@ -52,7 +58,13 @@ object CaptureModes {
     /** Below this mean brightness, a scene is dark enough to want night mode. */
     const val DARK_THRESHOLD = 0.10f
 
-    /** Long enough to gather light, short enough that a held phone stays sharp. */
+    /**
+     * NIGHT's shutter cap where it has no [NightPlan]: past the frame
+     * interval, so no cap, and the burst is the meter's own frames from the
+     * ring. With a plan the cap is the same -- the repeating request is never
+     * exposed past the frame interval -- and the long exposures are the
+     * still burst's ([NightPlanner]).
+     */
     const val NIGHT_EXPOSURE_NS = 250_000_000L
 
     /** Fast enough to stop ordinary movement: 1/250 s. */
@@ -98,11 +110,24 @@ object CaptureModes {
         analysis: SceneAnalysis,
         availableFrames: Int,
         requestedFrames: Int,
+        /** NIGHT's plan from the hand, where the hardware can shoot one. */
+        night: NightPlan? = null,
     ): CapturePlan {
         val ceiling = availableFrames.coerceAtLeast(1)
         val resolved = if (mode == CaptureMode.PHOTO) resolveAuto(analysis) else mode
 
         return when (resolved) {
+            // NIGHT chosen by name, with a hand to read: the planner's count
+            // and still burst. The shutter cap is the fixed plan's.
+            CaptureMode.NIGHT if mode == CaptureMode.NIGHT && night != null -> CapturePlan(
+                frames = minOf(ceiling, night.frames),
+                maxExposureNs = NIGHT_EXPOSURE_NS,
+                protectHighlights = false,
+                resolved = CaptureMode.NIGHT,
+                reason = "night mode: ${night.motion.label.lowercase()}",
+                night = night,
+            )
+
             CaptureMode.NIGHT -> CapturePlan(
                 // Everything the ring can give: the scene is still, so every
                 // extra frame is a real improvement. Unless the mode the user

@@ -235,6 +235,18 @@ normal preview startup, using the existing ZSL ring. The user never sees them.
   never accumulated, so a lamp in the frame does not walk the guard to the
   burst's whole allowance (`ExposureStrategy.Guard`). The DNG carries the
   pull undone in `BaselineExposure`.
+- **NIGHT is solved from the hand (shake-o-meter).** While NIGHT is
+  selected the gyroscope's RMS rate over the last half second classifies
+  the phone as handheld, braced or tripod, with hysteresis, at thresholds
+  derived from blur: the newest (reference) frame moves under 0.75 px at
+  the lens's focal length in pixels. The press shoots a still burst of
+  1/15--1/8 s × 16--28 frames handheld, 1/4--1/2 s braced, up to 1 s with
+  the ring's whole depth on a tripod, at the meter's light re-split into
+  that shutter and a lower ISO, so the develop stays near the meter. The
+  plan is a live Amber reading in the console. With no gyroscope or no
+  manual sensor NIGHT keeps its fixed plan. Acceptance: the JVM tests of
+  the classifier and the planner pass; on the phone, a tripod reads TRIPOD
+  within a second and a hand never does (`REFERENCE.md` §3.7).
 - **The filmic shoulder.** The tone curve's roll-off is a logarithm from the
   knee (0.7) to a white point, spending its headroom evenly in stops, in
   place of an exponential that was white two stops over the knee

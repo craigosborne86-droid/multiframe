@@ -47,6 +47,8 @@ internal fun Revision05Console(
     turret: @Composable () -> Unit, shutter: @Composable () -> Unit, gallery: @Composable () -> Unit,
     panel: @Composable () -> Unit, selectedTab: RangefinderTab, onTab: (RangefinderTab) -> Unit,
     exposureAvailable: Boolean = true, focusAvailable: Boolean = true,
+    /** NIGHT's plan from the hand, a live reading: Amber, in the console, never on the photograph. */
+    nightReading: String? = null,
 ) {
     val footerHeight = if (landscape) TitaniumTokens.LandscapeFooter else TitaniumTokens.PortraitFooter
     val panelVisible = showPro || showWhiteBalance || showInfo || sweep != null
@@ -88,6 +90,7 @@ internal fun Revision05Console(
                         showInfo -> {
                             Text("Next photograph",style=TitaniumTokens.Readable)
                             Text(summary,style=TitaniumTokens.ReadableSmall,modifier=Modifier.testTag("revision05-capture-summary"))
+                            if(nightReading!=null) Text(nightReading,style=TitaniumTokens.Gauge,modifier=Modifier.testTag("revision05-night-plan"))
                             Text(previewReading,style=TitaniumTokens.GaugeBone,modifier=Modifier.testTag("revision05-preview-reading"))
                         }
                         else -> panel()
@@ -114,6 +117,9 @@ internal fun Revision05Console(
                         "rangefinder-focus-assist-toggle",onFocusAssist)
                     InstrumentButton("Info","Next photograph configuration",false,true,"revision05-info",onInfo)
                 }
+                if(nightReading!=null) Text(nightReading,style=TitaniumTokens.Gauge,maxLines=1,
+                    modifier=Modifier.padding(horizontal=8.dp).semantics { contentDescription = "Night plan $nightReading" }
+                        .testTag("revision05-night-plan"))
                 Spacer(Modifier.weight(1f))
             }
             if (mergeProgress != null || status.isNotBlank() || cancellable) Row(Modifier.align(Alignment.BottomCenter)

@@ -10,8 +10,9 @@ import android.os.HandlerThread
 import android.os.SystemClock
 
 /**
- * The inertial sensors, read for the mosaic: the gyroscope for the stability
- * gate and the rotation vector for the guidance.
+ * The inertial sensors, read for the mosaic -- the gyroscope for the stability
+ * gate and the rotation vector for the guidance -- and for NIGHT, whose
+ * exposure is solved from the gyroscope's rate ([MotionMeter], [NightPlanner]).
  *
  * ### The gyroscope
  *
@@ -38,12 +39,12 @@ import android.os.SystemClock
  * Runs on its own handler thread at the fastest rate the platform offers, and
  * does nothing on the main thread: a listener there would put a sensor
  * callback between every frame the viewfinder draws. Listens only between
- * [start] and [stop] -- a mosaic's duration -- and is otherwise idle; the
+ * [start] and [stop] -- a mosaic's duration, or NIGHT's -- and is otherwise idle; the
  * screen holds one for its lifetime and [close]s it when it goes.
  */
 class MotionSensor(context: Context) : AutoCloseable {
 
-    private class Sample(val timestampNs: Long, val speed: Float)
+    private class Sample(val timestampNs: Long, val x: Float, val y: Float, val z: Float, val speed: Float)
 
     private val manager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val gyro: Sensor? = manager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
@@ -140,7 +141,7 @@ class MotionSensor(context: Context) : AutoCloseable {
         override fun onSensorChanged(e: SensorEvent) {
             val speed = StabilityGate.speedOf(e.values[0], e.values[1], e.values[2])
             synchronized(lock) {
-                samples.addLast(Sample(e.timestamp, speed))
+                samples.addLast(Sample(e.timestamp, e.values[0], e.values[1], e.values[2], speed))
                 val horizon = e.timestamp - KEEP_NS
                 while (samples.isNotEmpty() && samples.first().timestampNs < horizon) samples.removeFirst()
             }
@@ -171,6 +172,23 @@ class MotionSensor(context: Context) : AutoCloseable {
             for (s in samples) if (s.timestampNs >= sinceNs && s.speed > peak) peak = s.speed
         }
         return peak
+    }
+
+    /**
+     * The gyroscope's samples at or after [sinceNs], as a [GyroTrace] for
+     * [MotionMeter]; null when there is no gyroscope.
+     */
+    fun gyroTrace(sinceNs: Long): GyroTrace? {
+        if (gyro == null) return null
+        synchronized(lock) {
+            val kept = samples.filter { it.timestampNs >= sinceNs }
+            return GyroTrace(
+                LongArray(kept.size) { kept[it].timestampNs },
+                FloatArray(kept.size) { kept[it].x },
+                FloatArray(kept.size) { kept[it].y },
+                FloatArray(kept.size) { kept[it].z },
+            )
+        }
     }
 
     /** The current sensor clock, for the caller's window bookkeeping. */

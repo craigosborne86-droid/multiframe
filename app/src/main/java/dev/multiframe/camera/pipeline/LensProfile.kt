@@ -86,6 +86,22 @@ data class LensProfile(
 
     val sensorDiagonalMm: Float get() = hypot(sensorWidthMm, sensorHeightMm)
 
+    /**
+     * The focal length in pixels of a frame [frameWidthPx] wide spanning the
+     * active array: the image's scale in pixels per radian of rotation. From
+     * the intrinsic calibration where the lens publishes it, else the focal
+     * length over the physical width, else the 35mm equivalent
+     * ([StabilityGate.pixelsPerRadianFromEquivalent]). The physical width is
+     * of the active array here, which differs from the pixel array's by the
+     * border's few pixels.
+     */
+    fun pixelsPerRadian(frameWidthPx: Int): Float {
+        val fx = intrinsics?.getOrNull(0) ?: 0f
+        if (fx > 0f && activeArrayWidth > 0 && frameWidthPx > 0) return fx * frameWidthPx / activeArrayWidth
+        val physical = StabilityGate.pixelsPerRadian(focalLengthMm, sensorWidthMm, frameWidthPx)
+        return if (physical > 0f) physical else StabilityGate.pixelsPerRadianFromEquivalent(equivalent35mm, frameWidthPx)
+    }
+
     /** Whether this lens can bracket ISO, which is what DCG needs. */
     val supportsBracketing: Boolean
         get() = supportsManualSensor && supportsRaw && isoMin != null && isoMax != null

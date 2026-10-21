@@ -137,6 +137,10 @@ import dev.multiframe.camera.pipeline.DcgProfiler
 import dev.multiframe.camera.pipeline.DevelopParams
 import dev.multiframe.camera.pipeline.MosaicGuide
 import dev.multiframe.camera.pipeline.MotionSensor
+import dev.multiframe.camera.pipeline.MotionClassifier
+import dev.multiframe.camera.pipeline.MotionMeter
+import dev.multiframe.camera.pipeline.NightPlan
+import dev.multiframe.camera.pipeline.NightPlanner
 import dev.multiframe.camera.pipeline.MosaicGuideView
 import dev.multiframe.camera.pipeline.MosaicCapture
 import dev.multiframe.camera.pipeline.MosaicPlanner
@@ -546,8 +550,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // NIGHT's plan from the hand and the meter, re-solved every poll while
+    // NIGHT is selected (the loop beside the motion sensor below); null where
+    // NIGHT is the fixed plan.
+    var nightPlan by remember { mutableStateOf<NightPlan?>(null) }
+
     // What the chosen mode implies for this scene, recomputed as either moves.
-    val capturePlan = remember(captureMode, scene, zslStream, burstFrames, manualBurst, digitalZoom, caps, brenizerActive) {
+    val capturePlan = remember(captureMode, scene, zslStream, burstFrames, manualBurst, digitalZoom, caps, brenizerActive, nightPlan) {
         val stream = zslStream
         if (stream == null) null
         else CaptureModes.plan(
@@ -555,6 +564,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
             analysis = scene ?: SceneAnalysis(0f, 0.5f, 0.1f, 3f),
             availableFrames = stream.maxBurst,
             requestedFrames = burstFrames,
+            night = nightPlan,
         ).let { plan ->
             // NIGHT's automatic plan fills the ring. A depth explicitly set
             // in PRO must reach the shutter, while PHOTO's plan retains its
@@ -1301,7 +1311,12 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // shutter; idle, they are off. And the preview's zoom goes back to one:
     // the dots are computed on the uncropped sensor frame, and a zoomed
     // preview would move under them by the zoom.
-    LaunchedEffect(superResPhase.selected, brenizerActive, zslStream) {
+    // NIGHT wants the gyroscope too, for as long as it is selected: the
+    // window its plan reads is the last half second before the press.
+    val nightMetering = captureMode == CaptureMode.NIGHT && zslStream != null &&
+        caps?.let { NightPlanner.supported(motion.isAvailable, it) } == true
+    LaunchedEffect(superResPhase.selected, brenizerActive, zslStream, nightMetering) {
+        if (nightMetering) motion.start()
         if (superResPhase.selected && brenizerActive) {
             motion.start()
             val stream = zslStream
@@ -1310,8 +1325,37 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 digitalZoom = 1f
                 stream.setZoom(1f, settings, c)
             }
-        } else {
+        } else if (!nightMetering) {
             motion.stop()
+        }
+    }
+
+    // NIGHT's shake-o-meter: the hand's rate over the last half second,
+    // classified with hysteresis, and the plan solved from it and the meter.
+    // A few hundred samples summed every tenth of a second: well inside the
+    // main thread's budget. Absent a gyroscope or a manual sensor the plan is
+    // null and NIGHT is the fixed plan.
+    LaunchedEffect(nightMetering, zslStream) {
+        nightPlan = null
+        val stream = zslStream ?: return@LaunchedEffect
+        val c = caps ?: return@LaunchedEffect
+        if (!nightMetering) return@LaunchedEffect
+        val isoMin = c.isoMin ?: return@LaunchedEffect
+        val isoMax = c.isoMax ?: return@LaunchedEffect
+        val exposureMin = c.exposureMinNs ?: return@LaunchedEffect
+        val exposureMax = c.exposureMaxNs ?: return@LaunchedEffect
+        val pixelsPerRadian = lensProfiles[stream.lensId]?.pixelsPerRadian(stream.config.width)
+            ?: MosaicCapture.pixelsPerRadian(stream)
+        val classifier = MotionClassifier(pixelsPerRadian)
+        while (true) {
+            kotlinx.coroutines.delay(NightPlanner.POLL_MS)
+            val now = motion.nowNs()
+            val trace = motion.gyroTrace(now - MotionMeter.WINDOW_NS) ?: break
+            val rate = MotionMeter.rmsRate(trace, now)
+            val motionClass = classifier.update(rate, now)
+            val (iso, exposureNs) = stream.latestExposure() ?: continue
+            nightPlan = NightPlanner.solve(motionClass, rate, pixelsPerRadian, iso, exposureNs,
+                isoMin, isoMax, exposureMin, exposureMax, stream.maxBurst)
         }
     }
 
@@ -1984,12 +2028,29 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     val dng = dngEnabled
                     val format = outputFormat
 
-                    val shotSettings = settings
                     val shotTimerSeconds = timerSeconds
                     val currentCaps = caps
-                    if (currentCaps != null && settings.manualExposureActive(currentCaps) &&
-                        settings.effectiveExposureTimeNs(currentCaps) > 33_333_333L) {
-                        if (busy || lockPending || stream.lockedFrames() + frames > stream.ringCapacity) return
+                    // NIGHT's plan is a still burst: it starts at the press,
+                    // at the planned exposure, never in the repeating
+                    // request. PRO's manual exposure outranks it, and the
+                    // Super Res canvas is ZSL's.
+                    val night = capturePlan?.night?.takeIf {
+                        !canvas2x && currentCaps != null && !settings.manualExposureActive(currentCaps)
+                    }
+                    val stillSettings = when {
+                        currentCaps == null -> null
+                        night != null -> settings.copy(manualExposure = true, iso = night.iso, exposureTimeNs = night.exposureNs)
+                        settings.manualExposureActive(currentCaps) &&
+                            settings.effectiveExposureTimeNs(currentCaps) > 33_333_333L -> settings
+                        else -> null
+                    }
+                    if (currentCaps != null && stillSettings != null) {
+                        if (busy || lockPending) return
+                        if (stream.lockedFrames() + frames > stream.ringCapacity) {
+                            Haptics.reject(view)
+                            status = "ring full: $developing developing — a moment"
+                            return
+                        }
                         busy = true
                         captureJob = scope.launch {
                             try {
@@ -1998,9 +2059,10 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                     kotlinx.coroutines.delay(1000)
                                 }
                                 countdown = 0
-                                status = "Capturing $frames long exposures"
+                                status = if (night != null) "NIGHT: $frames × ${NightPlanner.shutterLabel(night.exposureNs, displayLocale)}"
+                                    else "Capturing $frames long exposures"
                                 val shot = CaptureFeedback.afterSuspending(
-                                    capture = { stream.captureStillBurst(shotSettings, currentCaps, frames) },
+                                    capture = { stream.captureStillBurst(stillSettings, currentCaps, frames) },
                                     successful = { it.count > 0 },
                                     vibrate = { Haptics.mechanicalRelease(context) },
                                 )
@@ -2145,6 +2207,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     dngEnabled && caps?.supportsRaw == true, digitalZoom, superResOffered, displayLocale) +
                     (lens?.let { " · Camera: ${it.label} · Sensor crop: %.1f×".format(displayLocale, digitalZoom) } ?: ""),
                 status = status,
+                nightReading = capturePlan?.night?.takeIf { !settings.manualExposure }?.reading(displayLocale),
                 previewReading = "Preview: ISO ${gauges.iso} · ${if(gauges.exposureNs > 0) ManualSettings(exposureTimeNs = gauges.exposureNs).shutterLabel(displayLocale) else "—"} · ${gauges.cct} K",
                 mergeProgress = mergeProgress,
                 onPro = { showWhiteBalance = false; showCaptureInfo = false; setPro(!showPro) },
