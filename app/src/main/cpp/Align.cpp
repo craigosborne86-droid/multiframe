@@ -215,6 +215,7 @@ constexpr int kLkIterations = 3;
 constexpr int kLkOne = 256;
 constexpr double kLkMinGradient = 0.25;
 constexpr double kLkMinSnr = 1.0;
+constexpr double kLkConverged = 1.0 / 1024;
 
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -293,9 +294,38 @@ void refineSubPixel(const Plane& ref, const Plane& alt, int x0, int y0, int tile
         return rd[static_cast<size_t>(clampi(y, 0, rh - 1)) * rw + clampi(x, 0, rw - 1)];
     };
     int64_t hxx = 0, hxy = 0, hyy = 0;
+    const bool interior = x0 >= 1 && y0 >= 1 && x0 + tileW + 1 <= rw && y0 + tileH + 1 <= rh;
     for (int yy = 0; yy < tileH; ++yy) {
         const int y = y0 + yy;
-        for (int xx = 0; xx < tileW; ++xx) {
+        int xx = 0;
+#ifdef MF_HAS_NEON
+        if (interior) {
+            // The same differences, eight at a time, where no read can leave
+            // the plane. |g| <= 255, so g^2 <= 65025 and a lane holds a row's
+            // quarter of them in 32 bits before it is widened.
+            const uint8_t* row = rd + static_cast<size_t>(y) * rw + x0;
+            int32x4_t sxx = vdupq_n_s32(0), sxy = vdupq_n_s32(0), syy = vdupq_n_s32(0);
+            for (; xx + 8 <= tileW; xx += 8) {
+                const int16x8_t a = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(row + xx + 1), vld1_u8(row + xx - 1)));
+                const int16x8_t b = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(row + xx + rw), vld1_u8(row + xx - rw)));
+                const uint16x8_t c = vshll_n_u8(vld1_u8(row + xx), 8);
+                const int i = yy * tileW + xx;
+                vst1q_s32(s.gx.data() + i, vmovl_s16(vget_low_s16(a)));
+                vst1q_s32(s.gx.data() + i + 4, vmovl_s16(vget_high_s16(a)));
+                vst1q_s32(s.gy.data() + i, vmovl_s16(vget_low_s16(b)));
+                vst1q_s32(s.gy.data() + i + 4, vmovl_s16(vget_high_s16(b)));
+                vst1q_s32(s.t.data() + i, vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(c))));
+                vst1q_s32(s.t.data() + i + 4, vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(c))));
+                sxx = vmlal_s16(vmlal_s16(sxx, vget_low_s16(a), vget_low_s16(a)), vget_high_s16(a), vget_high_s16(a));
+                sxy = vmlal_s16(vmlal_s16(sxy, vget_low_s16(a), vget_low_s16(b)), vget_high_s16(a), vget_high_s16(b));
+                syy = vmlal_s16(vmlal_s16(syy, vget_low_s16(b), vget_low_s16(b)), vget_high_s16(b), vget_high_s16(b));
+            }
+            hxx += vaddlvq_s32(sxx);
+            hxy += vaddlvq_s32(sxy);
+            hyy += vaddlvq_s32(syy);
+        }
+#endif
+        for (; xx < tileW; ++xx) {
             const int x = x0 + xx;
             const int i = yy * tileW + xx;
             const int a = r(x + 1, y) - r(x - 1, y);
@@ -364,6 +394,9 @@ void refineSubPixel(const Plane& ref, const Plane& alt, int x0, int y0, int tile
         px -= stepX;
         py -= stepY;
         if (std::fabs(px - dx) > 1.0 || std::fabs(py - dy) > 1.0) return;
+        // Converged: a further step would move the warp by less than its
+        // own weights can express.
+        if (std::fabs(stepX) < kLkConverged && std::fabs(stepY) < kLkConverged) break;
     }
     const double residual = static_cast<double>(ee) / n / (static_cast<double>(kLkOne) * kLkOne);
     if (lambdaMin / (4.0 * n) < kLkMinSnr * residual) return;

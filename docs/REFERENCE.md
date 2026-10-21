@@ -920,7 +920,7 @@ Gauss-Newton Hessian belong to the reference and are computed once per tile:
 g(x) = (T(x+1,y) - T(x-1,y),  T(x,y+1) - T(x,y-1))      = 2 grad T
 H    = sum g g^T                                         (2x2)
 p0   = (dx, dy), the integer winner
-repeat 3 times:
+repeat up to 3 times, until both |dp| < 1/1024:
     e(x) = I(x + p) - T(x)          I bilinear at the tile's one fraction
     dp   = 2 H^-1 sum g e
     p    = p - dp                    the inverse composition of a translation

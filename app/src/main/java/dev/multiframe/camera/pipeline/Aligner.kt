@@ -273,6 +273,9 @@ object Aligner {
     /** Gauss-Newton updates of the translation. Two settle a fraction within a hundredth; the third is margin. */
     const val LK_ITERATIONS = 3
 
+    /** A step under this on both axes, proxy pixels, ends the iterations: a quarter of the weights' resolution. */
+    const val LK_CONVERGED = 1.0 / 1024
+
     /** Bilinear weights in 1/256: positions to 0.004 proxy pixels, and every sum an exact integer. */
     private const val LK_ONE = 256
 
@@ -320,8 +323,9 @@ object Aligner {
      *
      *     dp = 2 H^-1 sum g e,   p <- p - dp.
      *
-     * For a translation the inverse composition is that subtraction. Three
-     * iterations from the integer winner.
+     * For a translation the inverse composition is that subtraction. At most
+     * three iterations from the integer winner, fewer once a step falls under
+     * [LK_CONVERGED].
      *
      * ### Fixed point, so the native port agrees exactly
      *
@@ -441,6 +445,9 @@ object Aligner {
             px -= step[0]
             py -= step[1]
             if (kotlin.math.abs(px - dx) > 1.0 || kotlin.math.abs(py - dy) > 1.0) return
+            // Converged: a further step would move the warp by less than its
+            // own weights can express.
+            if (kotlin.math.abs(step[0]) < LK_CONVERGED && kotlin.math.abs(step[1]) < LK_CONVERGED) break
         }
         if (!lkConfident(ee, n, lambdaMin)) return
         out[0] = (px - dx).toFloat()
