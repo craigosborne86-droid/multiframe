@@ -66,7 +66,20 @@ data class CameraCapabilities(
     val hasFlashUnit: Boolean = false,
     val manualPostProcessing: Boolean = false,
     val whiteBalanceCalibration: ColorScience.Calibration? = null,
+    /**
+     * The platform's API level, as [from] read it; zero where nothing did.
+     * Carried here so that a control gated on it is gated where every other
+     * one is, and so that a test can state it.
+     */
+    val platformSdk: Int = 0,
 ) {
+
+    /**
+     * Whether a picture can carry its HDR rendition as a gain map: the
+     * platform's `Gainmap` (API 34, [UltraHdr]). The HDR OUTPUT row is
+     * absent where it is false.
+     */
+    val supportsHdrOutput: Boolean get() = platformSdk >= 34
 
     val supportsManualWhiteBalance: Boolean get() = manualPostProcessing &&
         CameraMetadata.CONTROL_AWB_MODE_OFF in awbModes && CalibratedWhiteBalance.range(whiteBalanceCalibration) != null
@@ -336,6 +349,7 @@ data class CameraCapabilities(
                 fullResolutionRawWidth = fullResolutionRaw(c2)?.width ?: 0,
                 fullResolutionRawHeight = fullResolutionRaw(c2)?.height ?: 0,
                 hasFlashUnit = c2.getCameraCharacteristic(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true,
+                platformSdk = android.os.Build.VERSION.SDK_INT,
             )
         }
     }

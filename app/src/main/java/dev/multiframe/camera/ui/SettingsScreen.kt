@@ -141,6 +141,9 @@ fun ServiceCaptureSettings(
     onLocalTone: (Boolean) -> Unit,
     outputFormat: OutputFormat?,
     onOutputFormat: (OutputFormat) -> Unit,
+    /** Null where the row is absent: below API 34, or while the pictures are HEIF. */
+    hdrOutput: Boolean? = null,
+    onHdrOutput: (Boolean) -> Unit = {},
     onReset: () -> Unit,
 ) {
     if (caps == null) return
@@ -156,6 +159,12 @@ fun ServiceCaptureSettings(
     outputFormat?.let { format ->
         ServiceRow("FILE FORMAT", format.label, active = format == OutputFormat.HEIF,
             onClick = { Haptics.segment(view); onOutputFormat(format.next()) })
+    }
+    hdrOutput?.let { enabled ->
+        ServiceRow("HDR OUTPUT", if (enabled) "ON" else "OFF",
+            detail = "Adds a gain map: highlights up to two stops brighter on an HDR screen.",
+            active = enabled,
+            onClick = { Haptics.segment(view); onHdrOutput(!enabled) })
     }
     Spacer(Modifier.height(12.dp))
     var resetRequested by remember { mutableStateOf(false) }

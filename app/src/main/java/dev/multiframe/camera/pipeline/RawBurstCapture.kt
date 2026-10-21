@@ -336,14 +336,31 @@ object RawBurstCapture {
         // Native develop writes into the Bitmap's own pixels, so nothing here
         // touches the Java heap. Falls back to the Kotlin developer, which is
         // the implementation the unit tests cover, if native declines.
-        var bitmap = merger.develop(mergedBuffer, color, develop, shading = shading) ?: run {
+        val developGain = floatArrayOf(0f)
+        var bitmap = merger.develop(mergedBuffer, color, develop, shading = shading, gainOut = developGain) ?: run {
             Log.w(TAG, "falling back to Kotlin develop")
             val shorts = ShortArray(width * height)
             mergedBuffer.rewind()
             mergedBuffer.asShortBuffer().get(shorts)
-            RawDeveloper.developIntoBitmap(
-                BayerFrame(width, height, shorts), profile, color, develop, shading = shading,
-            )
+            val frame = BayerFrame(width, height, shorts)
+            developGain[0] = RawDeveloper.resolveGain(frame, profile, color, develop)
+            RawDeveloper.developIntoBitmap(frame, profile, color, develop, shading = shading)
+        }
+        // The HDR rendition's ratio, measured from the same merged CFA under
+        // the same gain, beside the SDR develop and without touching it
+        // (HdrGainMap, REFERENCE §3.1 step 6b). Only where the platform can
+        // write it and the picture is going to be a JPEG.
+        val hdrField = if (UltraHdr.isAvailable && outputFormat == OutputFormat.JPEG &&
+            develop.hdrHeadroom > 1f && developGain[0] > 0f
+        ) {
+            val tHdr = System.currentTimeMillis()
+            val cfa = mergedBuffer.duplicate().order(mergedBuffer.order()).apply { rewind() }.asShortBuffer()
+            HdrGainMap.measure(
+                cfa, width, height, profile, color, develop.withGain(developGain[0]),
+                shading, develop.hdrHeadroom,
+            ).also { Log.i(TAG, "hdr gain field %dms".format(System.currentTimeMillis() - tHdr)) }
+        } else {
+            null
         }
         // Optics before the rotation, and the ordering is not a preference.
         //
@@ -367,6 +384,7 @@ object RawBurstCapture {
         val readWidth = bitmap.width
         val readHeight = bitmap.height
         var inset = LensDistortion.Inset.NONE
+        var undistorted: LensDistortion.Model? = null
         opticsFor(lensProfile, bitmap)?.let { params ->
             val tOptics = System.currentTimeMillis()
             // On the bitmap directly, so the native pass reads and writes the
@@ -375,6 +393,7 @@ object RawBurstCapture {
             if (corrected.bitmap !== bitmap) {
                 bitmap.recycle()
                 bitmap = corrected.bitmap
+                undistorted = params.distortion?.takeIf { !it.isIdentity }
             }
             inset = corrected.inset
             Log.i(TAG, "optics %dms".format(System.currentTimeMillis() - tOptics))
@@ -396,6 +415,24 @@ object RawBurstCapture {
         bitmap = OrientationTracker.rotate(bitmap, rotationDegrees)
         val rotateMillis = System.currentTimeMillis() - tRotate
 
+        // The map follows the picture back through the turn, the framing and
+        // the lens to the blocks it was measured on.
+        val gainMap = hdrField?.let { field ->
+            val tPlace = System.currentTimeMillis()
+            HdrGainMap.encode(
+                field,
+                HdrGainMap.Placement(
+                    bitmap.width, bitmap.height, rotationDegrees,
+                    framing.left, framing.top, inset, undistorted,
+                ),
+            ).also {
+                Log.i(TAG, "hdr gain map %s, %dms".format(
+                    it?.let { m -> "%dx%d max %.2fx".format(m.width, m.height, m.maxRatio) } ?: "none: no highlights to extend",
+                    System.currentTimeMillis() - tPlace,
+                ))
+            }
+        }
+
         val tEncode = System.currentTimeMillis()
         val publish = longArrayOf(0L)
         val baseName = "MF_${stamp}_${tag}_${captured}f"
@@ -408,6 +445,7 @@ object RawBurstCapture {
         val saved = withContext(Dispatchers.IO) {
             ImageSaver.saveImage(
                 context, bitmap, baseName, outputFormat,
+                gainMap = gainMap,
                 metadata = ExifWriter.from(
                     result = captureResult,
                     characteristics = characteristics,

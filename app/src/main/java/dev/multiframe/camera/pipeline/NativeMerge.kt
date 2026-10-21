@@ -109,6 +109,8 @@ class NativeMerge private constructor(
         color: ColorProfile,
         params: DevelopParams = DevelopParams(),
         shading: ShadingMap? = null,
+        /** Filled with the exposure gain the develop used, for a caller that measures beside it (the HDR gain map). */
+        gainOut: FloatArray? = null,
     ): Bitmap? {
         val black = IntArray(4) { profile.blackAt(it and 1, it shr 1) }
         // Five stages hide behind one figure here, and four of them have never
@@ -127,6 +129,7 @@ class NativeMerge private constructor(
                 params.meteredGain,
             )
         }
+        gainOut?.set(0, gain)
         val tBitmap = System.currentTimeMillis()
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val tNative = System.currentTimeMillis()

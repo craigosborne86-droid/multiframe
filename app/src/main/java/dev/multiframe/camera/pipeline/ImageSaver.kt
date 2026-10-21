@@ -37,6 +37,12 @@ object ImageSaver {
          * two together is mostly a statement about the phone's storage.
          */
         publishMillis: LongArray? = null,
+        /**
+         * The HDR rendition's gain map, or null for an SDR picture. Written
+         * by the platform's encoder ([UltraHdr]) where it can; where it
+         * cannot, the picture is written SDR as if there were none.
+         */
+        gainMap: HdrGainMap.Encoded? = null,
     ): Uri? {
         var encoder = "strips"
         var compressMillis = 0L
@@ -44,10 +50,21 @@ object ImageSaver {
         val tPublishStart = longArrayOf(0L)
         val uri = saveJpegWith(context, displayName, metadata) { pfd ->
             val tCompress = System.currentTimeMillis()
+            val hdr = gainMap != null && run {
+                // Not closed, for the reason below: the descriptor is the caller's.
+                val out = FileOutputStream(pfd.fileDescriptor)
+                UltraHdr.compress(bitmap, gainMap, quality, out).also { ok ->
+                    out.flush()
+                    if (ok) encoder = "ultrahdr" else {
+                        Os.ftruncate(pfd.fileDescriptor, 0)
+                        Os.lseek(pfd.fileDescriptor, 0, OsConstants.SEEK_SET)
+                    }
+                }
+            }
             // Every core rather than one. Falls back to the framework encoder,
             // which is the same library reached through Skia, if the strip
             // encoder declines the bitmap or fails partway.
-            val done = NativeJpeg.encodeToFd(bitmap, pfd.fd, quality) || run {
+            val done = hdr || NativeJpeg.encodeToFd(bitmap, pfd.fd, quality) || run {
                 encoder = "framework"
                 // Whatever the attempt managed to write is not a JPEG, and the
                 // descriptor is still sitting wherever it stopped.
@@ -104,6 +121,8 @@ object ImageSaver {
         format: OutputFormat,
         quality: Int = 95,
         metadata: CaptureMetadata? = null,
+        /** The HDR gain map, for a JPEG; HEIF is written without one. See [saveJpeg]. */
+        gainMap: HdrGainMap.Encoded? = null,
     ): Pair<Uri, String>? {
         if (format == OutputFormat.HEIF &&
             HeifEncoder.dimensionsAcceptable(bitmap.width, bitmap.height)
@@ -134,7 +153,7 @@ object ImageSaver {
         }
 
         val name = "$baseName.jpg"
-        return saveJpeg(context, bitmap, name, quality, metadata)?.let { it to name }
+        return saveJpeg(context, bitmap, name, quality, metadata, gainMap = gainMap)?.let { it to name }
     }
 
     const val MIME_HEIF = "image/heif"

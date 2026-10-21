@@ -373,6 +373,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var dngEnabled by remember { mutableStateOf(restored.dngEnabled) }
     var localTone by remember { mutableStateOf(restored.localTone) }
     var outputFormat by remember { mutableStateOf(restored.outputFormat) }
+    // The gain map beside the JPEG; only offered where the platform writes one.
+    var hdrOutput by remember { mutableStateOf(restored.hdrOutput) }
     // The sensor's un-binned mode, on a sensor that has one. See the chip.
     var fullResolution by remember { mutableStateOf(restored.fullResolution) }
 
@@ -1614,7 +1616,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     LaunchedEffect(
         settings, burstFrames, lens, highlightGuard, captureMode, dngEnabled,
         timerSeconds, guides, mosaicPreset, localTone, outputFormat, showHistogram,
-        mosaicReturnLens, fullResolution, manualBurst, rememberedBurst,
+        mosaicReturnLens, fullResolution, manualBurst, rememberedBurst, hdrOutput,
     ) {
         AppSettings.save(
             context,
@@ -1637,6 +1639,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 outputFormat = outputFormat,
                 histogram = showHistogram,
                 fullResolution = fullResolution,
+                hdrOutput = hdrOutput,
             ),
         )
     }
@@ -2024,6 +2027,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     val params = DevelopParams(
                         localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
                         shadowLift = if (localTone) DevelopParams.SHADOW_LIFT_ON else 0f,
+                        hdrHeadroom = if (hdrOutput && caps?.supportsHdrOutput == true) DevelopParams.HDR_HEADROOM else 0f,
                     )
                     val dng = dngEnabled
                     val format = outputFormat
@@ -2366,7 +2370,8 @@ MechanicalShutter(
                             val shotLensProfile = lens?.let { lensProfiles[it.cameraId] }
                             val shotFormat = outputFormat
                             val shotDevelop = DevelopParams(localTone = if (localTone) DevelopParams.LOCAL_TONE_ON else 0f,
-                                shadowLift = if (localTone) DevelopParams.SHADOW_LIFT_ON else 0f)
+                                shadowLift = if (localTone) DevelopParams.SHADOW_LIFT_ON else 0f,
+                                hdrHeadroom = if (hdrOutput && caps?.supportsHdrOutput == true) DevelopParams.HDR_HEADROOM else 0f)
                             val shotDng = dngEnabled
                             val raw = rawCapture
                             val ch = characteristics
@@ -2565,6 +2570,10 @@ MechanicalShutter(
                     onLocalTone = { if (!busy) localTone = it },
                     outputFormat = if (HeifEncoder.isAvailable) outputFormat else null,
                     onOutputFormat = { if (!busy) outputFormat = it },
+                    // Absent below API 34, and while the pictures are HEIF,
+                    // which is written without a gain map.
+                    hdrOutput = if (caps?.supportsHdrOutput == true && outputFormat == OutputFormat.JPEG) hdrOutput else null,
+                    onHdrOutput = { if (!busy) hdrOutput = it },
                     onReset = {
                         // Back to what the app ships with. The save effect above
                         // is watching every one of these, so persisting it needs
@@ -2584,6 +2593,7 @@ MechanicalShutter(
                         mosaicPreset = fresh.mosaicPreset
                         localTone = fresh.localTone
                         outputFormat = fresh.outputFormat
+                        hdrOutput = fresh.hdrOutput
                         showHistogram = fresh.histogram
                         fullResolution = fresh.fullResolution
                         zebraOverride = null
