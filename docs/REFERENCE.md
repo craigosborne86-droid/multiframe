@@ -928,20 +928,130 @@ For each level, coarsest first:
   3. A ±4 window around the seed is searched for the minimum SAD.
      81 evaluations per tile per level. At level 3 this covers ±32 proxy
      pixels, ±64 sensor pixels -- far beyond burst hand tremor.
-  4. At level 0 only: sub-pixel refinement. Four more evaluations at the
-     winner's cardinal neighbours, and an equiangular fit through each
-     axis's three costs gives the fractional offset of the minimum:
-         t = (before - after) / (2 * (max(before, after) - at))
-     Bounded to ±0.5; a vertex outside that means the integer search was
-     wrong by a pixel and no fit fixes it, so zero is returned rather than
-     a clamp.
+  4. At level 0 only: sub-pixel refinement of the winner by
+     inverse-compositional Lucas-Kanade over every pixel of the tile
+     (below). Bounded to one proxy pixel either way of the winner; zero
+     where the fit declines.
 
 Output: AlignmentField(tilesX, tilesY, dx[], dy[], fracDx[], fracDy[])
   dx, dy      integer winners, proxy pixels
-  fracDx, dy  refinement, proxy pixels, zero where not refined
+  fracDx, dy  refinement, proxy pixels, in [-1, 1], zero where not refined
 ```
 
-**Why the equiangular fit and not the parabola.** The first version fitted a
+**The refinement: inverse-compositional Lucas-Kanade (`Aligner.refineSubPixel`,
+`Align.cpp refineSubPixel`).** The template T is the reference tile on the
+proxy, the image I the alternate, and the translation p is sought with
+I(x + p) = T(x), minimising sum (I(x + p) - T(x))^2. Inverse compositional
+(Baker & Matthews, 2004) linearises T rather than I, so the gradient and the
+Gauss-Newton Hessian belong to the reference and are computed once per tile:
+
+```
+g(x) = (T(x+1,y) - T(x-1,y),  T(x,y+1) - T(x,y-1))      = 2 grad T
+H    = sum g g^T                                         (2x2)
+p0   = (dx, dy), the integer winner
+repeat up to 3 times, until both |dp| < 1/1024:
+    e(x) = I(x + p) - T(x)          I bilinear at the tile's one fraction
+    dp   = 2 H^-1 sum g e
+    p    = p - dp                    the inverse composition of a translation
+fracDx, fracDy = p - (dx, dy)
+```
+
+The sign: with I(y) = T(y - s), linearising at p gives e = grad T . (p - s),
+so the least-squares step is p - s and p - dp = s. Two iterations settle a
+fraction to a hundredth on the bench's tiles; the third is margin.
+
+*Fixed point, so Kotlin and NEON agree exactly.* The warp's fraction is the
+same at every pixel of a tile, so its bilinear weights are four numbers; they
+are rounded to 1/256, the interpolated value is kept in 1/256 of a code, and
+H, sum g e and sum e^2 are exact integers (int64; a NEON lane holds at most
+sixteen products of |g| <= 255 and |e| <= 65280 before it is widened). The
+lanes add in their own order and the integers do not care. The 2x2 solve is
+the only floating point, in double and written alike on both sides. The
+rounding moves the warp by at most 1/512 pixel, and that is all it can leave in
+the answer, since each step is measured from where the warp actually was.
+
+*An edge* -- lambda_min(H) / 4N < 0.25 (codes/pixel)^2, or lambda_max more
+than 16 lambda_min -- determines its translation across itself and nothing
+along it. Each step is then taken along the strong eigenvector u alone,
+`dp = 2 u (u . sum g e) / lambda_max`, the least-squares step of least norm,
+and the place along the edge is left where it started. (A slanted edge's
+staircase gives the weak axis a little energy; a two-axis step on that little
+runs along the edge out of reach. Hence the anisotropy bound.)
+
+*When it declines* (zero on both axes; `withFlatTilesBorrowed` then gives the
+tile its fitted neighbours' median displacement for the 2x canvas, carried
+from the tile's own integer):
+
+- lambda_max(H) / 4N < 0.25 (codes/pixel)^2: a flat tile;
+- |p - (dx, dy)| > 1 on either axis after any step: the integer search was
+  wrong or the fit diverged, and neither is a fraction;
+- lambda / 4N < s^2, s^2 the mean squared residual of the last iteration and
+  lambda the solved axis's eigenvalue (lambda_min, or lambda_max for an edge;
+  a two-axis fit that fails on lambda_min but passes on lambda_max keeps the
+  part of its answer along u).
+  The estimate's standard error in the weaker direction is
+  sqrt(4 s^2 / lambda_min) = 1 / sqrt(N * ratio), so the test bounds it by
+  1 / sqrt(N), 0.03 pixels on a 32-pixel tile. Its purpose is the tile of pure
+  noise, which passes the other two and pins its fraction near zero wherever
+  the frame moved; declined, it borrows. Byte-identical frames have zero
+  residual and pass with a fraction of exactly zero.
+
+Cost: the integer search samples every other pixel of a level-0 tile; the
+refinement reads every pixel up to three times, through the NEON warp in
+`Align.cpp`, and the consensus refits only edges and tiles that disagree. The
+four extra SAD evaluations of the three-point fit it replaced are gone.
+
+**The frame's motion (`Aligner.consensus`).** The integer search minimises a
+SAD over every other pixel, and two kinds of tile defeat it however good the
+fraction after it: a straight edge, along which every offset costs the same,
+and a periodic texture, which matches itself a period away. On the desk's
+chart it put the slanted edges eight to twenty pixels along themselves and
+parts of the Siemens star one to five pixels off; with every fraction exact the
+2x canvas still lost to enlargement there, and replacing those tiles alone with
+the truth closed the gap. So, after the whole field is refined:
+
+```
+start from the tiles fitted on both axes within 4 proxy px of their
+    median translation (a photograph has tiles the search lost by a
+    hundred pixels; a least-squares start put a tripod burst's motion at
+    sixteen)
+fit total displacement = a + B (centre - mean centre)          (affine, 6 params)
+    by least squares, refitted twice without tiles > 1 proxy px from the fit;
+    fewer than a quarter of the two-axis tiles left: no frame motion, stop
+for each tile that is > 0.5 proxy px from the fit, or was fitted as an edge:
+    refine again from the fit's prediction itself (not its rounding)
+    keep it if it fits at all, unless the tile's own fit was on both axes
+    and its residual at least a quarter lower (a subject that moved)
+```
+
+dx and dy are never changed -- the CFA merge reads only them -- so a re-seeded
+tile's displacement is carried in its fraction, which may then exceed a pixel.
+An edge's own fit gets no say against the frame's, because its residual cannot
+rank places along it: the proxy is a 2x2 bin with no other filter, a sharp edge
+aliases there into a staircase, and an integer slide along the edge
+reproduces the staircase exactly where the true, fractional place has to
+interpolate it -- on the bench's edges the slid winner fitted ten times better
+than the truth. The lean toward the frame is deliberate: a moving subject
+placed by the frame's motion disagrees with the reference and the 2x canvas's
+robustness weight rejects it, whereas an edge slid along itself agrees
+everywhere and is kept, its correct values twenty pixels from where they
+belong, and the rows they left reconstructed from fewer frames' phases -- an
+edge rendered as soft as a tripod burst's, which is what the bench measured.
+
+**Why it replaced the three-point fit.** The fit described next read the
+fraction from the SAD at the winner and its four neighbours, sampled every
+other pixel. On the desk's known-shift bench (`SuperResEvidenceBench`,
+`work/sr-evidence-20261020/REPORT.md`) its median error was 0.32 sensor
+pixels, against the 0.125 a 2x canvas cell needs, and on byte-identical frames
+it reported offsets of up to 0.43: three samples of a cost curve that is not
+symmetric about its minimum do not locate the minimum. With exact shifts the
+same canvas beat enlargement; with these it lost.
+
+**Why the equiangular fit and not the parabola (history).** Before the
+Lucas-Kanade refinement, the fraction came from an equiangular fit through the
+SAD at the winner and its two neighbours on each axis,
+`t = (before - after) / (2 * (max(before, after) - at))`, bounded to ±0.5;
+`Aligner.subPixelOffset` keeps it, with its tests. The first version fitted a
 parabola through the three costs -- the textbook refinement, and correct for a
 cost that is quadratic near its minimum. A sum of absolute differences is not:
 shift a textured image by t and its SAD against the unshifted one grows as |t|.
@@ -987,8 +1097,10 @@ from ISO bracketing do not confuse SAD and unequal pedestals do not bias the
 guide. Native Bayer placement still uses even sensor-pixel shifts.
 
 Native (`Align.cpp`) and Kotlin (`Aligner.kt`) make every decision identically,
-including tie-breaking order, and `AlignerParityTest` holds them to zero
-differing tiles and a sub-pixel difference under 1e-6.
+including tie-breaking order and which tiles the refinement declines.
+`AlignerParityTest` (device) and `AlignerHostParityTest` (desk, opt-in
+`-Pmf.host.lib`) hold them to zero differing tiles and a sub-pixel difference
+under 1e-5; the refinement's integer sums make it zero in practice.
 
 #### 3.3.2 OIS-Seeded Search — not available on the Pixel 11 Pro
 
@@ -1069,8 +1181,8 @@ inverting it.
 
 **What it buys.** With a seed accurate to a pixel or two, the search window
 shrinks from ±16 to ±4: 81 evaluations per tile instead of 1089, a 13x
-reduction in the dominant cost of alignment. The sub-pixel parabola refinement
-is unchanged and still runs on the 3×3 neighbourhood of the minimum.
+reduction in the dominant cost of alignment. The sub-pixel refinement is
+unchanged and still starts from the winner.
 
 The accuracy matters as much as the speed. A ±16 blind search can lock onto a
 repeating texture at the wrong period; seeded to within a couple of pixels, that

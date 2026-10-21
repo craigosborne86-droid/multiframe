@@ -19,7 +19,9 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 #if defined(__aarch64__) || defined(__ARM_NEON)
@@ -199,27 +201,342 @@ int64_t tileCost(const Plane& ref, const Plane& alt, int x0, int y0,
     return cost;
 }
 
-/**
- * The fractional offset of a minimum, from three costs a pixel apart.
- *
- * Matches `Aligner.subPixelOffset` exactly -- the equiangular fit, and the
- * reasons it replaced the parabola are there -- including the three cases that
- * return zero: a flat or inverted curvature, a vertex outside +-0.5, and the
- * INT64_MAX sentinel an early-exit cost reads as. Computed in double for the
- * same reason -- the costs run to millions and their difference is the number
- * that matters.
- */
-inline float subPixelOffset(int64_t before, int64_t at, int64_t after) {
-    if (before == INT64_MAX || at == INT64_MAX || after == INT64_MAX) return 0.0f;
-    const double b = static_cast<double>(before);
-    const double a = static_cast<double>(at);
-    const double c = static_cast<double>(after);
-    if (b - 2.0 * a + c <= 0.0) return 0.0f;
-    const double steep = std::max(b, c) - a;
-    if (steep <= 0.0) return 0.0f;
-    const double vertex = (b - c) / (2.0 * steep);
-    if (vertex < -0.5 || vertex > 0.5) return 0.0f;
-    return static_cast<float>(vertex);
+// --- Sub-pixel refinement --------------------------------------------------
+//
+// Inverse-compositional Lucas-Kanade on the proxy, translation only, from the
+// integer winner. The Kotlin `Aligner.refineSubPixel` is the reference and
+// carries the derivation; this is the same arithmetic. The warp's fraction is
+// constant over a tile, so its bilinear weights are four integers in 1/256,
+// and every sum -- the Hessian, sum g*e, sum e^2 -- is an exact integer here
+// and there whatever order the lanes add in. The 2x2 solve is the only
+// floating point, written as the Kotlin writes it.
+
+constexpr int kLkIterations = 3;
+constexpr int kLkOne = 256;
+constexpr double kLkMinGradient = 0.25;
+constexpr double kLkMinSnr = 1.0;
+constexpr double kLkConverged = 1.0 / 1024;
+constexpr double kLkMaxAnisotropy = 16.0;
+
+inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+struct LkScratch {
+    std::vector<int32_t> gx, gy, t;
+};
+
+/** Sums over one row of the warp: sum gx*e, gy*e, e*e. The caller has checked the row is inside the plane. */
+inline void warpRow(const uint8_t* rowA, const uint8_t* rowB, const int32_t* gx, const int32_t* gy,
+                    const int32_t* t, int count, int wx, int wy,
+                    int64_t& bx, int64_t& by, int64_t& ee) {
+    int i = 0;
+#ifdef MF_HAS_NEON
+    const uint16_t wx0 = static_cast<uint16_t>(kLkOne - wx);
+    const uint16_t wx1 = static_cast<uint16_t>(wx);
+    const uint32_t wy0 = static_cast<uint32_t>(kLkOne - wy);
+    const uint32_t wy1 = static_cast<uint32_t>(wy);
+    int32x4_t accX = vdupq_n_s32(0);
+    int32x4_t accY = vdupq_n_s32(0);
+    int64x2_t accE = vdupq_n_s64(0);
+    const uint32x4_t half = vdupq_n_u32(kLkOne / 2);
+    for (; i + 8 <= count; i += 8) {
+        const uint16x8_t a0 = vmovl_u8(vld1_u8(rowA + i));
+        const uint16x8_t a1 = vmovl_u8(vld1_u8(rowA + i + 1));
+        const uint16x8_t b0 = vmovl_u8(vld1_u8(rowB + i));
+        const uint16x8_t b1 = vmovl_u8(vld1_u8(rowB + i + 1));
+        // Horizontal: at most 255 * 256 = 65280 per value.
+        const uint32x4_t h0lo = vmlal_n_u16(vmull_n_u16(vget_low_u16(a0), wx0), vget_low_u16(a1), wx1);
+        const uint32x4_t h0hi = vmlal_n_u16(vmull_n_u16(vget_high_u16(a0), wx0), vget_high_u16(a1), wx1);
+        const uint32x4_t h1lo = vmlal_n_u16(vmull_n_u16(vget_low_u16(b0), wx0), vget_low_u16(b1), wx1);
+        const uint32x4_t h1hi = vmlal_n_u16(vmull_n_u16(vget_high_u16(b0), wx0), vget_high_u16(b1), wx1);
+        // Vertical, rounded back to 1/256 of a code: at most 65280 * 256 + 128.
+        const uint32x4_t vlo = vshrq_n_u32(vaddq_u32(vmlaq_n_u32(vmulq_n_u32(h0lo, wy0), h1lo, wy1), half), 8);
+        const uint32x4_t vhi = vshrq_n_u32(vaddq_u32(vmlaq_n_u32(vmulq_n_u32(h0hi, wy0), h1hi, wy1), half), 8);
+        const int32x4_t elo = vsubq_s32(vreinterpretq_s32_u32(vlo), vld1q_s32(t + i));
+        const int32x4_t ehi = vsubq_s32(vreinterpretq_s32_u32(vhi), vld1q_s32(t + i + 4));
+        // |g| <= 255 and |e| <= 65280: a product under 1.7e7, and a lane
+        // sums at most a quarter of a row's -- sixteen of them on the widest
+        // tile the proxy makes -- before it is widened below.
+        accX = vmlaq_s32(vmlaq_s32(accX, vld1q_s32(gx + i), elo), vld1q_s32(gx + i + 4), ehi);
+        accY = vmlaq_s32(vmlaq_s32(accY, vld1q_s32(gy + i), elo), vld1q_s32(gy + i + 4), ehi);
+        accE = vaddq_s64(accE, vmull_s32(vget_low_s32(elo), vget_low_s32(elo)));
+        accE = vaddq_s64(accE, vmull_s32(vget_high_s32(elo), vget_high_s32(elo)));
+        accE = vaddq_s64(accE, vmull_s32(vget_low_s32(ehi), vget_low_s32(ehi)));
+        accE = vaddq_s64(accE, vmull_s32(vget_high_s32(ehi), vget_high_s32(ehi)));
+    }
+    bx += vaddlvq_s32(accX);
+    by += vaddlvq_s32(accY);
+    ee += vaddvq_s64(accE);
+#endif
+    for (; i < count; ++i) {
+        const int h0 = rowA[i] * (kLkOne - wx) + rowA[i + 1] * wx;
+        const int h1 = rowB[i] * (kLkOne - wx) + rowB[i + 1] * wx;
+        const int v = (h0 * (kLkOne - wy) + h1 * wy + kLkOne / 2) >> 8;
+        const int e = v - t[i];
+        bx += static_cast<int64_t>(gx[i]) * e;
+        by += static_cast<int64_t>(gy[i]) * e;
+        ee += static_cast<int64_t>(e) * e;
+    }
+}
+
+constexpr int kLkDeclined = 0;
+constexpr int kLkEdge = 1;
+constexpr int kLkBoth = 2;
+
+/** `Aligner.LkFit`: the fraction from the start given, how it was fitted, the last sum of squared error. */
+struct LkFit {
+    double fx = 0.0, fy = 0.0;
+    int mode = kLkDeclined;
+    int64_t ee = 0;
+};
+
+/** See `Aligner.fitTile`. A declined fit reads zero on both axes. */
+void fitTile(const Plane& ref, const Plane& alt, int x0, int y0, int tileW, int tileH,
+             double startX, double startY, LkScratch& s, LkFit& fit) {
+    fit = LkFit();
+    const int n = tileW * tileH;
+    if (n <= 0) return;
+    s.gx.resize(static_cast<size_t>(n));
+    s.gy.resize(static_cast<size_t>(n));
+    s.t.resize(static_cast<size_t>(n));
+
+    const int rw = ref.w, rh = ref.h;
+    const uint8_t* rd = ref.data.data();
+    auto r = [&](int x, int y) -> int {
+        return rd[static_cast<size_t>(clampi(y, 0, rh - 1)) * rw + clampi(x, 0, rw - 1)];
+    };
+    int64_t hxx = 0, hxy = 0, hyy = 0;
+    const bool interior = x0 >= 1 && y0 >= 1 && x0 + tileW + 1 <= rw && y0 + tileH + 1 <= rh;
+    for (int yy = 0; yy < tileH; ++yy) {
+        const int y = y0 + yy;
+        int xx = 0;
+#ifdef MF_HAS_NEON
+        if (interior) {
+            // The same differences, eight at a time, where no read can leave
+            // the plane. |g| <= 255, so g^2 <= 65025 and a lane holds a row's
+            // quarter of them in 32 bits before it is widened.
+            const uint8_t* row = rd + static_cast<size_t>(y) * rw + x0;
+            int32x4_t sxx = vdupq_n_s32(0), sxy = vdupq_n_s32(0), syy = vdupq_n_s32(0);
+            for (; xx + 8 <= tileW; xx += 8) {
+                const int16x8_t a = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(row + xx + 1), vld1_u8(row + xx - 1)));
+                const int16x8_t b = vreinterpretq_s16_u16(vsubl_u8(vld1_u8(row + xx + rw), vld1_u8(row + xx - rw)));
+                const uint16x8_t c = vshll_n_u8(vld1_u8(row + xx), 8);
+                const int i = yy * tileW + xx;
+                vst1q_s32(s.gx.data() + i, vmovl_s16(vget_low_s16(a)));
+                vst1q_s32(s.gx.data() + i + 4, vmovl_s16(vget_high_s16(a)));
+                vst1q_s32(s.gy.data() + i, vmovl_s16(vget_low_s16(b)));
+                vst1q_s32(s.gy.data() + i + 4, vmovl_s16(vget_high_s16(b)));
+                vst1q_s32(s.t.data() + i, vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(c))));
+                vst1q_s32(s.t.data() + i + 4, vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(c))));
+                sxx = vmlal_s16(vmlal_s16(sxx, vget_low_s16(a), vget_low_s16(a)), vget_high_s16(a), vget_high_s16(a));
+                sxy = vmlal_s16(vmlal_s16(sxy, vget_low_s16(a), vget_low_s16(b)), vget_high_s16(a), vget_high_s16(b));
+                syy = vmlal_s16(vmlal_s16(syy, vget_low_s16(b), vget_low_s16(b)), vget_high_s16(b), vget_high_s16(b));
+            }
+            hxx += vaddlvq_s32(sxx);
+            hxy += vaddlvq_s32(sxy);
+            hyy += vaddlvq_s32(syy);
+        }
+#endif
+        for (; xx < tileW; ++xx) {
+            const int x = x0 + xx;
+            const int i = yy * tileW + xx;
+            const int a = r(x + 1, y) - r(x - 1, y);
+            const int b = r(x, y + 1) - r(x, y - 1);
+            s.gx[i] = a;
+            s.gy[i] = b;
+            s.t[i] = r(x, y) * kLkOne;
+            hxx += static_cast<int64_t>(a) * a;
+            hxy += static_cast<int64_t>(a) * b;
+            hyy += static_cast<int64_t>(b) * b;
+        }
+    }
+    const double det = static_cast<double>(hxx) * static_cast<double>(hyy) -
+                       static_cast<double>(hxy) * static_cast<double>(hxy);
+    // The eigen-decomposition of H, as `Aligner.lkAxes` writes it.
+    const double ha = static_cast<double>(hxx), hb = static_cast<double>(hxy), hc = static_cast<double>(hyy);
+    const double trace = ha + hc;
+    const double diff = ha - hc;
+    const double root = std::sqrt(diff * diff + 4.0 * hb * hb);
+    const double lambdaMax = 0.5 * (trace + root);
+    const double lambdaMin = 0.5 * (trace - root);
+    double ux, uy;
+    if (ha >= hc) { ux = lambdaMax - hc; uy = hb; } else { ux = hb; uy = lambdaMax - ha; }
+    const double norm = std::sqrt(ux * ux + uy * uy);
+    if (norm > 0.0) { ux /= norm; uy /= norm; } else if (ha >= hc) { ux = 1.0; uy = 0.0; } else { ux = 0.0; uy = 1.0; }
+    if (lambdaMax / (4.0 * n) < kLkMinGradient) return;
+    // An edge: the step along its normal alone. See the Kotlin.
+    const bool bothAxes = det > 0.0 && lambdaMin / (4.0 * n) >= kLkMinGradient &&
+                          lambdaMax <= kLkMaxAnisotropy * lambdaMin;
+
+    const int aw = alt.w, ah = alt.h;
+    const uint8_t* ad = alt.data.data();
+    double px = startX, py = startY;
+    int64_t ee = 0;
+    for (int iteration = 0; iteration < kLkIterations; ++iteration) {
+        int ix = static_cast<int>(std::floor(px));
+        int wx = static_cast<int>(std::floor((px - ix) * kLkOne + 0.5));
+        if (wx == kLkOne) { ++ix; wx = 0; }
+        int iy = static_cast<int>(std::floor(py));
+        int wy = static_cast<int>(std::floor((py - iy) * kLkOne + 0.5));
+        if (wy == kLkOne) { ++iy; wy = 0; }
+
+        int64_t bx = 0, by = 0;
+        ee = 0;
+        const int sx0 = x0 + ix;
+        const bool insideX = sx0 >= 0 && sx0 + tileW < aw;
+        for (int yy = 0; yy < tileH; ++yy) {
+            const int sy = y0 + yy + iy;
+            const int i0 = yy * tileW;
+            if (insideX && sy >= 0 && sy + 1 < ah) {
+                const uint8_t* rowA = ad + static_cast<size_t>(sy) * aw + sx0;
+                warpRow(rowA, rowA + aw, s.gx.data() + i0, s.gy.data() + i0, s.t.data() + i0,
+                        tileW, wx, wy, bx, by, ee);
+                continue;
+            }
+            // The plane's edge: read clamped, as the reference does.
+            const int ya = clampi(sy, 0, ah - 1), yb = clampi(sy + 1, 0, ah - 1);
+            for (int xx = 0; xx < tileW; ++xx) {
+                const int sx = sx0 + xx;
+                const int xa = clampi(sx, 0, aw - 1), xb = clampi(sx + 1, 0, aw - 1);
+                const int h0 = ad[static_cast<size_t>(ya) * aw + xa] * (kLkOne - wx) + ad[static_cast<size_t>(ya) * aw + xb] * wx;
+                const int h1 = ad[static_cast<size_t>(yb) * aw + xa] * (kLkOne - wx) + ad[static_cast<size_t>(yb) * aw + xb] * wx;
+                const int v = (h0 * (kLkOne - wy) + h1 * wy + kLkOne / 2) >> 8;
+                const int e = v - s.t[i0 + xx];
+                bx += static_cast<int64_t>(s.gx[i0 + xx]) * e;
+                by += static_cast<int64_t>(s.gy[i0 + xx]) * e;
+                ee += static_cast<int64_t>(e) * e;
+            }
+        }
+        double stepX, stepY;
+        if (bothAxes) {
+            const double scale = 2.0 / kLkOne / det;
+            stepX = scale * (static_cast<double>(hyy) * static_cast<double>(bx) -
+                             static_cast<double>(hxy) * static_cast<double>(by));
+            stepY = scale * (static_cast<double>(hxx) * static_cast<double>(by) -
+                             static_cast<double>(hxy) * static_cast<double>(bx));
+        } else {
+            const double along = 2.0 / kLkOne * (ux * static_cast<double>(bx) + uy * static_cast<double>(by)) / lambdaMax;
+            stepX = along * ux;
+            stepY = along * uy;
+        }
+        px -= stepX;
+        py -= stepY;
+        if (std::fabs(px - startX) > 1.0 || std::fabs(py - startY) > 1.0) return;
+        // Converged: a further step would move the warp by less than its
+        // own weights can express.
+        if (std::fabs(stepX) < kLkConverged && std::fabs(stepY) < kLkConverged) break;
+    }
+    const double residual = static_cast<double>(ee) / n / (static_cast<double>(kLkOne) * kLkOne);
+    const double fx = px - startX, fy = py - startY;
+    fit.ee = ee;
+    if (bothAxes && lambdaMin / (4.0 * n) >= kLkMinSnr * residual) {
+        fit.fx = fx;
+        fit.fy = fy;
+        fit.mode = kLkBoth;
+        return;
+    }
+    if (lambdaMax / (4.0 * n) < kLkMinSnr * residual) return;
+    const double along = fx * ux + fy * uy;
+    fit.fx = along * ux;
+    fit.fy = along * uy;
+    fit.mode = kLkEdge;
+}
+
+// --- Consensus -------------------------------------------------------------
+//
+// `Aligner.consensus`: where the integer search slid -- along an edge, or a
+// period of a repeating texture -- the frame's affine motion, fitted to the
+// tiles fitted on both axes, seeds the tile again. dx and dy are never
+// changed; the merge reads only them.
+
+constexpr int kConsensusMinTiles = 6;
+constexpr double kConsensusDisagreement = 0.5;
+constexpr double kConsensusTrim = 1.0;
+constexpr double kConsensusGate = 4.0;
+
+struct Motion { double ax, bx, cx, ay, by, cy, mx, my; };
+
+inline double motionX(const Motion& m, double x, double y) { return m.ax + m.bx * (x - m.mx) + m.cx * (y - m.my); }
+inline double motionY(const Motion& m, double x, double y) { return m.ay + m.by * (x - m.mx) + m.cy * (y - m.my); }
+
+bool affineMotion(const std::vector<double>& cx, const std::vector<double>& cy,
+                  const std::vector<double>& tx, const std::vector<double>& ty,
+                  const std::vector<char>& keep, Motion& out) {
+    int n = 0;
+    double mx = 0.0, my = 0.0, mtx = 0.0, mty = 0.0;
+    for (size_t i = 0; i < keep.size(); ++i) if (keep[i]) { ++n; mx += cx[i]; my += cy[i]; mtx += tx[i]; mty += ty[i]; }
+    if (n < kConsensusMinTiles) return false;
+    mx /= n; my /= n; mtx /= n; mty /= n;
+    double sxx = 0.0, sxy = 0.0, syy = 0.0, sxtx = 0.0, sytx = 0.0, sxty = 0.0, syty = 0.0;
+    for (size_t i = 0; i < keep.size(); ++i) if (keep[i]) {
+        const double x = cx[i] - mx, y = cy[i] - my;
+        sxx += x * x; sxy += x * y; syy += y * y;
+        sxtx += x * tx[i]; sytx += y * tx[i]; sxty += x * ty[i]; syty += y * ty[i];
+    }
+    const double det = sxx * syy - sxy * sxy;
+    if (det <= 1e-6 * (sxx * syy + 1.0)) {
+        out = {mtx, 0.0, 0.0, mty, 0.0, 0.0, mx, my};
+        return true;
+    }
+    out = {mtx, (syy * sxtx - sxy * sytx) / det, (sxx * sytx - sxy * sxtx) / det,
+           mty, (syy * sxty - sxy * syty) / det, (sxx * syty - sxy * sxty) / det, mx, my};
+    return true;
+}
+
+void consensus(const Plane& ref, const Plane& alt, int tilesX, int tilesY,
+               int* dx, int* dy, float* fracDx, float* fracDy,
+               const std::vector<int>& mode, const std::vector<int64_t>& ee, LkScratch& scratch) {
+    const int tileW = ref.w / tilesX;
+    const int tileH = ref.h / tilesY;
+    const int count = tilesX * tilesY;
+    std::vector<double> cx(count), cy(count), totalX(count), totalY(count);
+    std::vector<char> keep(count);
+    for (int i = 0; i < count; ++i) {
+        cx[i] = (i % tilesX) * tileW + tileW / 2.0;
+        cy[i] = (i / tilesX) * tileH + tileH / 2.0;
+        totalX[i] = dx[i] + static_cast<double>(fracDx[i]);
+        totalY[i] = dy[i] + static_cast<double>(fracDy[i]);
+    }
+    // A robust start, as the Kotlin: the median translation of the two-axis
+    // tiles, and only those within the gate of it.
+    std::vector<double> bx, by;
+    for (int i = 0; i < count; ++i) if (mode[i] == kLkBoth) { bx.push_back(totalX[i]); by.push_back(totalY[i]); }
+    const int both = static_cast<int>(bx.size());
+    if (both < kConsensusMinTiles) return;
+    auto median = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        const size_t n = v.size();
+        return n % 2 == 1 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+    };
+    const double startX = median(bx), startY = median(by);
+    for (int i = 0; i < count; ++i) {
+        keep[i] = mode[i] == kLkBoth && std::hypot(totalX[i] - startX, totalY[i] - startY) <= kConsensusGate;
+    }
+    Motion m{};
+    for (int pass = 0; pass <= 2; ++pass) {
+        if (!affineMotion(cx, cy, totalX, totalY, keep, m)) return;
+        if (pass == 2) break;
+        for (int i = 0; i < count; ++i) {
+            if (mode[i] != kLkBoth) continue;
+            keep[i] = std::hypot(totalX[i] - motionX(m, cx[i], cy[i]), totalY[i] - motionY(m, cx[i], cy[i])) <= kConsensusTrim;
+        }
+    }
+    // A motion most of the frame does not share is not the frame's.
+    int kept = 0;
+    for (int i = 0; i < count; ++i) kept += keep[i] ? 1 : 0;
+    if (kept * 4 < both) return;
+    LkFit fit;
+    for (int i = 0; i < count; ++i) {
+        const double px = motionX(m, cx[i], cy[i]);
+        const double py = motionY(m, cx[i], cy[i]);
+        // An edge's place along itself is the frame's to give, near or far.
+        if (mode[i] != kLkEdge && std::hypot(totalX[i] - px, totalY[i] - py) <= kConsensusDisagreement) continue;
+        fitTile(ref, alt, (i % tilesX) * tileW, (i / tilesX) * tileH, tileW, tileH, px, py, scratch, fit);
+        if (fit.mode == kLkDeclined) continue;
+        // Only a tile fitted on both axes can say its own place is better.
+        if (mode[i] == kLkBoth && fit.ee * 4 > ee[i] * 5) continue;
+        fracDx[i] = static_cast<float>(px + fit.fx - dx[i]);
+        fracDy[i] = static_cast<float>(py + fit.fy - dy[i]);
+    }
 }
 
 void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& altPyr,
@@ -227,6 +544,10 @@ void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& a
                    float* fracDx, float* fracDy) {
     const int count = tilesX * tilesY;
     const int levels = static_cast<int>(std::min(refPyr.size(), altPyr.size()));
+    LkScratch scratch;
+    LkFit fit;
+    std::vector<int> mode(static_cast<size_t>(count), kLkDeclined);
+    std::vector<int64_t> residual(static_cast<size_t>(count), 0);
 
     for (int level = levels - 1; level >= 0; --level) {
         if (level < levels - 1) {
@@ -292,23 +613,21 @@ void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& a
 
                 // Sub-pixel refinement at the finest level only. Higher up it
                 // would be doubled into the next level's integer search and
-                // lost. Four extra evaluations per tile, without an early-exit
-                // ceiling, because a cost that bailed out is not a measurement
-                // and the fit would read it as one.
+                // lost.
                 if (level == 0) {
-                    const int64_t left = tileCost(ref, alt, x0, y0, tileW, tileH,
-                                                  bestDx - 1, bestDy, step, INT64_MAX);
-                    const int64_t right = tileCost(ref, alt, x0, y0, tileW, tileH,
-                                                   bestDx + 1, bestDy, step, INT64_MAX);
-                    const int64_t up = tileCost(ref, alt, x0, y0, tileW, tileH,
-                                                bestDx, bestDy - 1, step, INT64_MAX);
-                    const int64_t down = tileCost(ref, alt, x0, y0, tileW, tileH,
-                                                  bestDx, bestDy + 1, step, INT64_MAX);
-                    fracDx[idx] = subPixelOffset(left, bestCost, right);
-                    fracDy[idx] = subPixelOffset(up, bestCost, down);
+                    fitTile(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy, scratch, fit);
+                    fracDx[idx] = static_cast<float>(fit.fx);
+                    fracDy[idx] = static_cast<float>(fit.fy);
+                    mode[idx] = fit.mode;
+                    residual[idx] = fit.ee;
                 }
             }
         }
+    }
+
+    // Only where the finest level was searched: it is the one refined.
+    if (!refPyr.empty() && refPyr[0].w / tilesX >= kMinTile && refPyr[0].h / tilesY >= kMinTile) {
+        consensus(refPyr[0], altPyr[0], tilesX, tilesY, dx, dy, fracDx, fracDy, mode, residual, scratch);
     }
 }
 
