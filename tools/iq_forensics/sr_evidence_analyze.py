@@ -364,7 +364,8 @@ def synthetic(targets, out_root):
         seed, twin = int(st[1:st.index('t')]), int(st[st.index('t') + 1:])
         truth = truths[optics]; ty = luma(truth)
         one = {k: load(d / f'{k}.f32', H, W) * to_scene for k in ('single', 'merge-est', 'merge-known')}
-        two = {k: load(d / f'{k}.f32', 2 * H, 2 * W) * to_scene for k in ('sr-est', 'sr-known')}
+        two = {k: load(d / f'{k}.f32', 2 * H, 2 * W) * to_scene for k in ('sr-est', 'sr-known', 'sr-gross-oracle')
+               if (d / f'{k}.f32').is_file()}
         methods = {'sr-est': two['sr-est'], 'sr-known': two['sr-known'],
                    'merge-lanczos': enlarge(one['merge-est'], 'lanczos'),
                    'merge-bicubic': enlarge(one['merge-est'], 'bicubic'),
@@ -372,6 +373,8 @@ def synthetic(targets, out_root):
                    'single-lanczos': enlarge(one['single'], 'lanczos'),
                    'single-bicubic': enlarge(one['single'], 'bicubic'),
                    'sr-known-noprefilter': undo_box_prefilter(two['sr-known'])}
+        if 'sr-gross-oracle' in two:
+            methods['sr-gross-oracle'] = two['sr-gross-oracle']
         if seed == 0 and twin == 0:
             methods['truth'] = truth
         row = dict(burst=d.name, optics=optics, motion=motion, noise=noise, seed=seed, twin=twin,
@@ -425,15 +428,14 @@ def synthetic(targets, out_root):
             row['methods'].setdefault(name + '-native', {})['midGreySnrDb'] = float(20 * np.log10(v.mean() / v.std()))
         # Disjoint halves: coherence, registered by phase correlation and checked against the known shift.
         if (d / 'sr-estA.f32').is_file():
-            row['halves'] = halves_synthetic(d, chart, H, W, to_scene, truth, optics)
+            row['halves'] = halves_synthetic(d, targets / 'bursts' / d.name, chart, H, W, to_scene, truth)
         results.append(row)
         print(d.name, 'MTF50', {k: round(v['mtf50'], 3) for k, v in row['methods'].items() if 'mtf50' in v}, flush=True)
     return results
 
 
-def halves_synthetic(d, chart, H, W, to_scene, truth, optics):
-    props = dict(l.split('=', 1) for l in (Path(str(d).replace('/out/synthetic/', '/synthetic/bursts/')) /
-                 'synthetic.properties').read_text().split('\n') if '=' in l)
+def halves_synthetic(d, source, chart, H, W, to_scene, truth):
+    props = dict(l.split('=', 1) for l in (source / 'synthetic.properties').read_text().split('\n') if '=' in l)
     shift = np.array([float(props['frame.1.dySensor']), float(props['frame.1.dxSensor'])])  # half B's reference
     out = {}
     bx, by, bw, bh = chart['texture']['box']

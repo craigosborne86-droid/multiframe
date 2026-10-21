@@ -138,7 +138,23 @@ class SuperResEvidenceBench {
         writeDemosaic(File(out, "single.f32"), burst, burst.shorts(frames[0]), full)
         writeDemosaic(File(out, "merge-est.f32"), burst, burst.shorts(merge(burst, 0, all, estimated)), full)
         writeDemosaic(File(out, "merge-known.f32"), burst, burst.shorts(merge(burst, 0, all, known)), full)
-        for ((name, fields) in listOf("sr-est" to estimated.map { it.withFlatTilesBorrowed() }, "sr-known" to known)) {
+        // Diagnostic: the estimate, with only the tiles it got wrong by more
+        // than half a sensor pixel replaced by the truth. The distance from
+        // here to sr-est is what gross (integer) errors cost; from here to
+        // sr-known, what the fractions still cost.
+        val borrowedEstimate = estimated.map { it.withFlatTilesBorrowed() }
+        val grossOracle = borrowedEstimate.mapIndexed { k, f ->
+            val t = known[k]
+            val bad = f.dx.indices.filter { i ->
+                kotlin.math.hypot(2.0 * (f.dx[i] + f.fracDx[i] - t.dx[i] - t.fracDx[i]),
+                    2.0 * (f.dy[i] + f.fracDy[i] - t.dy[i] - t.fracDy[i])) > 0.5
+            }.toSet()
+            AlignmentField(f.tilesX, f.tilesY, IntArray(f.dx.size) { if (it in bad) t.dx[it] else f.dx[it] },
+                IntArray(f.dy.size) { if (it in bad) t.dy[it] else f.dy[it] },
+                FloatArray(f.dx.size) { if (it in bad) t.fracDx[it] else f.fracDx[it] },
+                FloatArray(f.dy.size) { if (it in bad) t.fracDy[it] else f.fracDy[it] })
+        }
+        for ((name, fields) in listOf("sr-est" to borrowedEstimate, "sr-known" to known, "sr-gross-oracle" to grossOracle)) {
             val prediction = SubPixelCoverage.predict(fields, profile.cfaPattern)
             val canvas = superRes(burst, 0, all, fields)
             writeCanvas(File(out, "$name.f32"), burst, canvas, full)
