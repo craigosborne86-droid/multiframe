@@ -15,12 +15,14 @@ private const val TAG = "Multiframe"
  * or a red sample lands on a green one, so a fractional part is not something
  * that merge can spend.
  *
- * [fracDx] and [fracDy] are the sub-pixel refinement of those winners -- where
- * the true minimum sits between the integer candidates, from a parabola fitted
- * through the cost at the winner and its two neighbours on each axis. Bounded
- * to half a pixel either way. The full sub-pixel displacement of a tile is
- * `dx + fracDx`, in proxy pixels; the merge never reads it, and the sub-pixel
- * accumulation in `docs/REFERENCE.md` §3.6 exists to.
+ * [fracDx] and [fracDy] are the sub-pixel refinement of those winners: an
+ * inverse-compositional Lucas-Kanade fit of the tile's translation on the
+ * proxy, started at the winner and bounded to a pixel either way of it (see
+ * [Aligner.refineSubPixel]). Zero on both axes where the fit declined -- a
+ * flat or one-directional tile, or an estimate it could not stand behind. The
+ * full sub-pixel displacement of a tile is `dx + fracDx`, in proxy pixels;
+ * the merge never reads it, and the sub-pixel accumulation in
+ * `docs/REFERENCE.md` §3.6 exists to.
  *
  * Both arrays default to zero, so a field built without refinement -- by the
  * mosaic path, or by a test -- describes exactly what it did before.
@@ -37,7 +39,7 @@ class AlignmentField(
     val hasSubPixel: Boolean
         get() = fracDx.any { it != 0f } || fracDy.any { it != 0f }
 
-    /** Whether tile [i]'s sub-pixel fit said anything: a fit the parabola declined reads as exactly zero on both axes. */
+    /** Whether tile [i]'s sub-pixel fit said anything: a fit that declined reads as exactly zero on both axes. */
     fun hasSubPixelAt(i: Int): Boolean = fracDx[i] != 0f || fracDy[i] != 0f
 
     /**
@@ -181,6 +183,7 @@ object Aligner {
         val fracDy = FloatArray(count)
 
         val levels = minOf(refPyramid.size, altPyramid.size)
+        val fraction = FloatArray(2)
 
         // Coarsest level first; offsets double as we descend.
         for (level in levels - 1 downTo 0) {
@@ -251,23 +254,220 @@ object Aligner {
                     dx[idx] = bestDx
                     dy[idx] = bestDy
 
-                    // Where between the integer candidates the minimum really
+                    // Where between the integer candidates the tile really
                     // sits. Only at the finest level: a refinement made higher
                     // up would be doubled into the next level's integer search
-                    // and lost. See [subPixelOffset] for the fit.
+                    // and lost. See [refineSubPixel].
                     if (level == 0) {
-                        val left = tileCost(ref, alt, x0, y0, tileW, tileH, bestDx - 1, bestDy, step, Long.MAX_VALUE)
-                        val right = tileCost(ref, alt, x0, y0, tileW, tileH, bestDx + 1, bestDy, step, Long.MAX_VALUE)
-                        val up = tileCost(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy - 1, step, Long.MAX_VALUE)
-                        val down = tileCost(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy + 1, step, Long.MAX_VALUE)
-                        fracDx[idx] = subPixelOffset(left, bestCost, right)
-                        fracDy[idx] = subPixelOffset(up, bestCost, down)
+                        refineSubPixel(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy, fraction)
+                        fracDx[idx] = fraction[0]
+                        fracDy[idx] = fraction[1]
                     }
                 }
             }
         }
 
         return AlignmentField(tilesX, tilesY, dx, dy, fracDx, fracDy)
+    }
+
+    /** Gauss-Newton updates of the translation. Two settle a fraction within a hundredth; the third is margin. */
+    const val LK_ITERATIONS = 3
+
+    /** Bilinear weights in 1/256: positions to 0.004 proxy pixels, and every sum an exact integer. */
+    private const val LK_ONE = 256
+
+    /**
+     * The weaker direction's mean squared gradient, (codes / pixel)^2, under
+     * which a tile is flat: no texture to fit, or texture in one direction only.
+     */
+    const val LK_MIN_GRADIENT = 0.25
+
+    /**
+     * The tile's weaker-direction gradient power over its residual power,
+     * under which the fit is not used: the noise is fitting the noise.
+     */
+    const val LK_MIN_SNR = 1.0
+
+    /**
+     * The fractional translation of one tile, by inverse-compositional
+     * Lucas-Kanade on the proxy, written into [out] as (x, y) -- or zero on
+     * both axes where the fit declines.
+     *
+     * ### Why this and not a fit through three costs
+     *
+     * The fit this replaced read the fraction from the SAD at the winner and
+     * its four neighbours, sampled every other pixel. On a known-shift desk
+     * bench (`SuperResEvidenceBench`) its median error was 0.32 sensor pixels,
+     * and on byte-identical frames it reported up to 0.43: three samples of a
+     * cost curve that is not symmetric about its minimum do not locate the
+     * minimum. The 2x canvas places every sample by this number, and a cell
+     * there is half a sensor pixel. This fits the translation to every pixel
+     * of the tile instead.
+     *
+     * ### The method
+     *
+     * The template T is the reference tile; the image I is the alternate; the
+     * translation p is sought with I(x + p) = T(x). Inverse compositional
+     * (Baker & Matthews 2004), translation-only: linearise T rather than I, so
+     * the gradient and the Gauss-Newton Hessian are the reference's and are
+     * computed once,
+     *
+     *     g = (T(x+1,y) - T(x-1,y), T(x,y+1) - T(x,y-1)) = 2 grad T
+     *     H = sum g g^T
+     *
+     * and each iteration warps the alternate bilinearly at p, takes the error
+     * e = I(x + p) - T(x), and steps
+     *
+     *     dp = 2 H^-1 sum g e,   p <- p - dp.
+     *
+     * For a translation the inverse composition is that subtraction. Three
+     * iterations from the integer winner.
+     *
+     * ### Fixed point, so the native port agrees exactly
+     *
+     * The warp's fraction is constant over the tile, so its bilinear weights
+     * are four numbers. They are rounded to 1/256, the interpolated value is
+     * kept in 1/256 of a code, and every sum -- H, sum g e, sum e^2 -- is an
+     * exact integer. Align.cpp vectorises the warp with NEON and sums in a
+     * different order and gets the same integers; the only floating point is
+     * the 2x2 solve, done the same way on both sides. The rounding of the
+     * weights moves the warp by at most 1/512 pixel, which is all the
+     * quantisation can leave in the answer: each step is measured from where
+     * the warp actually was.
+     *
+     * ### When it declines
+     *
+     *  * The weaker eigenvalue of H, per pixel, is under [LK_MIN_GRADIENT]
+     *    (in (codes/pixel)^2 of grad T): a flat tile, or an edge, whose
+     *    translation along itself is not determined.
+     *  * The estimate leaves a pixel either way of the integer winner: the
+     *    search was wrong, or the fit diverged, and neither is a fraction.
+     *  * The weaker direction's gradient power, lambda_min / 4N, is less than
+     *    [LK_MIN_SNR] times s^2, the mean squared residual of the last
+     *    iteration: noise, motion within the tile, or a tile that does not
+     *    translate. The estimate's standard error in that direction is
+     *    sqrt(4 s^2 / lambda_min) = 1 / sqrt(N * ratio), so passing bounds it
+     *    by 1 / sqrt(N), 0.03 pixels on a 32-pixel tile. Without this a tile
+     *    of pure noise passes every other test and pins its fraction near
+     *    zero, wherever the frame really moved; declined, it borrows its
+     *    neighbours'. Byte-identical frames have zero residual and pass.
+     *
+     * A declined tile reads zero, which [AlignmentField.withFlatTilesBorrowed]
+     * fills from the fitted tiles around it for the 2x canvas.
+     *
+     * Border pixels read the planes clamped, as [tileCost] does.
+     */
+    fun refineSubPixel(
+        ref: Plane,
+        alt: Plane,
+        x0: Int,
+        y0: Int,
+        tileW: Int,
+        tileH: Int,
+        dx: Int,
+        dy: Int,
+        out: FloatArray,
+    ) {
+        out[0] = 0f
+        out[1] = 0f
+        val n = tileW * tileH
+        if (n == 0) return
+        val rw = ref.width
+        val rh = ref.height
+        val rd = ref.data
+        fun r(x: Int, y: Int) = rd[y.coerceIn(0, rh - 1) * rw + x.coerceIn(0, rw - 1)].toInt() and 0xFF
+
+        val gx = IntArray(n)
+        val gy = IntArray(n)
+        val t = IntArray(n)
+        var hxx = 0L
+        var hxy = 0L
+        var hyy = 0L
+        for (yy in 0 until tileH) {
+            val y = y0 + yy
+            for (xx in 0 until tileW) {
+                val x = x0 + xx
+                val i = yy * tileW + xx
+                val a = r(x + 1, y) - r(x - 1, y)
+                val b = r(x, y + 1) - r(x, y - 1)
+                gx[i] = a
+                gy[i] = b
+                t[i] = r(x, y) * LK_ONE
+                hxx += a.toLong() * a
+                hxy += a.toLong() * b
+                hyy += b.toLong() * b
+            }
+        }
+        val det = hxx.toDouble() * hyy.toDouble() - hxy.toDouble() * hxy.toDouble()
+        if (det <= 0.0) return
+        val lambdaMin = lkLambdaMin(hxx, hxy, hyy)
+        // H is in (2 grad T)^2: a quarter of it is grad T's.
+        if (lambdaMin / (4.0 * n) < LK_MIN_GRADIENT) return
+
+        val aw = alt.width
+        val ah = alt.height
+        val ad = alt.data
+        fun a(x: Int, y: Int) = ad[y.coerceIn(0, ah - 1) * aw + x.coerceIn(0, aw - 1)].toInt() and 0xFF
+
+        var px = dx.toDouble()
+        var py = dy.toDouble()
+        var ee = 0L
+        for (iteration in 0 until LK_ITERATIONS) {
+            var ix = kotlin.math.floor(px).toInt()
+            var wx = kotlin.math.floor((px - ix) * LK_ONE + 0.5).toInt()
+            if (wx == LK_ONE) { ix++; wx = 0 }
+            var iy = kotlin.math.floor(py).toInt()
+            var wy = kotlin.math.floor((py - iy) * LK_ONE + 0.5).toInt()
+            if (wy == LK_ONE) { iy++; wy = 0 }
+
+            var bx = 0L
+            var by = 0L
+            ee = 0L
+            for (yy in 0 until tileH) {
+                val sy = y0 + yy + iy
+                for (xx in 0 until tileW) {
+                    val sx = x0 + xx + ix
+                    val h0 = a(sx, sy) * (LK_ONE - wx) + a(sx + 1, sy) * wx
+                    val h1 = a(sx, sy + 1) * (LK_ONE - wx) + a(sx + 1, sy + 1) * wx
+                    val v = (h0 * (LK_ONE - wy) + h1 * wy + LK_ONE / 2) shr 8
+                    val i = yy * tileW + xx
+                    val e = v - t[i]
+                    bx += gx[i].toLong() * e
+                    by += gy[i].toLong() * e
+                    ee += e.toLong() * e
+                }
+            }
+            val step = lkStep(hxx, hxy, hyy, det, bx, by)
+            px -= step[0]
+            py -= step[1]
+            if (kotlin.math.abs(px - dx) > 1.0 || kotlin.math.abs(py - dy) > 1.0) return
+        }
+        if (!lkConfident(ee, n, lambdaMin)) return
+        out[0] = (px - dx).toFloat()
+        out[1] = (py - dy).toFloat()
+    }
+
+    /** The smaller eigenvalue of [[hxx, hxy], [hxy, hyy]]. */
+    internal fun lkLambdaMin(hxx: Long, hxy: Long, hyy: Long): Double {
+        val trace = hxx.toDouble() + hyy.toDouble()
+        val diff = hxx.toDouble() - hyy.toDouble()
+        val root = kotlin.math.sqrt(diff * diff + 4.0 * hxy.toDouble() * hxy.toDouble())
+        return 0.5 * (trace - root)
+    }
+
+    /** dp = 2 H^-1 sum g e, with e in 1/256 of a code. */
+    private fun lkStep(hxx: Long, hxy: Long, hyy: Long, det: Double, bx: Long, by: Long): DoubleArray {
+        val scale = 2.0 / LK_ONE / det
+        return doubleArrayOf(
+            scale * (hyy.toDouble() * bx.toDouble() - hxy.toDouble() * by.toDouble()),
+            scale * (hxx.toDouble() * by.toDouble() - hxy.toDouble() * bx.toDouble()),
+        )
+    }
+
+    /** Gradient power in the weaker direction against the residual's, both per pixel in codes^2. */
+    private fun lkConfident(ee: Long, n: Int, lambdaMin: Double): Boolean {
+        val residual = ee.toDouble() / n / (LK_ONE.toDouble() * LK_ONE)
+        return lambdaMin / (4.0 * n) >= LK_MIN_SNR * residual
     }
 
     /**
@@ -295,6 +495,11 @@ object Aligner {
      * pixel of offset that comes from the other axis' unrefined fraction
      * leaking into this one through diagonal texture, which a separable
      * three-point refinement cannot see. See the test's log for the curve.
+     *
+     * No longer what the search uses: [refineSubPixel] replaced it, after
+     * a known-shift bench measured 0.32 sensor pixels of median error from
+     * it. Kept, with its tests, as the record of what the three-point fit
+     * can and cannot do.
      *
      * This matters more for the 2x canvas than for the merge. The merge
      * blends samples over a tile and a quarter-pixel error softens nothing

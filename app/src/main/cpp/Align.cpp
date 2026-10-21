@@ -19,7 +19,9 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 #if defined(__aarch64__) || defined(__ARM_NEON)
@@ -199,27 +201,174 @@ int64_t tileCost(const Plane& ref, const Plane& alt, int x0, int y0,
     return cost;
 }
 
-/**
- * The fractional offset of a minimum, from three costs a pixel apart.
- *
- * Matches `Aligner.subPixelOffset` exactly -- the equiangular fit, and the
- * reasons it replaced the parabola are there -- including the three cases that
- * return zero: a flat or inverted curvature, a vertex outside +-0.5, and the
- * INT64_MAX sentinel an early-exit cost reads as. Computed in double for the
- * same reason -- the costs run to millions and their difference is the number
- * that matters.
- */
-inline float subPixelOffset(int64_t before, int64_t at, int64_t after) {
-    if (before == INT64_MAX || at == INT64_MAX || after == INT64_MAX) return 0.0f;
-    const double b = static_cast<double>(before);
-    const double a = static_cast<double>(at);
-    const double c = static_cast<double>(after);
-    if (b - 2.0 * a + c <= 0.0) return 0.0f;
-    const double steep = std::max(b, c) - a;
-    if (steep <= 0.0) return 0.0f;
-    const double vertex = (b - c) / (2.0 * steep);
-    if (vertex < -0.5 || vertex > 0.5) return 0.0f;
-    return static_cast<float>(vertex);
+// --- Sub-pixel refinement --------------------------------------------------
+//
+// Inverse-compositional Lucas-Kanade on the proxy, translation only, from the
+// integer winner. The Kotlin `Aligner.refineSubPixel` is the reference and
+// carries the derivation; this is the same arithmetic. The warp's fraction is
+// constant over a tile, so its bilinear weights are four integers in 1/256,
+// and every sum -- the Hessian, sum g*e, sum e^2 -- is an exact integer here
+// and there whatever order the lanes add in. The 2x2 solve is the only
+// floating point, written as the Kotlin writes it.
+
+constexpr int kLkIterations = 3;
+constexpr int kLkOne = 256;
+constexpr double kLkMinGradient = 0.25;
+constexpr double kLkMinSnr = 1.0;
+
+inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+struct LkScratch {
+    std::vector<int32_t> gx, gy, t;
+};
+
+/** Sums over one row of the warp: sum gx*e, gy*e, e*e. The caller has checked the row is inside the plane. */
+inline void warpRow(const uint8_t* rowA, const uint8_t* rowB, const int32_t* gx, const int32_t* gy,
+                    const int32_t* t, int count, int wx, int wy,
+                    int64_t& bx, int64_t& by, int64_t& ee) {
+    int i = 0;
+#ifdef MF_HAS_NEON
+    const uint16_t wx0 = static_cast<uint16_t>(kLkOne - wx);
+    const uint16_t wx1 = static_cast<uint16_t>(wx);
+    const uint32_t wy0 = static_cast<uint32_t>(kLkOne - wy);
+    const uint32_t wy1 = static_cast<uint32_t>(wy);
+    int32x4_t accX = vdupq_n_s32(0);
+    int32x4_t accY = vdupq_n_s32(0);
+    int64x2_t accE = vdupq_n_s64(0);
+    const uint32x4_t half = vdupq_n_u32(kLkOne / 2);
+    for (; i + 8 <= count; i += 8) {
+        const uint16x8_t a0 = vmovl_u8(vld1_u8(rowA + i));
+        const uint16x8_t a1 = vmovl_u8(vld1_u8(rowA + i + 1));
+        const uint16x8_t b0 = vmovl_u8(vld1_u8(rowB + i));
+        const uint16x8_t b1 = vmovl_u8(vld1_u8(rowB + i + 1));
+        // Horizontal: at most 255 * 256 = 65280 per value.
+        const uint32x4_t h0lo = vmlal_n_u16(vmull_n_u16(vget_low_u16(a0), wx0), vget_low_u16(a1), wx1);
+        const uint32x4_t h0hi = vmlal_n_u16(vmull_n_u16(vget_high_u16(a0), wx0), vget_high_u16(a1), wx1);
+        const uint32x4_t h1lo = vmlal_n_u16(vmull_n_u16(vget_low_u16(b0), wx0), vget_low_u16(b1), wx1);
+        const uint32x4_t h1hi = vmlal_n_u16(vmull_n_u16(vget_high_u16(b0), wx0), vget_high_u16(b1), wx1);
+        // Vertical, rounded back to 1/256 of a code: at most 65280 * 256 + 128.
+        const uint32x4_t vlo = vshrq_n_u32(vaddq_u32(vmlaq_n_u32(vmulq_n_u32(h0lo, wy0), h1lo, wy1), half), 8);
+        const uint32x4_t vhi = vshrq_n_u32(vaddq_u32(vmlaq_n_u32(vmulq_n_u32(h0hi, wy0), h1hi, wy1), half), 8);
+        const int32x4_t elo = vsubq_s32(vreinterpretq_s32_u32(vlo), vld1q_s32(t + i));
+        const int32x4_t ehi = vsubq_s32(vreinterpretq_s32_u32(vhi), vld1q_s32(t + i + 4));
+        // |g| <= 255 and |e| <= 65280: a product under 1.7e7, and a lane
+        // sums at most a quarter of a row's -- sixteen of them on the widest
+        // tile the proxy makes -- before it is widened below.
+        accX = vmlaq_s32(vmlaq_s32(accX, vld1q_s32(gx + i), elo), vld1q_s32(gx + i + 4), ehi);
+        accY = vmlaq_s32(vmlaq_s32(accY, vld1q_s32(gy + i), elo), vld1q_s32(gy + i + 4), ehi);
+        accE = vaddq_s64(accE, vmull_s32(vget_low_s32(elo), vget_low_s32(elo)));
+        accE = vaddq_s64(accE, vmull_s32(vget_high_s32(elo), vget_high_s32(elo)));
+        accE = vaddq_s64(accE, vmull_s32(vget_low_s32(ehi), vget_low_s32(ehi)));
+        accE = vaddq_s64(accE, vmull_s32(vget_high_s32(ehi), vget_high_s32(ehi)));
+    }
+    bx += vaddlvq_s32(accX);
+    by += vaddlvq_s32(accY);
+    ee += vaddvq_s64(accE);
+#endif
+    for (; i < count; ++i) {
+        const int h0 = rowA[i] * (kLkOne - wx) + rowA[i + 1] * wx;
+        const int h1 = rowB[i] * (kLkOne - wx) + rowB[i + 1] * wx;
+        const int v = (h0 * (kLkOne - wy) + h1 * wy + kLkOne / 2) >> 8;
+        const int e = v - t[i];
+        bx += static_cast<int64_t>(gx[i]) * e;
+        by += static_cast<int64_t>(gy[i]) * e;
+        ee += static_cast<int64_t>(e) * e;
+    }
+}
+
+/** See `Aligner.refineSubPixel`. Writes zero to both where the fit declines. */
+void refineSubPixel(const Plane& ref, const Plane& alt, int x0, int y0, int tileW, int tileH,
+                    int dx, int dy, LkScratch& s, float& outX, float& outY) {
+    outX = 0.0f;
+    outY = 0.0f;
+    const int n = tileW * tileH;
+    if (n <= 0) return;
+    s.gx.resize(static_cast<size_t>(n));
+    s.gy.resize(static_cast<size_t>(n));
+    s.t.resize(static_cast<size_t>(n));
+
+    const int rw = ref.w, rh = ref.h;
+    const uint8_t* rd = ref.data.data();
+    auto r = [&](int x, int y) -> int {
+        return rd[static_cast<size_t>(clampi(y, 0, rh - 1)) * rw + clampi(x, 0, rw - 1)];
+    };
+    int64_t hxx = 0, hxy = 0, hyy = 0;
+    for (int yy = 0; yy < tileH; ++yy) {
+        const int y = y0 + yy;
+        for (int xx = 0; xx < tileW; ++xx) {
+            const int x = x0 + xx;
+            const int i = yy * tileW + xx;
+            const int a = r(x + 1, y) - r(x - 1, y);
+            const int b = r(x, y + 1) - r(x, y - 1);
+            s.gx[i] = a;
+            s.gy[i] = b;
+            s.t[i] = r(x, y) * kLkOne;
+            hxx += static_cast<int64_t>(a) * a;
+            hxy += static_cast<int64_t>(a) * b;
+            hyy += static_cast<int64_t>(b) * b;
+        }
+    }
+    const double det = static_cast<double>(hxx) * static_cast<double>(hyy) -
+                       static_cast<double>(hxy) * static_cast<double>(hxy);
+    if (det <= 0.0) return;
+    const double trace = static_cast<double>(hxx) + static_cast<double>(hyy);
+    const double diff = static_cast<double>(hxx) - static_cast<double>(hyy);
+    const double root = std::sqrt(diff * diff + 4.0 * static_cast<double>(hxy) * static_cast<double>(hxy));
+    const double lambdaMin = 0.5 * (trace - root);
+    if (lambdaMin / (4.0 * n) < kLkMinGradient) return;
+
+    const int aw = alt.w, ah = alt.h;
+    const uint8_t* ad = alt.data.data();
+    double px = dx, py = dy;
+    int64_t ee = 0;
+    for (int iteration = 0; iteration < kLkIterations; ++iteration) {
+        int ix = static_cast<int>(std::floor(px));
+        int wx = static_cast<int>(std::floor((px - ix) * kLkOne + 0.5));
+        if (wx == kLkOne) { ++ix; wx = 0; }
+        int iy = static_cast<int>(std::floor(py));
+        int wy = static_cast<int>(std::floor((py - iy) * kLkOne + 0.5));
+        if (wy == kLkOne) { ++iy; wy = 0; }
+
+        int64_t bx = 0, by = 0;
+        ee = 0;
+        const int sx0 = x0 + ix;
+        const bool insideX = sx0 >= 0 && sx0 + tileW < aw;
+        for (int yy = 0; yy < tileH; ++yy) {
+            const int sy = y0 + yy + iy;
+            const int i0 = yy * tileW;
+            if (insideX && sy >= 0 && sy + 1 < ah) {
+                const uint8_t* rowA = ad + static_cast<size_t>(sy) * aw + sx0;
+                warpRow(rowA, rowA + aw, s.gx.data() + i0, s.gy.data() + i0, s.t.data() + i0,
+                        tileW, wx, wy, bx, by, ee);
+                continue;
+            }
+            // The plane's edge: read clamped, as the reference does.
+            const int ya = clampi(sy, 0, ah - 1), yb = clampi(sy + 1, 0, ah - 1);
+            for (int xx = 0; xx < tileW; ++xx) {
+                const int sx = sx0 + xx;
+                const int xa = clampi(sx, 0, aw - 1), xb = clampi(sx + 1, 0, aw - 1);
+                const int h0 = ad[static_cast<size_t>(ya) * aw + xa] * (kLkOne - wx) + ad[static_cast<size_t>(ya) * aw + xb] * wx;
+                const int h1 = ad[static_cast<size_t>(yb) * aw + xa] * (kLkOne - wx) + ad[static_cast<size_t>(yb) * aw + xb] * wx;
+                const int v = (h0 * (kLkOne - wy) + h1 * wy + kLkOne / 2) >> 8;
+                const int e = v - s.t[i0 + xx];
+                bx += static_cast<int64_t>(s.gx[i0 + xx]) * e;
+                by += static_cast<int64_t>(s.gy[i0 + xx]) * e;
+                ee += static_cast<int64_t>(e) * e;
+            }
+        }
+        const double scale = 2.0 / kLkOne / det;
+        const double stepX = scale * (static_cast<double>(hyy) * static_cast<double>(bx) -
+                                      static_cast<double>(hxy) * static_cast<double>(by));
+        const double stepY = scale * (static_cast<double>(hxx) * static_cast<double>(by) -
+                                      static_cast<double>(hxy) * static_cast<double>(bx));
+        px -= stepX;
+        py -= stepY;
+        if (std::fabs(px - dx) > 1.0 || std::fabs(py - dy) > 1.0) return;
+    }
+    const double residual = static_cast<double>(ee) / n / (static_cast<double>(kLkOne) * kLkOne);
+    if (lambdaMin / (4.0 * n) < kLkMinSnr * residual) return;
+    outX = static_cast<float>(px - dx);
+    outY = static_cast<float>(py - dy);
 }
 
 void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& altPyr,
@@ -227,6 +376,7 @@ void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& a
                    float* fracDx, float* fracDy) {
     const int count = tilesX * tilesY;
     const int levels = static_cast<int>(std::min(refPyr.size(), altPyr.size()));
+    LkScratch scratch;
 
     for (int level = levels - 1; level >= 0; --level) {
         if (level < levels - 1) {
@@ -292,20 +442,10 @@ void alignPyramids(const std::vector<Plane>& refPyr, const std::vector<Plane>& a
 
                 // Sub-pixel refinement at the finest level only. Higher up it
                 // would be doubled into the next level's integer search and
-                // lost. Four extra evaluations per tile, without an early-exit
-                // ceiling, because a cost that bailed out is not a measurement
-                // and the fit would read it as one.
+                // lost.
                 if (level == 0) {
-                    const int64_t left = tileCost(ref, alt, x0, y0, tileW, tileH,
-                                                  bestDx - 1, bestDy, step, INT64_MAX);
-                    const int64_t right = tileCost(ref, alt, x0, y0, tileW, tileH,
-                                                   bestDx + 1, bestDy, step, INT64_MAX);
-                    const int64_t up = tileCost(ref, alt, x0, y0, tileW, tileH,
-                                                bestDx, bestDy - 1, step, INT64_MAX);
-                    const int64_t down = tileCost(ref, alt, x0, y0, tileW, tileH,
-                                                  bestDx, bestDy + 1, step, INT64_MAX);
-                    fracDx[idx] = subPixelOffset(left, bestCost, right);
-                    fracDy[idx] = subPixelOffset(up, bestCost, down);
+                    refineSubPixel(ref, alt, x0, y0, tileW, tileH, bestDx, bestDy, scratch,
+                                   fracDx[idx], fracDy[idx]);
                 }
             }
         }

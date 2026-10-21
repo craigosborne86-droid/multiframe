@@ -64,8 +64,8 @@ class SubPixelResult(
  *
  * ### What it needs, and where it gets it
  *
- * Sub-pixel alignment. `AlignmentField.fracDx`/`fracDy` are the parabolic
- * refinement of the integer search, and this is the one consumer of them: the
+ * Sub-pixel alignment. `AlignmentField.fracDx`/`fracDy` are the Lucas-Kanade
+ * refinement of the integer search (`Aligner.refineSubPixel`), and this is the one consumer of them: the
  * ordinary merge cannot spend a fraction because an odd shift in the CFA
  * domain lands a red sample on a green site. Here each channel has its own
  * canvas, so a fraction is not a parity problem -- it is the whole point.
