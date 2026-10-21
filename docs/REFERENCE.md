@@ -2256,11 +2256,73 @@ down -- the last release destroys it
 `CaptureModes.AUTO_MAX_FRAMES` = 10 however deep the ring: signal-to-noise
 grows as √N, so twenty frames over ten is half a stop for a burst window
 twice as long -- twice the hand's drift for the alignment to chase, twice
-the chance the subject moved. NIGHT, on a scene that is still, takes what
-the ring has. ACTION takes four. AUTO that the histogram resolves to night
-(a dark scene) takes night's guard -- none -- but AUTO's ten frames and
-AUTO's cap: the mode the user chose says whose hand is holding the phone,
-and NIGHT chosen by name is the still scene.
+the chance the subject moved. NIGHT takes what its plan from the hand
+allows (below), or, with no gyroscope, what the ring has. ACTION takes
+four. AUTO that the histogram resolves to night (a dark scene) takes
+night's guard -- none -- but AUTO's ten frames and AUTO's cap: the mode the
+user chose says whose hand is holding the phone.
+
+**NIGHT's exposure, from the hand** (`MotionClass.kt`, `NightPlanner.kt`).
+NIGHT used to take the ring's ceiling of the meter's own frames under a
+nominal 250 ms cap (`CaptureModes.NIGHT_EXPOSURE_NS`) that the repeating
+request never reached: a tripod shot the same thirtieth of a second as a
+hand. Now, while NIGHT is selected, the gyroscope (`MotionSensor`, at the
+platform's fastest rate) is read every 100 ms:
+
+```
+rate   = RMS over the last 500 ms of the angular-rate vector, averaged in
+         20 ms bins (25 Hz noise bandwidth; a 10 Hz tremor passes at 94%),
+         the gyroscope's noise (0.0008 rad/s, a datasheet estimate)
+         removed in quadrature                          MotionMeter.rmsRate
+class  = TRIPOD   if rate <= 0.75 px / (f_px · 1/2 s)
+         BRACED   if rate <= 0.75 px / (f_px · 1/4 s)
+         HANDHELD otherwise                             MotionClassifier
+```
+
+`f_px` is the lens's focal length in pixels (`LensProfile.pixelsPerRadian`:
+the intrinsic calibration, else the focal length over the sensor width,
+else the 35mm equivalent). The budget is the newest frame's, because the
+newest frame is the merge's reference and its blur is the photograph's: a
+class is the rate at which the hand holds that class's *shortest* exposure
+under 0.75 px. On a 3000-pixel main lens the boundaries are 0.06 and
+0.03 degree a second. The class has hysteresis: it falls to a less stable
+one at once when the rate passes the boundary by 1.25×, and rises only
+after the rate has been under 0.8× the boundary for 300 ms; it starts
+HANDHELD. The plan is then solved (`NightPlanner.solve`):
+
+| class    | exposure       | frames                       |
+|----------|----------------|------------------------------|
+| HANDHELD | 1/15 -- 1/8 s  | 2 s of burst, 16 -- 28       |
+| BRACED   | 1/4 -- 1/2 s   | 4 s of burst, 8 -- 16        |
+| TRIPOD   | 1/2 -- 1 s     | the ring's ceiling           |
+
+The exposure is the longest the hand holds at the budget,
+`0.75 / (f_px · rate)`, held to the class's range; the ISO is the meter's
+light re-split, `ISO_meter · t_meter / t`. The light is kept, not added:
+the develop holds its gain within half a stop under and three quarters
+over the meter's (`DevelopParams.meteredGain`), and a plan that gathered
+more would render a night as a dusk. Where the class's range cannot carry
+the light at the sensor's gains, the shutter leaves the range -- shorter
+for a bright scene, toward the class's longest for a dark one -- before
+the light leaves the meter; a meter frame is at most a frame interval
+inside the sensor's range, so the light is in practice always kept
+(`NightPlannerTest.lightStaysWithinTheMeteredGainBoundOverTheSensorsRange`).
+A HANDHELD hand that cannot hold 1/15 s at the budget still gets 1/15 s;
+the plan's `blurPixels` says what that costs.
+
+The plan is shot as a still burst at the press (`ZslRawStream.
+captureStillBurst`, "Long exposure belongs to still requests"), its
+timestamps validated before the develop queue has it; the repeating request
+keeps the meter, at most a frame interval. PRO's manual exposure outranks
+the plan, and the Super Res canvas stays a ZSL shot. A press the ring
+cannot hold is refused with the reject haptic. The plan is shown as a live
+reading in the console, Amber (`HANDHELD · 1/15 · ISO 1600 · 28×`), never
+on the photograph. NIGHT has a plan only where `NightPlanner.supported`:
+a gyroscope, a manual sensor, and the ISO and exposure ranges. Otherwise
+NIGHT is the fixed plan above, unchanged. The classifier's hysteresis,
+the table at each boundary and the bound are JVM tests
+(`MotionClassTest`, `NightPlannerTest`); the thresholds and the noise
+constant have not been measured on either development phone.
 
 **The shutter cap.** AUTO's frames are exposed no longer than
 `CaptureModes.AUTO_EXPOSURE_NS` = 1/60 s (ACTION's 1/250 s; NIGHT's 1/4 s
