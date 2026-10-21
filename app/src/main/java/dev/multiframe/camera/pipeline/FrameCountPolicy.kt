@@ -8,12 +8,14 @@ object FrameCountPolicy {
     // deeper than it holds; see RawRingBudget.burstForDepth.
     const val MAX_FRAMES = 28
 
-    val STEPS: List<Int> = listOf(1, 2, 4, 8, 12, 16, 24, MAX_FRAMES)
+    // No single-frame step: a press never takes one frame (CLAUDE.md). A
+    // stored 1 from an older build folds up to the first detent.
+    val STEPS: List<Int> = listOf(2, 4, 8, 12, 16, 24, MAX_FRAMES)
 
     fun stepsUpTo(hardwareCeiling: Int): List<Int> =
         STEPS.filter { it <= hardwareCeiling }.ifEmpty { listOf(STEPS.first()) }
 
-    /** Fold older persisted values, including the former 32-frame option, onto a real detent. */
+    /** Fold older persisted values, including the former 1- and 32-frame options, onto a real detent. */
     fun normalize(value: Int): Int = STEPS.lastOrNull { it <= value } ?: STEPS.first()
 
     fun next(current: Int, hardwareCeiling: Int): Int {

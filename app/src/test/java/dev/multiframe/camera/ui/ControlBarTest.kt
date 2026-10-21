@@ -187,21 +187,29 @@ class ControlBarTest {
 
     @Test
     fun burstSizesNeverExceedWhatTheRingCanHold() {
-        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.stepsUpTo(10)).containsExactly(1, 2, 4, 8).inOrder()
-        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.stepsUpTo(32)).containsExactly(1, 2, 4, 8, 12, 16, 24, 28).inOrder()
+        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.stepsUpTo(10)).containsExactly(2, 4, 8).inOrder()
+        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.stepsUpTo(32)).containsExactly(2, 4, 8, 12, 16, 24, 28).inOrder()
         // A ring too small for even the smallest step still has to offer one.
-        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.stepsUpTo(0)).containsExactly(1)
+        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.stepsUpTo(0)).containsExactly(2)
     }
 
     @Test
     fun burstCyclingWrapsAndStaysWithinTheCeiling() {
         assertThat(ControlBar.nextBurst(4, 10)).isEqualTo(8)
-        assertThat(ControlBar.nextBurst(8, 10)).isEqualTo(1)
+        assertThat(ControlBar.nextBurst(8, 10)).isEqualTo(2)
         assertThat(ControlBar.nextBurst(24, 32)).isEqualTo(28)
-        assertThat(ControlBar.nextBurst(28, 32)).isEqualTo(1)
+        assertThat(ControlBar.nextBurst(28, 32)).isEqualTo(2)
         // A count above the ceiling -- the ring shrank under it -- drops back
         // to a legal one rather than wrapping from a position that is not there.
-        assertThat(ControlBar.nextBurst(32, 10)).isEqualTo(1)
+        assertThat(ControlBar.nextBurst(32, 10)).isEqualTo(2)
+    }
+
+    /** A press never takes one frame, so no setting offers one; a stored 1 folds up. */
+    @Test
+    fun noBurstSettingTakesASingleFrame() {
+        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.STEPS).doesNotContain(1)
+        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.normalize(1)).isEqualTo(2)
+        assertThat(dev.multiframe.camera.pipeline.FrameCountPolicy.normalize(0)).isEqualTo(2)
     }
 
     @Test
