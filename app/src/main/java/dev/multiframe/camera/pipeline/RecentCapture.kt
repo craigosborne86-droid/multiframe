@@ -42,7 +42,7 @@ object RecentCapture {
     // These are the current merge output names. The terminal number is the
     // number of frames accumulated, not the frame setting requested at shutter.
     private val FRAME_COUNT_NAME = Regex(
-        """^MF_[0-9]{8}_[0-9]{6}_(?:zsl|merged|sr2x|[1-9][0-9]*mp)_([1-9][0-9]*)f(?:\.(?:jpg|dng))?$""",
+        """^MF_[0-9]{8}_[0-9]{6}_(?:zsl|night|long[0-9]+s|merged|sr2x|[1-9][0-9]*mp)_([1-9][0-9]*)f(?:\.(?:jpg|heic|heif|dng))?$""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -137,6 +137,9 @@ object RecentCapture {
     fun frameCount(displayName: String): Int? =
         FRAME_COUNT_NAME.matchEntire(displayName)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
+    /** The name segment that marks a long exposure: `MF_<stamp>_long4s_<n>f.jpg`. */
+    private val LONG_TAG = Regex("""_long[0-9]+s_""")
+
     /** The name segment that marks a 2x capture: `MF_<stamp>_sr2x_<n>f.jpg`. */
     const val SUPER_RES_TAG = "_sr2x_"
 
@@ -146,6 +149,8 @@ object RecentCapture {
         isSuperRes(displayName) -> "super-res 2x"
         nativeHighResMegapixels(displayName) != null -> "${nativeHighResMegapixels(displayName)}MP native raw"
         displayName.contains("_zsl_") -> "zero shutter lag"
+        displayName.contains("_night_") -> "night burst"
+        LONG_TAG.containsMatchIn(displayName) -> "long exposure"
         displayName.contains("_merged_") -> "merged burst"
         displayName.contains("_raw") -> "single frame"
         displayName.contains("_ab_") -> "A/B comparison"

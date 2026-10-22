@@ -271,6 +271,10 @@ object RawBurstCapture {
         writeDng: Boolean = true,
         /** Stops the DNG tells a converter to add back: the guard's pull, undone. */
         baselineExposureStops: Float = 0f,
+        /** The plan that chose the exposure, in words, for the photograph's own report. */
+        plan: String? = null,
+        /** [CaptureReport.ALIGN_TILES], or [CaptureReport.ALIGN_TRIPOD] where frames were summed in place. */
+        alignment: String = CaptureReport.ALIGN_TILES,
     ): RawBurstResult = coroutineScope {
         val stamp = stamp()
 
@@ -456,7 +460,23 @@ object RawBurstCapture {
                     characteristics = characteristics,
                     lens = lens,
                     frames = captured,
-                ),
+                ).let { meta ->
+                    meta.copy(report = CaptureReport(
+                        kind = CaptureReport.kindForTag(tag),
+                        framesRequested = frameCount,
+                        framesMerged = stats.framesMerged,
+                        meanContribution = stats.meanContribution,
+                        spanMillis = burstSpanMillis,
+                        exposureTimeNs = meta.exposureTimeNs,
+                        iso = meta.iso,
+                        lens = lens?.label,
+                        alignment = alignment,
+                        localTone = develop.localTone > 0f || develop.shadowLift > 0f,
+                        hdr = gainMap != null,
+                        plan = plan,
+                        mergeMillis = mergeMillis,
+                    ))
+                },
             )
         }
         val jpegOk = saved != null

@@ -540,7 +540,14 @@ private fun ReviewChrome(
     modifier: Modifier = Modifier,
 ) {
     val view = LocalView.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     var showInfo by rememberSaveable(record.baseName) { mutableStateOf(false) }
+    // How the picture was made, read back from the file itself (EXIF
+    // UserComment): the account travels with the photograph.
+    val report by produceState<dev.multiframe.camera.pipeline.CaptureReport?>(null, record.baseName) {
+        val uri = record.jpeg?.uri ?: return@produceState
+        value = withContext(Dispatchers.IO) { dev.multiframe.camera.pipeline.readCaptureReport(context, uri) }
+    }
     Box(modifier = modifier) {
         Row(
             modifier = Modifier
@@ -566,7 +573,7 @@ private fun ReviewChrome(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (showInfo) Column(
-                modifier = Modifier.heightIn(max = 120.dp).verticalScroll(rememberScrollState())
+                modifier = Modifier.heightIn(max = if (report != null) 360.dp else 120.dp).verticalScroll(rememberScrollState())
                     .background(TitaniumTokens.PlateSurface, RoundedCornerShape(TitaniumTokens.RadiusPlate))
                     .border(TitaniumTokens.Hairline, TitaniumTokens.HairlineBorder, RoundedCornerShape(TitaniumTokens.RadiusPlate))
                     .padding(12.dp),
@@ -601,6 +608,20 @@ private fun ReviewChrome(
                         style = TitaniumTokens.Label,
                         modifier = Modifier.padding(top = 8.dp),
                     )
+                }
+
+                report?.let { made ->
+                    Text("HOW THIS PHOTO WAS MADE", style = TitaniumTokens.Section,
+                        modifier = Modifier.padding(top = 8.dp).testTag("lightbox-report-title"))
+                    made.rows().forEach { (label, value) ->
+                        Row(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {},
+                            horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(label.uppercase(), style = TitaniumTokens.Label)
+                            Spacer(Modifier.width(12.dp))
+                            Text(value, style = TitaniumTokens.ReadableSmall,
+                                modifier = Modifier.weight(1f, fill = false))
+                        }
+                    }
                 }
 
                 if (record.jpeg != null && record.dng != null) ChromeButton(

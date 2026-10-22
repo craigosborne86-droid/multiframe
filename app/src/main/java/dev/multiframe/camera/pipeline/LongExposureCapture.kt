@@ -176,6 +176,8 @@ object LongExposureCapture {
                 develop = develop,
                 baselineExposureStops = -pullStops,
                 writeDng = writeDng,
+                plan = "${durationMillis / 1000} s, ${if (steady) "tripod" else "hand-held, aligned"}",
+                alignment = if (steady) CaptureReport.ALIGN_TRIPOD else CaptureReport.ALIGN_TILES,
             )
         } catch (e: Exception) {
             Log.e(TAG, "long exposure failed", e)

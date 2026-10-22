@@ -596,6 +596,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         superRes = pending.canvas2x,
                         develop = pending.develop,
                         writeDng = pending.writeDng,
+                        outputTag = pending.outputTag,
+                        plan = pending.plan,
                         onMergeProgress = { progress ->
                             mergeProgressFlow.value = MergeUiProgress(
                                 pending.processingId, progress.processed, progress.total, progress.finished,
@@ -2123,7 +2125,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 val processingId = ++nextProcessingId
                                 if (developing == 0) mergeProgressFlow.value = MergeUiProgress(processingId, 0, shot.count)
                                 developing++
-                                val queued = developQueue.trySend(PendingShot(processingId, shot, stream, rot, lensProfile, format, canvas2x, params, dng))
+                                val queued = developQueue.trySend(PendingShot(processingId, shot, stream, rot, lensProfile, format, canvas2x, params, dng,
+                                    plan = night?.reading(displayLocale), outputTag = if (night != null) "night" else "zsl"))
                                 if (queued.isFailure) {
                                     shot.close()
                                     developing--
@@ -2787,6 +2790,10 @@ private class PendingShot(
     val canvas2x: Boolean,
     val develop: DevelopParams,
     val writeDng: Boolean,
+    /** The plan that chose the exposure, in words, for the photograph's report: NIGHT's hand. */
+    val plan: String? = null,
+    /** The file tag: "night" for NIGHT's planned burst, "zsl" otherwise. */
+    val outputTag: String = "zsl",
 )
 
 private fun android.content.Context.activityForCamera(): android.app.Activity? = when(this) {

@@ -117,6 +117,8 @@ object ZslCapture {
         onProgress: (String) -> Unit = {},
         onMergeProgress: (MergeProgress) -> Unit = {},
         outputTag: String = "zsl",
+        /** The plan that chose the exposure, in words, for the photograph's report. */
+        plan: String? = null,
     ): RawBurstResult {
         val profile = SensorProfile.from(stream.characteristics)
         // The meter's intent, for the develop to stay near: the guard's pull
@@ -377,6 +379,7 @@ object ZslCapture {
                 develop = develop,
                 baselineExposureStops = -shot.pullStops,
                 writeDng = writeDng,
+                plan = plan,
             ).copy(superRes = outcome)
         } catch (e: Exception) {
             Log.e(TAG, "ZSL merge failed", e)

@@ -44,6 +44,8 @@ data class CaptureMetadata(
      * it is instead. Every viewer honours it.
      */
     val rotationDegrees: Int = 0,
+    /** How the picture was made, written into UserComment so it travels with the file. */
+    val report: CaptureReport? = null,
 )
 
 /**
@@ -220,6 +222,7 @@ object ExifWriter {
         exif.setAttribute(ExifInterface.TAG_MODEL, Build.MODEL)
         exif.setAttribute(ExifInterface.TAG_SOFTWARE, SOFTWARE)
         exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, describeCapture(metadata))
+        metadata.report?.let { exif.setAttribute(ExifInterface.TAG_USER_COMMENT, it.encode()) }
 
         val stamp = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
             .format(metadata.takenAtMillis)
