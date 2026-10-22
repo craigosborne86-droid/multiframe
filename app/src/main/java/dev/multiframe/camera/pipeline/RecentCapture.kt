@@ -42,7 +42,7 @@ object RecentCapture {
     // These are the current merge output names. The terminal number is the
     // number of frames accumulated, not the frame setting requested at shutter.
     private val FRAME_COUNT_NAME = Regex(
-        """^MF_[0-9]{8}_[0-9]{6}_(?:zsl|night|long[0-9]+s|merged|sr2x|[1-9][0-9]*mp)_([1-9][0-9]*)f(?:\.(?:jpg|heic|heif|dng))?$""",
+        """^MF_[0-9]{8}_[0-9]{6}_(?:zsl|night|long[0-9]+s|stack|merged|sr2x|[1-9][0-9]*mp)_([1-9][0-9]*)f(?:\.(?:jpg|heic|heif|dng))?$""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -150,6 +150,7 @@ object RecentCapture {
         nativeHighResMegapixels(displayName) != null -> "${nativeHighResMegapixels(displayName)}MP native raw"
         displayName.contains("_zsl_") -> "zero shutter lag"
         displayName.contains("_night_") -> "night burst"
+        displayName.contains("_stack_") -> "focus stack"
         LONG_TAG.containsMatchIn(displayName) -> "long exposure"
         displayName.contains("_merged_") -> "merged burst"
         displayName.contains("_raw") -> "single frame"

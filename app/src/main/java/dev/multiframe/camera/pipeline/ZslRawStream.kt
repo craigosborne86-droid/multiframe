@@ -903,7 +903,13 @@ class ZslRawStream private constructor(
     }
 
     /** Long exposures are explicit still requests, never repeating preview requests. */
-    suspend fun captureStillBurst(settings: ManualSettings, caps: CameraCapabilities, count: Int): ZslCapture.Shot =
+    suspend fun captureStillBurst(
+        settings: ManualSettings,
+        caps: CameraCapabilities,
+        count: Int,
+        /** One manual focus distance per frame, for a focus stack; null holds [settings]' focus for all. */
+        focusDiopters: List<Float>? = null,
+    ): ZslCapture.Shot =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             check(!closed)
             check(count in 1..maxBurst && lockedFrames() + count <= ringCapacity)
@@ -930,7 +936,11 @@ class ZslRawStream private constructor(
                         completed.completeExceptionally(IllegalStateException("Still capture aborted"))
                     }
                 }
-                session.captureBurst(List(count) { buildRequest(settings, caps, still = true) }, callback, handler)
+                require(focusDiopters == null || focusDiopters.size == count) { "one focus distance per frame" }
+                session.captureBurst(List(count) { i ->
+                    val frameSettings = focusDiopters?.let { settings.copy(manualFocus = true, focusDiopters = it[i]) } ?: settings
+                    buildRequest(frameSettings, caps, still = true)
+                }, callback, handler)
                 kotlinx.coroutines.withTimeout(count * (settings.effectiveExposureTimeNs(caps) / 1_000_000L + 1000L) + 5000L) {
                     val stamp = completed.await()
                     check(stamp > 0)

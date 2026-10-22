@@ -83,12 +83,13 @@ data class CaptureReport(
             KIND_NIGHT -> "NIGHT burst"
             KIND_LONG -> "Long exposure"
             KIND_SUPER_RES -> "2× super-resolution"
+            KIND_STACK -> "Focus stack (Labs)"
             else -> "Burst"
         })
         plan?.let { add("Plan" to it) }
         add("Frames" to if (framesRequested > framesMerged && framesRequested > 0)
             "$framesMerged merged of $framesRequested" else "$framesMerged merged")
-        if (kind != KIND_LONG) add("Kept" to "%.0f%% of samples (motion rejected the rest)".format(locale, meanContribution * 100))
+        if (kind != KIND_LONG && kind != KIND_STACK) add("Kept" to "%.0f%% of samples (motion rejected the rest)".format(locale, meanContribution * 100))
         if (noiseGainStops > 0f) add("Noise" to "about %.1f stops cleaner than one frame".format(locale, noiseGainStops))
         if (spanMillis > 0) add("Span" to if (spanMillis >= 1000) "%.1f s".format(locale, spanMillis / 1000f) else "$spanMillis ms")
         val shutter = exposureTimeNs?.let { ManualSettings(exposureTimeNs = it).shutterLabel(locale) }
@@ -108,6 +109,7 @@ data class CaptureReport(
         const val KIND_NIGHT = "night"
         const val KIND_LONG = "long"
         const val KIND_SUPER_RES = "2x"
+        const val KIND_STACK = "stack"
         const val ALIGN_TILES = "aligned"
         const val ALIGN_TRIPOD = "tripod"
 
@@ -143,6 +145,7 @@ data class CaptureReport(
             superRes -> KIND_SUPER_RES
             tag.startsWith("long") -> KIND_LONG
             tag.startsWith("night") -> KIND_NIGHT
+            tag.startsWith("stack") -> KIND_STACK
             else -> KIND_BURST
         }
     }

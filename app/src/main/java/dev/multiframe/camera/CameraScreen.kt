@@ -390,6 +390,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // Self-timer, and the last shot taken.
     var timerSeconds by remember { mutableIntStateOf(restored.timerSeconds) }
     var longExposureSeconds by remember { mutableIntStateOf(restored.longExposureSeconds) }
+    // Labs: the next press takes a focus stack. Not remembered across launches.
+    var focusStackArmed by remember { mutableStateOf(false) }
     var countdown by remember { mutableIntStateOf(0) }
     // Held so the self-timer can be called off. Only the countdown is
     // cancellable: once frames are captured the work is a few long native
@@ -2060,6 +2062,46 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     // it captures, so it does not go through the develop
                     // queue, and it waits for that queue to be empty: the
                     // accumulator and a queued merge would hold two copies.
+                    // Labs: an armed focus stack takes this press, whatever the mode.
+                    if (focusStackArmed && currentCaps != null &&
+                        dev.multiframe.camera.pipeline.FocusStackCapture.supported(currentCaps, stream)) {
+                        if (busy || lockPending || developing > 0) {
+                            Haptics.reject(view)
+                            status = if (developing > 0) "focus stack waits for $developing developing" else "busy — a moment"
+                            return
+                        }
+                        busy = true
+                        focusStackArmed = false
+                        captureJob = scope.launch {
+                            try {
+                                for (remaining in shotTimerSeconds downTo 1) {
+                                    countdown = remaining; status = "$remaining seconds · timer"
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                                countdown = 0
+                                status = "Focus stack · ${dev.multiframe.camera.pipeline.FocusStack.FRAMES} steps"
+                                val r = withContext(Dispatchers.Default) {
+                                    dev.multiframe.camera.pipeline.FocusStackCapture.capture(
+                                        context, stream, currentCaps, settings, rot,
+                                        lensProfile = lensProfile, outputFormat = format,
+                                        develop = params, writeDng = dng,
+                                    ) { status = it }
+                                }
+                                Haptics.mechanicalRelease(context)
+                                Log.i(TAG, "focus stack result: $r")
+                                val saved = dev.multiframe.camera.pipeline.CaptureSaveFeedback.forOutputs(
+                                    r.savedJpeg != null, r.savedDng != null, dng)
+                                status = saved.message ?: "Focus stack · ${r.framesCaptured} frames"
+                                if (saved.hasSavedOutput) shotsWritten++
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                status = "Focus stack cancelled"
+                                throw e
+                            } catch (e: Exception) {
+                                status = "Focus stack failed: ${e.message}"
+                            } finally { busy = false; countdown = 0; captureJob = null }
+                        }
+                        return
+                    }
                     val longSeconds = longExposureSeconds.takeIf { captureMode == CaptureMode.NIGHT && !canvas2x } ?: 0
                     if (longSeconds > 0) {
                         if (busy || lockPending || developing > 0) {
@@ -2619,6 +2661,19 @@ MechanicalShutter(
                                 showSettings = false
                             },
                         )
+                        }
+                        if (dev.multiframe.camera.pipeline.FocusStackCapture.supported(caps, zslStream)) {
+                            dev.multiframe.camera.ui.FocusStackLabs(
+                                armed = focusStackArmed,
+                                enabled = !busy && superResPhase.controlsEnabled,
+                                onArm = { arm ->
+                                    focusStackArmed = arm
+                                    if (arm) {
+                                        status = "Focus stack armed · press the shutter"
+                                        showSettings = false
+                                    }
+                                },
+                            )
                         }
                     }
                 },

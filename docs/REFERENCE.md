@@ -2823,6 +2823,40 @@ that is a business decision outside the app.
 **Order.** Signing is the last write before the file is published (after
 EXIF and the gain map): any later write breaks the hash.
 
+### 3.12 The Focus Stack (Labs)
+
+Labs offers a focus stack where the camera focuses by hand
+(`CameraCapabilities.hasManualFocus`) and the ring holds eight frames
+(`FocusStackCapture.supported`). Armed from Labs, the next press takes one
+still burst with a manual focus distance per frame, eight steps uniform in
+diopters from the nearest focus to infinity (depth of field is roughly
+constant in diopters), and `FocusStack` merges it.
+
+**Measure.** Per 2×2 CFA cell, on the half-resolution luma proxy after
+alignment: the absolute Laplacian |4c − n − s − e − w|, box-averaged over a
+13×13 window (R = 6) via an integral image, so a flat patch beside an edge
+takes the edge's verdict.
+
+**Blend.** Every frame contributes to every cell with weight (S + ε)⁴: close
+to choosing the sharpest frame where one clearly wins, a soft blend where two
+are equally sharp, which keeps the seams between focus zones from showing as
+halos. One weight per cell, applied to its four samples, at the burst's even
+CFA offsets, so colour phase is kept. Frames are gain-normalised as
+`black + (raw − black)/g`.
+
+**Alignment.** Each frame is aligned to the previous one in the sweep and the
+offsets are chained: frames a focus step apart are sharp in mostly the same
+places, while a block match between a blurred patch and a sharp one is
+guesswork. The chained field is median-filtered per tile over its 3×3
+neighbourhood -- breathing makes a smooth field, so an isolated disagreeing
+tile is a mismatch. On the desk (`FocusStackTest`), two frames each sharp in
+one half stack to within 0.7 codes RMS of the sharp scene in both halves,
+against ~187 for the defocused input.
+
+**Not the merge.** The merge rejects what differs between frames; here the
+frames differ on purpose. The stack is written through the ordinary develop
+and DNG writer, tagged `stack`, with its report (§3.11) saying so.
+
 ## Appendix: File Inventory by Subsystem
 
 ### Pipeline (app/src/main/java/dev/multiframe/camera/pipeline/)

@@ -210,3 +210,15 @@ fun BrenizerLabs(
     if (enabled) ServiceRow("ARM BRENIZER SWEEP", "START", active = true,
         onClick = { Haptics.segment(view); onLaunch() })
 }
+
+/** Labs: a focus stack, armed for the next press. Absent where the camera cannot focus by hand. */
+@Composable
+fun FocusStackLabs(armed: Boolean, enabled: Boolean, onArm: (Boolean) -> Unit) {
+    val view = LocalView.current
+    Text("FOCUS STACK / BETA", style = TitaniumTokens.Control,
+        color = TitaniumTokens.OpticalAmber, modifier = Modifier.padding(vertical = 8.dp))
+    Text("Eight frames from the nearest focus to infinity, each part taken from the frame where it is sharp. Best on a tripod.",
+        style = TitaniumTokens.ReadableSmall, modifier = Modifier.padding(bottom = 8.dp))
+    ServiceRow("ARM FOCUS STACK", if (armed) "ARMED" else "START", active = armed, enabled = enabled,
+        onClick = { Haptics.segment(view); onArm(!armed) })
+}
