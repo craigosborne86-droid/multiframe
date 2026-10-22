@@ -59,8 +59,17 @@ data class ColorProfile(
         fun calibrated(
             characteristics: CameraCharacteristics?,
             result: TotalCaptureResult?,
+            /**
+             * A scene neutral (r/g, 1, b/g) in camera coordinates to use instead
+             * of the camera's: the learned white balance's estimate (Labs,
+             * [AwbContract]). The gains become its reciprocal and the matrix is
+             * re-solved for it, exactly as for the camera's own.
+             */
+            neutralOverride: FloatArray? = null,
         ): ColorProfile {
-            val fallback = from(result)
+            val reported = from(result)
+            val fallback = if (neutralOverride == null) reported
+                else reported.copy(gains = floatArrayOf(1f / neutralOverride[0], 1f, 1f, 1f / neutralOverride[2]))
             if (characteristics == null) return fallback
 
             val calibration = readCalibration(characteristics)
@@ -74,7 +83,7 @@ data class ColorProfile(
             // The neutral colour point is the sensor's own answer; the white
             // balance gains are the fallback, since their reciprocal is the
             // same quantity by a different route.
-            val neutral = cameraNeutral(result, fallback.gains)
+            val neutral = neutralOverride ?: cameraNeutral(result, fallback.gains)
 
             // Interpolated by colour temperature where the device published the
             // illuminants its matrices were measured under, and by the

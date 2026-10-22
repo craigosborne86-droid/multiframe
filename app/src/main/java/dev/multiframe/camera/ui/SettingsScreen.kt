@@ -250,3 +250,70 @@ fun AstroLabs(modelAvailable: Boolean, useModel: Boolean, onUseModel: (Boolean) 
         detail = "Saves each astro shot's reference frame and measured sky mask on this phone, to train Multiframe's own model.",
         active = collect, onClick = { Haptics.segment(view); onCollect(!collect) })
 }
+
+/**
+ * Labs: the opt-in analysis models (AnalysisModels). A model's row is absent
+ * until its model is bundled; the deterministic choices -- the sharpest
+ * reference, the measured-colour regions -- are offered regardless.
+ * Collection keeps training pairs on the phone; nothing leaves it.
+ */
+@Composable
+fun AnalysisLabs(
+    available: Set<dev.multiframe.camera.pipeline.AnalysisTask>,
+    reference: dev.multiframe.camera.pipeline.ReferenceChoice,
+    onReference: (dev.multiframe.camera.pipeline.ReferenceChoice) -> Unit,
+    regionTone: dev.multiframe.camera.pipeline.RegionToneMode,
+    onRegionTone: (dev.multiframe.camera.pipeline.RegionToneMode) -> Unit,
+    awb: Boolean, onAwb: (Boolean) -> Unit,
+    subject: Boolean, onSubject: (Boolean) -> Unit,
+    personMerge: Boolean, onPersonMerge: (Boolean) -> Unit,
+    portrait: Boolean, onPortrait: (Boolean) -> Unit,
+    collect: Boolean, onCollect: (Boolean) -> Unit,
+) {
+    val view = LocalView.current
+    Text("ANALYSIS / BETA", style = TitaniumTokens.Control,
+        color = TitaniumTokens.OpticalAmber, modifier = Modifier.padding(vertical = 8.dp))
+    Text("Opt-in. A model here only analyses measured data -- it chooses, it never makes a pixel. Every photo says which ran.",
+        style = TitaniumTokens.ReadableSmall, modifier = Modifier.padding(bottom = 8.dp))
+    val references = listOfNotNull(
+        dev.multiframe.camera.pipeline.ReferenceChoice.NEWEST,
+        dev.multiframe.camera.pipeline.ReferenceChoice.SHARPEST,
+        dev.multiframe.camera.pipeline.ReferenceChoice.MODEL.takeIf { dev.multiframe.camera.pipeline.AnalysisTask.FRAME in available },
+    )
+    ServiceRow("REFERENCE FRAME", when (reference) {
+        dev.multiframe.camera.pipeline.ReferenceChoice.NEWEST -> "NEWEST"
+        dev.multiframe.camera.pipeline.ReferenceChoice.SHARPEST -> "SHARPEST"
+        dev.multiframe.camera.pipeline.ReferenceChoice.MODEL -> "ML MODEL"
+    }, detail = "The frame the others align to: the newest, or the sharpest of the newest three.",
+        active = reference != dev.multiframe.camera.pipeline.ReferenceChoice.NEWEST,
+        onClick = { Haptics.segment(view); onReference(references[(references.indexOf(reference) + 1) % references.size]) })
+    val regions = listOfNotNull(
+        dev.multiframe.camera.pipeline.RegionToneMode.OFF,
+        dev.multiframe.camera.pipeline.RegionToneMode.MEASURED,
+        dev.multiframe.camera.pipeline.RegionToneMode.MODEL.takeIf { dev.multiframe.camera.pipeline.AnalysisTask.REGIONS in available },
+    )
+    ServiceRow("REGION TONE", when (regionTone) {
+        dev.multiframe.camera.pipeline.RegionToneMode.OFF -> "OFF"
+        dev.multiframe.camera.pipeline.RegionToneMode.MEASURED -> "BY COLOUR"
+        dev.multiframe.camera.pipeline.RegionToneMode.MODEL -> "ML MODEL"
+    }, detail = "With LOCAL TONE on: skies keep their depth and foliage is lifted less; skin keeps its full lift.",
+        active = regionTone != dev.multiframe.camera.pipeline.RegionToneMode.OFF,
+        onClick = { Haptics.segment(view); onRegionTone(regions[(regions.indexOf(regionTone) + 1) % regions.size]) })
+    if (dev.multiframe.camera.pipeline.AnalysisTask.AWB in available) ServiceRow("WHITE BALANCE", if (awb) "ML MODEL" else "CAMERA",
+        detail = "The model estimates the light's colour: three multipliers, nothing else.",
+        active = awb, onClick = { Haptics.segment(view); onAwb(!awb) })
+    if (dev.multiframe.camera.pipeline.AnalysisTask.SUBJECT in available) ServiceRow("SUBJECT FOCUS", if (subject) "ML MODEL" else "OFF",
+        detail = "Focus and exposure follow a subject the model finds. A tap always wins.",
+        active = subject, onClick = { Haptics.segment(view); onSubject(!subject) })
+    if (dev.multiframe.camera.pipeline.AnalysisTask.PERSON in available) {
+        ServiceRow("MOVING PEOPLE", if (personMerge) "ONE FRAME" else "MERGE",
+            detail = "A person who moved comes from the frame you pressed for, not the merge: no soft double edges, one frame's noise.",
+            active = personMerge, onClick = { Haptics.segment(view); onPersonMerge(!personMerge) })
+        ServiceRow("PORTRAIT BLUR", if (portrait) "SIMULATED" else "OFF",
+            detail = "Blurs the background by averaging measured pixels. Not optical bokeh; photos say simulated.",
+            active = portrait, onClick = { Haptics.segment(view); onPortrait(!portrait) })
+    }
+    ServiceRow("COLLECT TRAINING PAIRS", if (collect) "ON" else "OFF",
+        detail = "Saves on this phone only: the white balance you set by hand in PRO, the points you tap to focus, and each frame's gyro-measured blur.",
+        active = collect, onClick = { Haptics.segment(view); onCollect(!collect) })
+}

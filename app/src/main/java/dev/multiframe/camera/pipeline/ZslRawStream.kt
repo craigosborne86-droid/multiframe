@@ -587,6 +587,7 @@ class ZslRawStream private constructor(
         val mirrored = characteristics.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_FRONT
         val previousRegion = focusRegion
         focusRegion = TouchFocus.regionAt(if (mirrored) 1f - normalisedX else normalisedX, normalisedY, orientation, crop)
+        subjectRegion = false
         val generation = tapMeteringGeneration.incrementAndGet()
         lastTapTriggerResult = null
         tapMeteringPending = false
@@ -659,8 +660,57 @@ class ZslRawStream private constructor(
     fun clearFocusPoint(settings: ManualSettings, caps: CameraCapabilities) {
         if (closed || focusRegion == null) return
         focusRegion = null
+        subjectRegion = false
         tapMeteringPending = false
         applySettings(settings, caps)
+    }
+
+    /** Whether the focus region in force is the subject model's rather than a tap's. */
+    @Volatile private var subjectRegion = false
+
+    /** The focus region's centre as a fraction of the sensor array, or null with none set (the subject task's tap label). */
+    fun focusSensorFraction(): Pair<Float, Float>? = focusRegion?.let {
+        val fx = (it.centerX - activeArray.left).toFloat() / activeArray.width
+        val fy = (it.centerY - activeArray.top).toFloat() / activeArray.height
+        // A zoom-ratio request's region is in the zoomed field's coordinates.
+        if (zoomRange != null && zoomRatio > 1.001f) Pair((fx - 0.5f) / zoomRatio + 0.5f, (fy - 0.5f) / zoomRatio + 0.5f)
+        else Pair(fx, fy)
+    }
+
+    /** Whether the AF/AE region in force was put there by the subject model (for the photograph's report). */
+    val subjectFocusActive: Boolean get() = subjectRegion && focusRegion != null
+
+    /**
+     * Puts the AF and AE regions on a subject the model found, at a fraction
+     * of the sensor array (Labs, [SubjectFocus]). No trigger: continuous
+     * autofocus follows the region. A tap's region outranks it and is never
+     * replaced; a subject outside the zoomed field is ignored. False where
+     * nothing was set.
+     */
+    fun subjectFocus(sensorX: Float, sensorY: Float, settings: ManualSettings, caps: CameraCapabilities): Boolean {
+        if (closed || locked || stillInFlight.get()) return false
+        if (focusRegion != null && !subjectRegion) return false
+        if (settings.manualFocus || settings.manualExposureActive(caps)) return false
+        // Zoom-ratio requests meter in the zoomed field's coordinates; the
+        // legacy crop path meters in the whole array's, inside the crop.
+        val crop = if (zoomRange != null) activeArray else TouchFocus.cropForZoom(activeArray, zoomRatio, MAX_FALLBACK_ZOOM)
+        val nx: Float; val ny: Float
+        if (zoomRange != null) {
+            nx = (sensorX - 0.5f) * zoomRatio + 0.5f; ny = (sensorY - 0.5f) * zoomRatio + 0.5f
+        } else {
+            nx = (activeArray.left + sensorX * activeArray.width - crop.left) / crop.width
+            ny = (activeArray.top + sensorY * activeArray.height - crop.top) / crop.height
+        }
+        if (nx !in 0f..1f || ny !in 0f..1f) return false
+        focusRegion = TouchFocus.regionAt(nx, ny, 0, crop)
+        subjectRegion = true
+        applySettings(settings, caps)
+        return true
+    }
+
+    /** Returns from a subject's region to whole-frame metering; a tap's region is left alone. */
+    fun clearSubjectFocus(settings: ManualSettings, caps: CameraCapabilities) {
+        if (subjectRegion) clearFocusPoint(settings, caps)
     }
 
     /**

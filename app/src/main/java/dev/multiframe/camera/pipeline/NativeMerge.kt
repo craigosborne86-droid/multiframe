@@ -145,6 +145,7 @@ class NativeMerge private constructor(
             params.hotPixelThreshold, params.localTone,
             params.shadowLift, params.shadowLiftMax,
             params.purityThreshold, params.purityCeiling,
+            params.liftScale?.values, params.liftScale?.cellsX ?: 0, params.liftScale?.cellsY ?: 0,
         )
         if (!ok) {
             Log.w(TAG, "native develop failed, caller should fall back")
@@ -218,6 +219,7 @@ class NativeMerge private constructor(
         hotPixelThreshold: Float, localTone: Float,
         shadowLift: Float, shadowLiftMax: Float,
         purityThreshold: Float, purityCeiling: Float,
+        liftScale: FloatArray?, liftCellsX: Int, liftCellsY: Int,
     ): Boolean
     private external fun nDefringe(
         bitmap: Bitmap, edgeThreshold: Float, tolerance: Float, strength: Float,

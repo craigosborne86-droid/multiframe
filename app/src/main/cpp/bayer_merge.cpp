@@ -1810,7 +1810,8 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
         jfloatArray jshading, jint shadingColumns, jint shadingRows,
         jfloat hotPixelThreshold, jfloat localTone,
         jfloat shadowLift, jfloat shadowLiftMax,
-        jfloat purityThreshold, jfloat purityCeiling) {
+        jfloat purityThreshold, jfloat purityCeiling,
+        jfloatArray jliftScale, jint liftCellsX, jint liftCellsY) {
     ensureGammaLut();
 
     // Stage clocks, declared here so they outlive the blocks they are taken in.
@@ -1942,6 +1943,13 @@ Java_dev_multiframe_camera_pipeline_NativeMerge_nDevelop(
             }
         }
         grid.finish();
+        // The region-aware tone's share of the earned lift, where it was
+        // made for these cells (BilateralGrid.liftScale).
+        if (jliftScale != nullptr && liftCellsX == grid.cellsX && liftCellsY == grid.cellsY &&
+            env->GetArrayLength(jliftScale) == liftCellsX * liftCellsY) {
+            grid.liftScale.resize(static_cast<size_t>(liftCellsX) * liftCellsY);
+            env->GetFloatArrayRegion(jliftScale, 0, liftCellsX * liftCellsY, grid.liftScale.data());
+        }
         gridPtr = &grid;
     }
 

@@ -119,6 +119,8 @@ object ZslCapture {
         outputTag: String = "zsl",
         /** The plan that chose the exposure, in words, for the photograph's report. */
         plan: String? = null,
+        /** What the user chose in Labs: reference choice, person-aware merge, and the develop's analyses. */
+        analysis: AnalysisChoices = AnalysisChoices.NONE,
     ): RawBurstResult {
         val profile = SensorProfile.from(stream.characteristics)
         // The meter's intent, for the develop to stay near: the guard's pull
@@ -198,6 +200,18 @@ object ZslCapture {
                     }
                 }
             }
+            // Labs: the sharpest of the newest few instead of the newest
+            // (ReferenceChooser). Not under DCG, whose reference is chosen
+            // for its highlights.
+            val uses = ArrayList<AnalysisUse>(analysis.upstream)
+            var chosenProxy: Plane? = null
+            if (!stream.dcg && analysis.reference != ReferenceChoice.NEWEST && burst.count > 1) {
+                val picked = chooseReference(context, m, burst, results, stride, analysis, uses)
+                if (picked != null) {
+                    refIndex = picked.first
+                    chosenProxy = picked.second
+                }
+            }
             // ISO times exposure: the frame's gathered light, which is what a
             // frame at other settings is brought to the reference's scale by.
             // The shutter cap can move the exposure as well as the gain.
@@ -206,7 +220,11 @@ object ZslCapture {
             val refBuffer = burst.frames.buffer(refIndex)
                 ?: error("reference slot unreadable")
             m.setReference(refBuffer, stride)
-            val refProxy = m.lumaProxy(refBuffer, stride)
+            val refProxy = chosenProxy ?: m.lumaProxy(refBuffer, stride)
+            // Labs: the reference's own samples, kept for blending moving
+            // people back from it after the merge (PersonMask).
+            val personModel = analysis.person?.takeIf { analysis.personMerge && !superRes }
+            val refCopy = personModel?.let { PersonMask.copyPacked(refBuffer, stride, m.width, m.height) }
             // Only built when the native search is unavailable: it needs the
             // pyramid, and native builds its own.
             val refPyramid by lazy { Aligner.buildPyramid(refProxy) }
@@ -298,6 +316,17 @@ object ZslCapture {
 
             val t1 = System.currentTimeMillis()
             val (mergedBuffer, stats) = m.finish()
+            if (personModel != null && refCopy != null) {
+                runCatching {
+                    val refCells = CfaThumbnail.cells(refCopy, m.width * 2, m.width, m.height, profile, PersonMask.WIDTH, PersonMask.HEIGHT)
+                    val mergedCells = CfaThumbnail.cells(mergedBuffer, m.width * 2, m.width, m.height, profile, PersonMask.WIDTH, PersonMask.HEIGHT)
+                    val color = ColorProfile.calibrated(stream.characteristics, results[refIndex])
+                    val weights = PersonMask.mergeWeights(personModel.run(PersonMask.input(refCells, color)), refCells, mergedCells)
+                    PersonMask.blendTowardReference(mergedBuffer, refCopy, m.width * 2, m.width, m.height, weights)
+                    uses += personModel.use()
+                    Log.i(TAG, "person-aware merge: %.1f%% of cells from the reference".format(weights.count { it > 0.5f } * 100f / weights.size))
+                }.onFailure { Log.w(TAG, "person-aware merge declined", it) }
+            }
             mergeMillis += System.currentTimeMillis() - t1
             onMergeProgress(MergeProgress(captured, burst.count, finished = true))
 
@@ -380,6 +409,8 @@ object ZslCapture {
                 baselineExposureStops = -shot.pullStops,
                 writeDng = writeDng,
                 plan = plan,
+                analysisUses = uses,
+                analysis = analysis,
             ).copy(superRes = outcome)
         } catch (e: Exception) {
             Log.e(TAG, "ZSL merge failed", e)
@@ -395,6 +426,37 @@ object ZslCapture {
             merger?.close()
         }
     }
+
+    /**
+     * The reference among the newest [ReferenceChooser.CANDIDATES] frames
+     * (index 0 is the newest), and its proxy so it is not built twice; null
+     * where a frame was unreadable. Under the model the model's use is added
+     * to [uses]. Where collection is on, each candidate with a gyro reading
+     * is saved with its measured blur as the frame task's label.
+     */
+    private fun chooseReference(
+        context: Context, m: NativeMerge, burst: ZslBurst, results: List<android.hardware.camera2.TotalCaptureResult?>,
+        stride: Int, analysis: AnalysisChoices, uses: MutableList<AnalysisUse>,
+    ): Pair<Int, Plane>? = runCatching {
+        val n = minOf(ReferenceChooser.CANDIDATES, burst.count)
+        val proxies = (0 until n).map { i -> m.lumaProxy(burst.frames.buffer(i) ?: return null, stride) }
+        val model = analysis.frameModel.takeIf { analysis.reference == ReferenceChoice.MODEL }
+        val pick = if (model != null) {
+            uses += model.use()
+            ReferenceChooser.byBlur(FloatArray(n) { model.run(ReferenceChooser.FrameContract.input(proxies[it]))[0] })
+        } else {
+            ReferenceChooser.bySharpness(FloatArray(n) { ReferenceChooser.sharpness(proxies[it]) })
+        }
+        val blurAt = analysis.blurPixels
+        if (analysis.collect && blurAt != null) for (i in 0 until n) {
+            val exposure = results[i]?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: continue
+            // Sensor pixels to proxy pixels: the proxy is one per CFA cell.
+            val blur = blurAt(burst.frames.timestampsNs[i], exposure) ?: continue
+            AnalysisModels.collect(context, AnalysisTask.FRAME, ReferenceChooser.FrameContract.input(proxies[i]), floatArrayOf(blur / 2f))
+        }
+        if (pick != 0) Log.i(TAG, "reference: frame $pick of the newest $n is sharper than the newest")
+        Pair(pick, proxies[pick])
+    }.onFailure { Log.w(TAG, "reference choice declined", it) }.getOrNull()
 
     /** One alternate frame, aligned onto the reference, ready to be placed. */
     private class AlignedFrame(

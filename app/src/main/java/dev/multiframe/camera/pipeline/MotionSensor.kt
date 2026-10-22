@@ -191,6 +191,21 @@ class MotionSensor(context: Context) : AutoCloseable {
         }
     }
 
+    /**
+     * The mean angular speed, radians per second, of the samples from
+     * [startNs] to [endNs] on the sensor clock; null with no gyroscope or no
+     * sample in the window. The frame task's label (an exposure's blur is
+     * this times its time times the lens's pixels per radian).
+     */
+    fun meanSpeedBetween(startNs: Long, endNs: Long): Float? {
+        if (gyro == null) return null
+        synchronized(lock) {
+            var s = 0f; var n = 0
+            for (x in samples) if (x.timestampNs in startNs..endNs) { s += x.speed; n++ }
+            return if (n == 0) null else s / n
+        }
+    }
+
     /** The current sensor clock, for the caller's window bookkeeping. */
     fun nowNs(): Long = SystemClock.elapsedRealtimeNanos()
 

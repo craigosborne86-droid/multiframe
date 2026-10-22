@@ -404,6 +404,30 @@ class DevelopParityTest {
             dimLevel = 12, dimTexture = 3,
         )
 
+    /**
+     * The region-aware tone (Labs): the earned lift scaled per grid cell. The
+     * native grid reads the same scale map with the same bilinear read, so
+     * the two agree within the same bound; and a half share lifts the dim
+     * rest less than the whole share did, while the bright end stays put.
+     */
+    @Test
+    fun nativeAndKotlinRegionScaledLiftAgree() {
+        val lift = fixedGain.copy(exposureGain = 1.2f, localTone = 0f, shadowLift = 1f, shadowLiftMax = 3f)
+        val grid = BilateralGrid.forImage(256, 192)
+        val half = LiftScaleMap(grid.cellsX, grid.cellsY, FloatArray(grid.cellsX * grid.cellsY) { 0.5f })
+        assertLocalOperatorParity(lift.copy(liftScale = half), brightComesDown = false, dimLevel = 12, dimTexture = 3)
+        val w = 256; val h = 192
+        val frame = BayerFrame(w, h, ShortArray(w * h) { i ->
+            val x = i % w; val y = i / w
+            (64 + (if (x > w * 3 / 4 && y < h / 2) 720 else 12) + ((x * 7 + y * 3) % 11) * 3).toShort()
+        })
+        val color = ColorProfile(floatArrayOf(1.9f, 1f, 1f, 1.6f), floatArrayOf(1.7f, -0.6f, -0.1f, -0.2f, 1.5f, -0.3f, 0f, -0.4f, 1.4f))
+        val whole = RawDeveloper.develop(frame, profile, color, lift)
+        val halved = RawDeveloper.develop(frame, profile, color, lift.copy(liftScale = half))
+        val at = (h * 3 / 4) * w + w / 4
+        assertThat((halved[at] shr 8) and 0xFF).isLessThan((whole[at] shr 8) and 0xFF)
+    }
+
     private fun assertLocalOperatorParity(local: DevelopParams, brightComesDown: Boolean, dimLevel: Int = 90, dimTexture: Int = 6) {
         assertThat(NativeMerge.isAvailable()).isTrue()
         val w = 256

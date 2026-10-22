@@ -104,6 +104,22 @@ class ContentCredentialsTest {
         }
     }
 
+    @Test fun theManifestNamesEachModelAndSaysTheBlurIsAnEdit() {
+        val plain = String(ContentCredentials.embedJpeg(sampleJpeg(), signer, report, "0.1.0-test"), Charsets.ISO_8859_1)
+        assertThat(plain).doesNotContain("c2pa.filtered")
+        val blurred = report.copy(analysis = listOf(
+            AnalysisUse(AnalysisTask.PERSON, "Multiframe person segmenter 5e6f7a8b (on-device)", AnalysisUse.PORTRAIT_ROLE)))
+        val facts = ContentCredentials.captureFacts(blurred)
+        @Suppress("UNCHECKED_CAST")
+        val models = facts["ml_analysis"] as List<Map<String, Any?>>
+        assertThat(models.single()["task"]).isEqualTo("person")
+        assertThat(facts["simulated_background_blur"]).isEqualTo(true)
+        assertThat(facts["generative_ai"]).isEqualTo(false)
+        val signed = String(ContentCredentials.embedJpeg(sampleJpeg(), signer, blurred, "0.1.0-test"), Charsets.ISO_8859_1)
+        assertThat(signed).contains("c2pa.filtered")
+        assertThat(signed).contains("Simulated background blur")
+    }
+
     @Test fun aDerSignatureBecomesSixtyFourRawBytes() {
         val key = ecKey()
         repeat(20) {

@@ -192,7 +192,7 @@ object AstroCapture {
                 writeDng = writeDng,
                 plan = plan.reading() + if (modelMask != null) " · sky mask: ${segmenter?.name} (ML, Labs)" else " · sky mask: measured",
                 alignment = CaptureReport.ALIGN_TILES,
-                mlAnalysis = if (modelMask != null) segmenter?.name else null,
+                analysisUses = if (modelMask != null && segmenter != null) listOf(AnalysisUse(AnalysisTask.SKY, segmenter.name)) else emptyList(),
             )
         } catch (e: Exception) {
             Log.e(TAG, "astro failed", e)

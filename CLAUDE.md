@@ -121,7 +121,8 @@ in its report and its Content Credentials.
   (vendored libjpeg-turbo). All native code is in `app/src/main/cpp/`.
 - **No external image libraries.** No OpenCV, no RenderScript, no third-party
   image processing. The one exception is LiteRT, the on-device inference
-  runtime for the opt-in sky mask (it computes a mask, never pixels). Alignment, feature matching, homography, demosaic, tone
+  runtime for the opt-in analysis models (REFERENCE §3.15; each returns a
+  mask or a few numbers, never pixels). Alignment, feature matching, homography, demosaic, tone
   mapping, color science — all hand-written.
 - **Build:** compileSdk 37, minSdk 33, targetSdk 36, NDK 28.2, arm64-v8a only.
 
@@ -238,7 +239,8 @@ section 3.1:
 Black subtract -> Hot pixel -> Lens shading -> White balance -> Demosaic
 -> Color matrix -> Purity compression -> [Local tone] -> Tone curve
 -> Sensor-clipped neutral recovery -> sRGB gamma / Contrast
--> Chroma smooth -> Defringe -> Sharpen -> Optics -> Valid-region crop
+-> Chroma smooth -> Defringe -> Sharpen -> [Labs: simulated blur]
+-> Optics -> Valid-region crop
 ```
 
 Do not reorder these steps. Each operates on the output of the previous step.
@@ -285,8 +287,13 @@ the code comment should be updated.
   no learned denoise, super-res, demosaic, inpainting, sharpening or style. If
   computational denoise is ever added, it must be wavelet or BM3D-family. The
   one permitted use of a model is analysis that selects among measured samples
-  (a segmentation mask), opt-in, off by default, disclosed per photograph, with
-  a deterministic default doing the same job.
+  (a segmentation mask), or estimates a few numbers the deterministic path
+  also estimates (an illuminant, a subject's position, a frame's blur),
+  opt-in, off by default, disclosed per photograph (`AnalysisUse`), with a
+  deterministic default doing the same job. The one Labs effect that changes
+  a picture's look, the portrait blur, averages measured pixels, invents
+  none, and is labelled *simulated* in the report and the Content
+  Credentials (REFERENCE §3.1 step 11a). Do not add another.
 - **Do not add cloud features.** No network permission, no upload, no sync.
 - **Do not skip haptics.** Every state change in the UI has a defined haptic
   response. See `docs/REFERENCE.md` section 1.3.

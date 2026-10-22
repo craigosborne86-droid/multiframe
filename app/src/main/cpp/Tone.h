@@ -587,6 +587,7 @@ struct BilateralGrid {
         std::fill(histogram, histogram + kHistogramBins, 0);
         splats = 0;
         ready = false;
+        liftScale.clear();
     }
 
     static inline float logOf(float luminance) {
@@ -668,6 +669,25 @@ struct BilateralGrid {
         count.swap(c2);
     }
 
+    /**
+     * The share of the earned lift each cell takes (region-aware tone, Labs),
+     * cellsX * cellsY values; empty is 1 everywhere. Mirrors
+     * BilateralGrid.liftScale and LiftScaleMap.at.
+     */
+    std::vector<float> liftScale;
+
+    inline float liftScaleAt(int x, int y) const {
+        if (liftScale.empty()) return 1.0f;
+        const float fx = std::clamp((x + 0.5f) / cell - 0.5f, 0.0f, static_cast<float>(cellsX - 1));
+        const float fy = std::clamp((y + 0.5f) / cell - 0.5f, 0.0f, static_cast<float>(cellsY - 1));
+        const int x0 = static_cast<int>(fx), y0 = static_cast<int>(fy);
+        const int x1 = std::min(x0 + 1, cellsX - 1), y1 = std::min(y0 + 1, cellsY - 1);
+        const float tx = fx - x0, ty = fy - y0;
+        const float* v = liftScale.data();
+        return (v[y0 * cellsX + x0] * (1 - tx) + v[y0 * cellsX + x1] * tx) * (1 - ty) +
+               (v[y1 * cellsX + x0] * (1 - tx) + v[y1 * cellsX + x1] * tx) * ty;
+    }
+
     /** The base at a pixel: the neighbourhood's mean log luminance near this luminance. */
     inline float slice(int x, int y, float logL) const {
         const float fx = std::clamp((x + 0.5f) / cell - 0.5f, 0.0f, static_cast<float>(cellsX - 1));
@@ -733,7 +753,7 @@ struct BilateralGrid {
         if (!ready || (highlight <= 0.0f && shadowLift <= 0.0f) || luminance <= kMinLuminance) return 1.0f;
         const float logL = logOf(luminance);
         const float base = slice(x, y, logL);
-        return std::exp2(lift(base - pivot, brightEnd - base, highlight, ceiling(shadowLift, shadowLiftMax)));
+        return std::exp2(lift(base - pivot, brightEnd - base, highlight, ceiling(shadowLift, shadowLiftMax) * liftScaleAt(x, y)));
     }
 };
 

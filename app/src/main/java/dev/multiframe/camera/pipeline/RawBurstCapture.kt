@@ -243,6 +243,28 @@ object RawBurstCapture {
 
     private const val TILE_TARGET = 32
 
+    /**
+     * The learned white balance's neutral for a merged CFA, or null where it
+     * is off or declined; and, where collection is on and the photographer
+     * set the balance by hand, that balance saved as a training label.
+     */
+    private fun learnedNeutral(
+        context: Context, merged: java.nio.ByteBuffer, width: Int, height: Int,
+        profile: SensorProfile, result: TotalCaptureResult?, analysis: AnalysisChoices,
+    ): FloatArray? {
+        val manual = result?.get(android.hardware.camera2.CaptureResult.CONTROL_AWB_MODE) ==
+            android.hardware.camera2.CameraMetadata.CONTROL_AWB_MODE_OFF
+        if (analysis.awb == null && !(analysis.collect && manual)) return null
+        return runCatching {
+            val cells = CfaThumbnail.cells(merged, width * 2, width, height, profile, AwbContract.THUMB_W, AwbContract.THUMB_H)
+            if (analysis.collect && manual && result != null) {
+                val neutral = ColorProfile.cameraNeutral(result, ColorProfile.from(result).gains)
+                AnalysisModels.collect(context, AnalysisTask.AWB, AwbContract.histogram(cells, AwbContract.THUMB_W, AwbContract.THUMB_H), AwbContract.label(neutral))
+            }
+            analysis.awb?.let { AwbContract.estimate(it, cells) }
+        }.onFailure { Log.w(TAG, "learned white balance declined", it) }.getOrNull()
+    }
+
     internal suspend fun finishOutputs(
         context: Context,
         merger: NativeMerge,
@@ -275,8 +297,10 @@ object RawBurstCapture {
         plan: String? = null,
         /** [CaptureReport.ALIGN_TILES], or [CaptureReport.ALIGN_TRIPOD] where frames were summed in place. */
         alignment: String = CaptureReport.ALIGN_TILES,
-        /** The opt-in analysis model that shaped this picture, by name; null when none did. Disclosed in the report and Content Credentials. */
-        mlAnalysis: String? = null,
+        /** The opt-in analysis models that already shaped this picture upstream (the merge). Disclosed in the report and Content Credentials. */
+        analysisUses: List<AnalysisUse> = emptyList(),
+        /** The Labs analysis chosen for the develop: learned white balance, region-aware tone, the portrait blur. */
+        analysis: AnalysisChoices = AnalysisChoices.NONE,
     ): RawBurstResult = coroutineScope {
         val stamp = stamp()
 
@@ -306,7 +330,27 @@ object RawBurstCapture {
         // before the DNG writer starts: the DNG carries the same white balance.
         // On the IO dispatcher: it is a file write, and the develop beside it
         // keeps the computation's threads.
-        val color = ColorProfile.calibrated(characteristics, captureResult)
+        val uses = analysisUses.toMutableList()
+        // The camera-RGB cells the picture-shaped analyses read, once.
+        val cells by lazy { CfaThumbnail.cells(mergedBuffer, width * 2, width, height, profile, RegionTone.THUMB_W, RegionTone.THUMB_H) }
+        // Learned white balance (Labs, AwbContract): the model's neutral in
+        // place of the camera's; the matrix is re-solved for it below. Where
+        // the photographer set the balance by hand, that is a label.
+        val awbNeutral = learnedNeutral(context, mergedBuffer, width, height, profile, captureResult, analysis)
+        if (awbNeutral != null) uses += analysis.awb!!.use()
+        val color = ColorProfile.calibrated(characteristics, captureResult, awbNeutral)
+        // Region-aware tone (Labs, RegionTone): the share of its earned lift
+        // each grid cell takes. Before the DNG writer starts, so its gain
+        // table is the same operator the JPEG gets.
+        val regionScale = if (analysis.regionTone != RegionToneMode.OFF && (develop.localTone > 0f || develop.shadowLift > 0f)) {
+            runCatching {
+                val linear = CfaThumbnail.linearSrgb(cells, color)
+                val model = analysis.regionModel.takeIf { analysis.regionTone == RegionToneMode.MODEL }
+                val members = if (model != null) model.run(CfaThumbnail.modelInput(linear)).also { uses += model.use() }
+                    else RegionTone.classify(linear, RegionTone.THUMB_W, RegionTone.THUMB_H)
+                RegionTone.liftScale(members, RegionTone.THUMB_W, RegionTone.THUMB_H, width, height)
+            }.onFailure { Log.w(TAG, "region tone declined", it) }.getOrNull()
+        } else null
         val dngWriter = if (writeDng && captureResult != null) {
             async(Dispatchers.IO) {
                 val started = System.currentTimeMillis()
@@ -314,11 +358,11 @@ object RawBurstCapture {
                     context, mergedBuffer.duplicate(), width, height,
                     characteristics, captureResult, dngName,
                     baselineExposureStops = baselineExposureStops,
-                    whiteBalanceNeutral = ColorProfile.cameraNeutral(captureResult, color.gains),
+                    whiteBalanceNeutral = awbNeutral ?: ColorProfile.cameraNeutral(captureResult, color.gains),
                     rotationDegrees = rotationDegrees,
                     develop = DevelopSource(
                         profile, color,
-                        develop.adaptedTo(captureResult.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)),
+                        develop.copy(liftScale = regionScale).adaptedTo(captureResult.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)),
                         ShadingMap.from(captureResult, profile),
                     ),
                 )
@@ -332,7 +376,7 @@ object RawBurstCapture {
         // The rendering, adapted to the gain the frame was taken at: no
         // sharpening of grain, wider colour smoothing, above ISO 800.
         val iso = captureResult?.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
-        val develop = develop.adaptedTo(iso)
+        val develop = develop.copy(liftScale = regionScale).adaptedTo(iso)
         // Raw is uncorrected by definition, so the falloff the camera measured
         // for this capture has to be applied here or the corners stay dingy.
         val shading = ShadingMap.from(captureResult, profile)
@@ -357,11 +401,24 @@ object RawBurstCapture {
             developGain[0] = RawDeveloper.resolveGain(frame, profile, color, develop)
             RawDeveloper.developIntoBitmap(frame, profile, color, develop, shading = shading)
         }
+        // The simulated background blur (Labs, PortraitBlur): after the
+        // sharpen, before the optics, in the frame the mask was found in.
+        // The picture then says "simulated"; the HDR rendition is not made,
+        // since its gain map was measured from the unblurred CFA.
+        val portrait = analysis.person?.takeIf { analysis.portrait }?.let { model ->
+            runCatching {
+                val tBlur = System.currentTimeMillis()
+                PortraitBlur.apply(bitmap, model.run(PersonMask.input(cells, color)), PersonMask.WIDTH, PersonMask.HEIGHT)
+                Log.i(TAG, "portrait blur %dms".format(System.currentTimeMillis() - tBlur))
+                uses += model.use(AnalysisUse.PORTRAIT_ROLE)
+                true
+            }.onFailure { Log.w(TAG, "portrait blur declined", it) }.getOrDefault(false)
+        } ?: false
         // The HDR rendition's ratio, measured from the same merged CFA under
         // the same gain, beside the SDR develop and without touching it
         // (HdrGainMap, REFERENCE §3.1 step 6b). Only where the platform can
         // write it and the picture is going to be a JPEG.
-        val hdrField = if (UltraHdr.isAvailable && outputFormat == OutputFormat.JPEG &&
+        val hdrField = if (!portrait && UltraHdr.isAvailable && outputFormat == OutputFormat.JPEG &&
             develop.hdrHeadroom > 1f && developGain[0] > 0f
         ) {
             val tHdr = System.currentTimeMillis()
@@ -477,7 +534,7 @@ object RawBurstCapture {
                         hdr = gainMap != null,
                         plan = plan,
                         mergeMillis = mergeMillis,
-                        mlAnalysis = mlAnalysis,
+                        analysis = uses,
                     ))
                 },
             )

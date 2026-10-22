@@ -47,9 +47,12 @@ data class CaptureReport(
     /** The plan, in words, where one chose the exposure: NIGHT's hand class, a long exposure's span. */
     val plan: String? = null,
     val mergeMillis: Long = 0,
-    /** The opt-in, non-generative analysis model that chose among measured samples (Labs), or null. */
-    val mlAnalysis: String? = null,
+    /** The opt-in, non-generative analysis models that shaped this picture (Labs), in the order they ran. */
+    val analysis: List<AnalysisUse> = emptyList(),
 ) {
+    /** Whether a simulated background blur (Labs) was applied: the one use the picture must call simulated. */
+    val simulatedBlur: Boolean get() = analysis.any { it.role == AnalysisUse.PORTRAIT_ROLE }
+
     /** The noise reduction the merge's arithmetic gives, in stops; zero for a single frame. */
     val noiseGainStops: Float
         get() {
@@ -77,7 +80,7 @@ data class CaptureReport(
         put("hdr", if (hdr) 1 else 0)
         put("p", plan)
         put("mm", mergeMillis)
-        put("ml", mlAnalysis)
+        put("ml", analysis.takeIf { it.isNotEmpty() }?.joinToString("|") { "${codeOf(it)}~${it.model.replace("|", "/").replace("~", "-")}" })
     }
 
     /** The rows the Lightbox shows: a label and its value, in reading order. */
@@ -104,7 +107,10 @@ data class CaptureReport(
             if (localTone) "local tone" else "global tone",
             if (hdr) "HDR gain map" else null,
         ).joinToString(" · "))
-        mlAnalysis?.let { add("Analysis model" to "$it chose which alignment each pixel's measured samples got (Labs, opt-in); it made no pixels") }
+        for (use in analysis) {
+            if (use.role == AnalysisUse.PORTRAIT_ROLE) add("Background blur" to "simulated (Labs): ${use.model} ${use.role}")
+            else add("Analysis model" to "${use.model} ${use.role} (Labs, opt-in); it made no pixels")
+        }
         add("Generative AI" to "none: every pixel is a measured sample")
     }
 
@@ -143,8 +149,27 @@ data class CaptureReport(
                 hdr = fields["hdr"] == "1",
                 plan = fields["p"],
                 mergeMillis = fields["mm"]?.toLongOrNull() ?: 0L,
-                mlAnalysis = fields["ml"],
+                analysis = decodeAnalysis(fields["ml"]),
             )
+        }
+
+        private const val PORTRAIT_CODE = "portrait"
+
+        private fun codeOf(use: AnalysisUse): String =
+            if (use.role == AnalysisUse.PORTRAIT_ROLE) PORTRAIT_CODE else use.task.code
+
+        /** `code~model|code~model`; a bare name is the first version's sky model. */
+        private fun decodeAnalysis(text: String?): List<AnalysisUse> {
+            if (text.isNullOrEmpty()) return emptyList()
+            if (!text.contains('~')) return listOf(AnalysisUse(AnalysisTask.SKY, text))
+            return text.split('|').mapNotNull { entry ->
+                val at = entry.indexOf('~')
+                if (at <= 0) return@mapNotNull null
+                val code = entry.substring(0, at)
+                val model = entry.substring(at + 1)
+                if (code == PORTRAIT_CODE) AnalysisUse(AnalysisTask.PERSON, model, AnalysisUse.PORTRAIT_ROLE)
+                else AnalysisTask.ofCode(code)?.let { AnalysisUse(it, model) }
+            }
         }
 
         /** The kind a file's tag implies, from the names `RawBurstCapture` gives its outputs. */

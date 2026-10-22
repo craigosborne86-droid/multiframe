@@ -82,6 +82,15 @@ class BilateralGrid private constructor(
     var ready = false
         private set
 
+    /**
+     * The share of the earned lift each cell takes, 1 everywhere when null:
+     * the region-aware tone (Labs, [RegionTone]). Ignored unless it was made
+     * for this grid's cells. Scales the ceiling only; the bright end and the
+     * highlight term are untouched.
+     */
+    var liftScale: LiftScaleMap? = null
+        set(value) { field = value?.takeIf { it.cellsX == cellsX && it.cellsY == cellsY } }
+
     private fun index(cx: Int, cy: Int, b: Int) = (cy * cellsX + cx) * BINS + b
 
     /** Adds one luminance at a pixel position. */
@@ -202,7 +211,8 @@ class BilateralGrid private constructor(
         if (!ready || (highlight <= 0f && shadowLift <= 0f) || luminance <= MIN_LUMINANCE) return 1f
         val logL = logOf(luminance)
         val base = sliceAt(cellX, cellY, logL)
-        return 2f.pow(lift(base - pivot, brightEnd - base, highlight, ceiling(shadowLift, shadowLiftMax)))
+        val scale = liftScale?.at(cellX, cellY) ?: 1f
+        return 2f.pow(lift(base - pivot, brightEnd - base, highlight, ceiling(shadowLift, shadowLiftMax) * scale))
     }
 
     /**
@@ -337,6 +347,7 @@ class BilateralGrid private constructor(
                 by += 2
             }
             grid.finish()
+            grid.liftScale = params.liftScale
             return grid
         }
 

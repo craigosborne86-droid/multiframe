@@ -18,7 +18,11 @@ import java.util.UUID
  *    `digitalCapture`, which claims a single unprocessed exposure, and never
  *    `trainedAlgorithmicMedia`, which is generative.
  *  - `dev.multiframe.capture`: the photograph's own report ([CaptureReport]):
- *    frames, span, exposure, lens, plan, and `generative_ai: false`.
+ *    frames, span, exposure, lens, plan, and `generative_ai: false`; and,
+ *    where an opt-in analysis model ran, each model by name with what its
+ *    output chose ([AnalysisUse]).
+ *  - A second action, `c2pa.filtered`, only where the Labs portrait blur ran:
+ *    the one opt-in that changes the picture's look, said as an edit.
  *  - `c2pa.hash.data`: SHA-256 of every byte of the file except the manifest's
  *    own APP11 segments, so any edit to the picture breaks the credential.
  *
@@ -112,11 +116,20 @@ object ContentCredentials {
     ): ByteArray {
         val agent = mapOf("name" to "Multiframe", "version" to appVersion)
         val actions = Jumbf.cborSuperbox(Jumbf.CBOR_CONTENT, "c2pa.actions.v2", Cbor.encode(mapOf(
-            "actions" to listOf(mapOf(
-                "action" to "c2pa.created",
-                "digitalSourceType" to SOURCE_TYPE,
-                "softwareAgent" to agent,
-            )),
+            "actions" to listOfNotNull(
+                mapOf(
+                    "action" to "c2pa.created",
+                    "digitalSourceType" to SOURCE_TYPE,
+                    "softwareAgent" to agent,
+                ),
+                // The one Labs effect that changes the picture's look: said
+                // as an edit, in words, never left for the reader to infer.
+                if (report?.simulatedBlur == true) mapOf(
+                    "action" to "c2pa.filtered",
+                    "description" to "Simulated background blur (Labs): pixels outside the subject are averages of measured neighbours; not optical bokeh",
+                    "softwareAgent" to agent,
+                ) else null,
+            ),
         )))
         val capture = Jumbf.cborSuperbox(Jumbf.CBOR_CONTENT, CAPTURE_ASSERTION, Cbor.encode(captureFacts(report)))
         val hashData = Jumbf.cborSuperbox(Jumbf.CBOR_CONTENT, "c2pa.hash.data", Cbor.encode(mapOf(
@@ -172,10 +185,11 @@ object ContentCredentials {
         report.lens?.let { put("lens", it) }
         put("alignment", report.alignment)
         report.plan?.let { put("plan", it) }
-        report.mlAnalysis?.let {
-            put("ml_analysis", it)
-            put("ml_analysis_role", "segmentation mask selecting among measured samples; no pixel values generated")
+        if (report.analysis.isNotEmpty()) {
+            put("ml_analysis", report.analysis.map { mapOf("task" to it.task.code, "model" to it.model, "role" to it.role) })
+            put("ml_analysis_role", "analysis only: each model returned a mask or a few numbers; no pixel values generated")
         }
+        if (report.simulatedBlur) put("simulated_background_blur", true)
     }
 
     /**

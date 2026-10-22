@@ -25,6 +25,25 @@ class CaptureReportTest {
         assertThat(night.encode()).startsWith("MFR1;")
     }
 
+    @Test fun everyAnalysisModelIsNamedAndTheBlurIsCalledSimulated() {
+        val uses = listOf(
+            AnalysisUse(AnalysisTask.AWB, "Multiframe white balance estimator 1a2b3c4d (on-device)"),
+            AnalysisUse(AnalysisTask.PERSON, "Multiframe person segmenter 5e6f7a8b (on-device)", AnalysisUse.PORTRAIT_ROLE),
+        )
+        val withModels = night.copy(analysis = uses)
+        val decoded = CaptureReport.decode(withModels.encode())!!
+        assertThat(decoded.analysis).isEqualTo(uses)
+        assertThat(decoded.simulatedBlur).isTrue()
+        val rows = withModels.rows(Locale.UK).toMap()
+        assertThat(rows["Analysis model"]).contains("white balance estimator")
+        assertThat(rows["Background blur"]).startsWith("simulated")
+        assertThat(rows["Generative AI"]).startsWith("none")
+        // The first version wrote the sky model's bare name.
+        assertThat(CaptureReport.decode("MFR1;fm=8;ml=Old sky model")!!.analysis)
+            .containsExactly(AnalysisUse(AnalysisTask.SKY, "Old sky model"))
+        assertThat(night.simulatedBlur).isFalse()
+    }
+
     @Test fun anythingElseIsNotAReport() {
         assertThat(CaptureReport.decode(null)).isNull()
         assertThat(CaptureReport.decode("Multiframe: 8 frames merged")).isNull()

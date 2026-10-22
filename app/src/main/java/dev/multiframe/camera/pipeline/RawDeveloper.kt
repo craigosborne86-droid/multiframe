@@ -132,6 +132,12 @@ data class DevelopParams(
     /** The most the local operator lifts any neighbourhood, in stops. */
     val shadowLiftMax: Float = SHADOW_LIFT_MAX,
     /**
+     * The share of that lift each develop-grid cell takes, by what the cell
+     * is: the region-aware tone (Labs, [RegionTone]). Null is the whole
+     * earned lift everywhere -- the default.
+     */
+    val liftScale: LiftScaleMap? = null,
+    /**
      * Purity compression after the colour matrix: the purity above which a
      * colour is compressed, and the purity it is compressed toward and
      * never reaches. See [ToneCurve.compressPurity]. A threshold of zero,

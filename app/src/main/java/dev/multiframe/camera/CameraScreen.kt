@@ -396,6 +396,20 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var mlSkyMask by remember { mutableStateOf(false) }
     // Labs, opt-in: keep each astro capture's (reference, measured mask) pair to train that model.
     var collectSkyTraining by remember { mutableStateOf(false) }
+    // Labs, opt-in analysis (AnalysisModels): each model's row is absent
+    // until its model is bundled; the deterministic choices are always there.
+    var referenceChoice by remember { mutableStateOf(dev.multiframe.camera.pipeline.ReferenceChoice.NEWEST) }
+    var regionTone by remember { mutableStateOf(dev.multiframe.camera.pipeline.RegionToneMode.OFF) }
+    var mlAwb by remember { mutableStateOf(false) }
+    var mlSubject by remember { mutableStateOf(false) }
+    var personMerge by remember { mutableStateOf(false) }
+    var portraitBlur by remember { mutableStateOf(false) }
+    var collectAnalysisTraining by remember { mutableStateOf(false) }
+    // The subject model's name while it is placing the AF/AE region, for the photograph's report.
+    var subjectModelName by remember { mutableStateOf<String?>(null) }
+    val analysisAvailable = remember {
+        dev.multiframe.camera.pipeline.AnalysisTask.entries.filter { dev.multiframe.camera.pipeline.AnalysisModels.available(context, it) }.toSet()
+    }
     // Set by Cancel during astro: the stack so far is kept, not thrown away.
     val astroStop = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     // The lens's focal length in pixels for the stream, for astro's trailing limit.
@@ -611,6 +625,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         writeDng = pending.writeDng,
                         outputTag = pending.outputTag,
                         plan = pending.plan,
+                        analysis = pending.analysis(),
                         onMergeProgress = { progress ->
                             mergeProgressFlow.value = MergeUiProgress(
                                 pending.processingId, progress.processed, progress.total, progress.finished,
@@ -1317,6 +1332,41 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // The inertial sensors, for the guidance and the gate. Opened once; the
     // mode is not offered on a phone whose attitude cannot be read.
     val motion = remember { MotionSensor(context) }
+
+    // The Labs analysis as chosen at the press, resolved later on the
+    // develop's worker: loading a model reads and hashes its file, which is
+    // no work for the main thread.
+    fun analysisAtPress(stream: ZslRawStream): () -> dev.multiframe.camera.pipeline.AnalysisChoices {
+        val awb = mlAwb; val reference = referenceChoice; val region = regionTone
+        val merge = personMerge; val portrait = portraitBlur; val collect = collectAnalysisTraining
+        val upstream = subjectModelName?.takeIf { mlSubject && stream.subjectFocusActive }?.let {
+            listOf(dev.multiframe.camera.pipeline.AnalysisUse(dev.multiframe.camera.pipeline.AnalysisTask.SUBJECT, it))
+        } ?: emptyList()
+        val profile = lensProfiles[stream.lensId]
+        return {
+            val models = dev.multiframe.camera.pipeline.AnalysisModels
+            // The gyro's blur over a frame's exposure, where the sensor's
+            // clock is the gyro's (SENSOR_TIMESTAMP is the exposure's start).
+            val realtime = stream.characteristics.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
+                android.hardware.camera2.CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+            val ppr = profile?.pixelsPerRadian(stream.config.width) ?: MosaicCapture.pixelsPerRadian(stream)
+            dev.multiframe.camera.pipeline.AnalysisChoices(
+                awb = if (awb) models.obtain(context, dev.multiframe.camera.pipeline.AnalysisTask.AWB) else null,
+                reference = reference,
+                frameModel = if (reference == dev.multiframe.camera.pipeline.ReferenceChoice.MODEL) models.obtain(context, dev.multiframe.camera.pipeline.AnalysisTask.FRAME) else null,
+                regionTone = region,
+                regionModel = if (region == dev.multiframe.camera.pipeline.RegionToneMode.MODEL) models.obtain(context, dev.multiframe.camera.pipeline.AnalysisTask.REGIONS) else null,
+                person = if (merge || portrait) models.obtain(context, dev.multiframe.camera.pipeline.AnalysisTask.PERSON) else null,
+                personMerge = merge,
+                portrait = portrait,
+                collect = collect,
+                blurPixels = if (collect && realtime && ppr > 0f) { ts, exposure ->
+                    motion.meanSpeedBetween(ts, ts + exposure)?.let { it * exposure / 1e9f * ppr }
+                } else null,
+                upstream = upstream,
+            )
+        }
+    }
     DisposableEffect(motion) { onDispose { motion.close() } }
     val brenizerOffered = mosaicCaptureLens != null && zslDecision is ZslDecision.Stream && motion.hasAttitude
     val superResOffered = caps?.supportsSuperRes == true && zslDecision is ZslDecision.Stream &&
@@ -1333,8 +1383,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // window its plan reads is the last half second before the press.
     val nightMetering = captureMode == CaptureMode.NIGHT && zslStream != null &&
         caps?.let { NightPlanner.supported(motion.isAvailable, it) } == true
-    LaunchedEffect(superResPhase.selected, brenizerActive, zslStream, nightMetering) {
-        if (nightMetering) motion.start()
+    LaunchedEffect(superResPhase.selected, brenizerActive, zslStream, nightMetering, collectAnalysisTraining) {
+        // Collection reads the gyro over each frame's exposure: the frame task's label.
+        if (nightMetering || collectAnalysisTraining) motion.start()
         if (superResPhase.selected && brenizerActive) {
             motion.start()
             val stream = zslStream
@@ -1343,8 +1394,37 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 digitalZoom = 1f
                 stream.setZoom(1f, settings, c)
             }
-        } else if (!nightMetering) {
+        } else if (!nightMetering && !collectAnalysisTraining) {
             motion.stop()
+        }
+    }
+
+    // Labs: the subject model places the AF/AE region about once a second
+    // while no tap has (SubjectFocus). Off the main thread throughout; the
+    // region goes back to whole-frame metering when it is switched off.
+    LaunchedEffect(mlSubject, zslStream) {
+        subjectModelName = null
+        val stream = zslStream ?: return@LaunchedEffect
+        if (!mlSubject) return@LaunchedEffect
+        val model = withContext(Dispatchers.Default) {
+            dev.multiframe.camera.pipeline.AnalysisModels.obtain(context, dev.multiframe.camera.pipeline.AnalysisTask.SUBJECT)
+        } ?: return@LaunchedEffect
+        subjectModelName = model.name
+        val luma = ByteArray(dev.multiframe.camera.pipeline.SubjectFocus.IN_W * dev.multiframe.camera.pipeline.SubjectFocus.IN_H)
+        try {
+            while (true) {
+                kotlinx.coroutines.delay(dev.multiframe.camera.pipeline.SubjectFocus.INTERVAL_MS)
+                val c = caps ?: continue
+                if (busy) continue
+                val s = settings
+                withContext(Dispatchers.Default) {
+                    val found = if (stream.trackingLuma(luma, dev.multiframe.camera.pipeline.SubjectFocus.IN_W, dev.multiframe.camera.pipeline.SubjectFocus.IN_H) < 0) null
+                        else runCatching { dev.multiframe.camera.pipeline.SubjectFocus.peak(model.run(dev.multiframe.camera.pipeline.SubjectFocus.input(luma))) }.getOrNull()
+                    if (found != null) stream.subjectFocus(found.first, found.second, s, c) else stream.clearSubjectFocus(s, c)
+                }
+            }
+        } finally {
+            caps?.let { c -> withContext(NonCancellable + Dispatchers.Default) { stream.clearSubjectFocus(settings, c) } }
         }
     }
 
@@ -1730,6 +1810,17 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 stream.focusAt(nx, ny, tappedSettings, c, rotation)
                             }.onFailure { Log.w(TAG, "focus tap failed", it) }.getOrDefault(false)
                             if (submitted) {
+                                // Labs: the tap is the subject task's label, with the frame it was made on.
+                                if (collectAnalysisTraining) {
+                                    val w = dev.multiframe.camera.pipeline.SubjectFocus.IN_W
+                                    val h = dev.multiframe.camera.pipeline.SubjectFocus.IN_H
+                                    val luma = ByteArray(w * h)
+                                    val at = stream.focusSensorFraction()
+                                    if (at != null && stream.trackingLuma(luma, w, h) >= 0) {
+                                        dev.multiframe.camera.pipeline.AnalysisModels.collect(context, dev.multiframe.camera.pipeline.AnalysisTask.SUBJECT,
+                                            dev.multiframe.camera.pipeline.SubjectFocus.input(luma), dev.multiframe.camera.pipeline.SubjectFocus.label(at.first, at.second))
+                                    }
+                                }
                                 withContext(Dispatchers.Main) {
                                     if (zslStream === stream) {
                                         focusPoint = offset
@@ -2247,7 +2338,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                 if (developing == 0) mergeProgressFlow.value = MergeUiProgress(processingId, 0, shot.count)
                                 developing++
                                 val queued = developQueue.trySend(PendingShot(processingId, shot, stream, rot, lensProfile, format, canvas2x, params, dng,
-                                    plan = night?.reading(displayLocale), outputTag = if (night != null) "night" else "zsl"))
+                                    plan = night?.reading(displayLocale), outputTag = if (night != null) "night" else "zsl",
+                                    analysis = analysisAtPress(stream)))
                                 if (queued.isFailure) {
                                     shot.close()
                                     developing--
@@ -2284,7 +2376,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         developing++
                         status = "%s: %d frames".format(label, shot.count)
                         val queued = developQueue.trySend(
-                            PendingShot(processingId, shot, stream, rot, lensProfile, format, canvas2x, params, dng),
+                            PendingShot(processingId, shot, stream, rot, lensProfile, format, canvas2x, params, dng,
+                                analysis = analysisAtPress(stream)),
                         )
                         if (queued.isFailure) {
                             shot.close()
@@ -2754,6 +2847,18 @@ MechanicalShutter(
                                 collect = collectSkyTraining, onCollect = { collectSkyTraining = it },
                             )
                         }
+                        if (zslStream != null) {
+                            dev.multiframe.camera.ui.AnalysisLabs(
+                                available = analysisAvailable,
+                                reference = referenceChoice, onReference = { referenceChoice = it },
+                                regionTone = regionTone, onRegionTone = { regionTone = it },
+                                awb = mlAwb, onAwb = { mlAwb = it },
+                                subject = mlSubject, onSubject = { mlSubject = it },
+                                personMerge = personMerge, onPersonMerge = { personMerge = it },
+                                portrait = portraitBlur, onPortrait = { portraitBlur = it },
+                                collect = collectAnalysisTraining, onCollect = { collectAnalysisTraining = it },
+                            )
+                        }
                         if (dev.multiframe.camera.pipeline.FocusStackCapture.supported(caps, zslStream)) {
                             dev.multiframe.camera.ui.FocusStackLabs(
                                 armed = focusStackArmed,
@@ -2952,6 +3057,8 @@ private class PendingShot(
     val plan: String? = null,
     /** The file tag: "night" for NIGHT's planned burst, "zsl" otherwise. */
     val outputTag: String = "zsl",
+    /** The Labs analysis chosen at the press, resolved on the develop's worker (a model loads from disk). */
+    val analysis: () -> dev.multiframe.camera.pipeline.AnalysisChoices = { dev.multiframe.camera.pipeline.AnalysisChoices.NONE },
 )
 
 private fun android.content.Context.activityForCamera(): android.app.Activity? = when(this) {

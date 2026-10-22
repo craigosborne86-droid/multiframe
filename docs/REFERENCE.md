@@ -845,6 +845,22 @@ Merged CFA (uint16, Bayer-patterned)
     3.5 code values), maxShift (20, from 28).
   |
   v
+11a. Simulated background blur -- Labs only, off by default, present only
+    with a person model bundled (`PortraitBlur`, §3.15). Outside the person
+    mask each pixel becomes a near-Gaussian mean of its measured neighbours
+    (three box passes, radius width/150, computed at a quarter size and
+    sampled back bilinearly); inside it the pixel is untouched; the mask's
+    soft edge mixes the two. Position: after the sharpen, so the blur does
+    not soften a sharpened halo into the subject's edge, and before the
+    optics, because the mask was found on the sensor-oriented frame the
+    optics then remaps. Every output is a weighted mean of measured pixels,
+    but the blur is not the lens's (it does not grow with distance from the
+    focal plane), so the photograph says *simulated* in its report and its
+    Content Credentials (`c2pa.filtered`). The HDR rendition (6b) is not
+    written for such a photograph: its gain map was measured from the
+    unblurred CFA.
+  |
+  v
 12. Fused optics gather (distortion and lateral CA), then valid-region crop
   |
   v
@@ -1786,6 +1802,16 @@ is waited on (up to 3 s) before the lock, and the anchor frame's result must
 carry `COLOR_CORRECTION_GAINS`.
 
 ### 3.5 Bilateral Grid Local Tone Mapping
+
+*Region-aware share of the lift (Labs).* `DevelopParams.liftScale` scales
+the ceiling of §3.5's shadow lift per grid cell -- bilinear at the slice's
+own cell coordinates, the same read in `BilateralGrid.gainAt` and
+`Tone.h liftScaleAt` (`DevelopParityTest.nativeAndKotlinRegionScaledLiftAgree`).
+The scale is in [0.4, 1]: a region may decline lift the scene earned, never
+take more, and the highlight term (the bright end) is not scaled. See §3.15
+for where the scale comes from. Null, the default, is the operator below
+unchanged.
+
 
 **As built** (`Tone.h` `BilateralGrid`, `BilateralGrid.kt` as the reference,
 in both develops behind `DevelopParams.localTone` and
@@ -2911,7 +2937,7 @@ requires the measured default beside it.
 collects (Labs, "COLLECT TRAINING PAIRS", off by default, kept on the phone)
 -- an astro capture's reference frame preprocessed as the phone feeds the
 model (`SkyModelContract`: 256×192, stretched to its 99th percentile) and the
-*measured* mask as the label. No third-party dataset. `tools/sky_segmenter/`
+*measured* mask as the label. No third-party dataset. `tools/analysis_models/` (`--task sky`)
 trains a small U-Net and exports it through a SavedModel to TFLite; the
 contract is checked at export (input and output [1, 192, 256, 1] float32).
 A smoke run on synthetic scenes exported a 799 KB model; no model ships until
@@ -2949,6 +2975,76 @@ resolves finer star detail than a Lanczos enlargement on 16-frame bursts
 reconstruction filter is the remaining limit, and real-photo detail is
 unproven until the phone shoots a chart.
 
+### 3.15 Analysis Models (Labs)
+
+The charter permits a model only to *analyse* measured data, opt-in, with a
+deterministic default doing the same job, and disclosed in every photograph
+it touches. Six tasks share one registry (`AnalysisModels.kt`): one LiteRT
+runner, one training-pair format, one disclosure (`AnalysisUse`, written to
+the report's `ml` key and to the Content Credentials' `ml_analysis` list with
+each model's name, the first eight hex digits of its file's SHA-256, and what
+its output chose). A task's Labs row is absent until its `.tflite` is in
+`assets/`; the deterministic choices are offered regardless. No model is
+bundled yet.
+
+| Task | What the model returns | Deterministic default | Label measured on the phone |
+|---|---|---|---|
+| sky (§3.13) | sky probability per proxy pixel | the stack's measured `SkyMask` | the measured mask |
+| awb | the illuminant's (u, v): three WB multipliers | the camera's AWB | the WB set by hand in PRO |
+| subject | a 64×48 heatmap; its confident peak places AF/AE | whole-frame AF/AE; a tap always wins | the point tapped to focus |
+| frame | each candidate frame's blur in proxy px | NEWEST, or SHARPEST (Tenengrad) | gyro rate × exposure × px/rad |
+| regions | sky, skin, foliage masks | the colour classifier | none (a dataset chosen by hand) |
+| person | a person mask | the merge's motion rejection; no blur | none (a dataset chosen by hand) |
+
+**Learned white balance** (`AwbContract`). Input: a 64×64 log-chroma
+histogram, (u, v) = (ln g/r, ln g/b), of the merged CFA's 128×96 camera-RGB
+cells (`CfaThumbnail`), two channels: the cells weighted by √brightness, and
+their neighbour differences (the grey-edge cue). A change of illuminant
+translates the histogram (`AnalysisModelsTest`), which is why it, not the
+picture, is the input. Dark and near-clipped cells are left out. Output: the
+illuminant's (u, v); neutral (e^-u, 1, e^-v), held inside the histogram's
+span. It replaces the camera's neutral in `ColorProfile.calibrated`, which
+re-solves the matrix for it, and the DNG's `AsShotNeutral` carries the same.
+
+**Subject focus** (`SubjectFocus`, `ZslRawStream.subjectFocus`). About once
+a second, off the main thread, the newest ring frame's luma (256×192, the
+whole array) goes to the model; a peak over 0.5 sets the AF and AE regions
+there with no trigger (continuous AF follows). A tap's region is never
+replaced; a subject outside the zoomed field is ignored; manual focus or
+exposure stops it. A photograph taken while the model's region was in force
+names it.
+
+**Reference frame** (`ReferenceChooser`). Of the newest three frames, the
+sharpest becomes the reference only if clearly so: 15% more gradient energy
+(Tenengrad over the centre, over mean² so gain does not count) than the
+newest, or under the model 0.5 proxy px less blur. Never under DCG (the
+lowest-ISO frame keeps the highlights) or for the long exposure and astro
+(the first frame by design).
+
+**Region-aware tone** (`RegionTone`). Memberships per 256×192 cell, from the
+colour classifier on the merged CFA's balanced colours (sky: hue 190–255°,
+saturated, bright, nearer the top; foliage: hue 65–165°, saturated; skin:
+hue 5–45°, saturation 0.12–0.75) or from the model; averaged into the develop
+grid's cells; scale = max(skin, 1 − 0.6·sky − 0.25·foliage) in [0.4, 1].
+Computed before the DNG writer starts, so the DNG's gain table (§3.9) is the
+same operator. Only where LOCAL TONE is on.
+
+**Person-aware merge** (`PersonMask`). After the merge, the weight per cell
+is the person probability times the motion evidence -- the reference's and
+the merge's cells differing by 4–12% relative (smoothstep) -- and the merged
+CFA is blended toward the reference frame's own samples by it. A person who
+moved is one frame's measured samples, with one frame's noise; a person who
+stood still is merged. The DNG carries the blended CFA. Not on the 2x canvas.
+
+**Simulated background blur.** §3.1 step 11a.
+
+**Training.** `tools/analysis_models/train.py --task <task>` reads the MFP1
+pairs the phone collects (Labs → Analysis → COLLECT TRAINING PAIRS; sky's
+from Astro's own switch), or for regions and person an image/mask dataset,
+and exports through a SavedModel with the contract checked. All six tasks
+smoke-train and export (sky 799 KB, awb 113 KB, subject 204 KB, frame 112 KB,
+regions and person 800 KB); none is a real model and none ships.
+
 ## Appendix: File Inventory by Subsystem
 
 ### Pipeline (app/src/main/java/dev/multiframe/camera/pipeline/)
@@ -2958,6 +3054,7 @@ unproven until the phone shoots a chart.
 | **Capture & ZSL** | `ZslRawStream.kt`, `ZslCapture.kt`, `ZslPolicy.kt`, `RawRing.kt`, `BurstBuffer.kt`, `RawCapture.kt`, `RawBurstCapture.kt` |
 | **Merge** | `BayerMerger.kt`, `BayerFrame.kt`, `Merger.kt`, `NativeMerge.kt`, `Aligner.kt` |
 | **2x canvas** | `SubPixelAccumulator.kt` (reference), `NativeSubPixel.kt` (strips, and the develop entry points), `SubPixelCoverage.kt` (the prediction and its bounds), `LinearDeveloper.kt` (the linear develop, reference), `SuperResCapture.kt` (the outputs) |
+| **Analysis (Labs)** | `AnalysisModels.kt` (registry, LiteRT runner, training pairs), `AnalysisChoices.kt` (the choices, `CfaThumbnail`), `LearnedWhiteBalance.kt`, `RegionTone.kt`, `ReferenceChooser.kt`, `PersonMask.kt` (person merge, `PortraitBlur`), `SubjectFocus.kt`, `SkySegmenters.kt` (§3.15) |
 | **Develop** | `RawDeveloper.kt`, `Demosaic.kt`, `ToneCurve.kt`, `BilateralGrid.kt` (local tone, reference), `HdrGainMap.kt` (the HDR rendition's gain map, §3.1 step 6b), `UltraHdr.kt` (its platform encode), `ColorScience.kt`, `ColorProfile.kt`, `LensShading.kt`, `Sharpen.kt`, `Defringe.kt`, `HotPixels.kt`, `ToneAblation.kt` |
 | **Output** | `ImageSaver.kt`, `NativeJpeg.kt`, `ExifWriter.kt`, `DngWriter.kt` (the DNG, §3.9), `TiffDirectory.kt` (its IFD), `DngCamera2.kt` (its values from the camera), `DngOpcodes.kt` (shading and warp opcodes), `ProfileGainTableMap.kt` (the local operator as a gain table map), `DngMetadata.kt` (reads a DNG's colour tags; places `BaselineExposure` and `AsShotNeutral` for the `DngCreator` fallback, §3.7, §3.8) |
 | **Exposure** | `ExposureStrategy.kt`, `CaptureMode.kt`, `ShutterCap.kt` (shutter priority under the meter, §3.7) |
