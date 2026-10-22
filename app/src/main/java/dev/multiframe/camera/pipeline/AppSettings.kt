@@ -81,6 +81,12 @@ data class AppSettings(
      * ([CameraCapabilities.supportsHdrOutput]). HEIF is written without one.
      */
     val hdrOutput: Boolean = false,
+    /**
+     * Whether each JPEG carries signed C2PA Content Credentials stating it is
+     * a computational capture, not generated ([ContentCredentials]). On by
+     * default: it is the app's promise, made checkable.
+     */
+    val contentCredentials: Boolean = true,
 ) {
 
     /** The develop's parameters as these settings ask for them. */
@@ -126,6 +132,7 @@ data class AppSettings(
         KEY_HISTOGRAM to histogram.toString(),
         KEY_FULL_RESOLUTION to fullResolution.toString(),
         KEY_HDR_OUTPUT to hdrOutput.toString(),
+        KEY_CONTENT_CREDENTIALS to contentCredentials.toString(),
     ) + (lensId?.let { mapOf(KEY_LENS to it) } ?: emptyMap())
 
     companion object {
@@ -153,6 +160,7 @@ data class AppSettings(
         const val KEY_HISTOGRAM = "histogram"
         const val KEY_FULL_RESOLUTION = "fullResolution"
         const val KEY_HDR_OUTPUT = "hdrOutput"
+        const val KEY_CONTENT_CREDENTIALS = "contentCredentials"
 
         private const val PREFERENCES = "multiframe.settings"
 
@@ -222,6 +230,7 @@ data class AppSettings(
                 histogram = bool(KEY_HISTOGRAM, defaults.histogram),
                 fullResolution = bool(KEY_FULL_RESOLUTION, defaults.fullResolution),
                 hdrOutput = bool(KEY_HDR_OUTPUT, defaults.hdrOutput),
+                contentCredentials = bool(KEY_CONTENT_CREDENTIALS, defaults.contentCredentials),
             )
         }
 

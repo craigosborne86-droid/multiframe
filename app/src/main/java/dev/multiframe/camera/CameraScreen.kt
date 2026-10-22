@@ -375,6 +375,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var outputFormat by remember { mutableStateOf(restored.outputFormat) }
     // The gain map beside the JPEG; only offered where the platform writes one.
     var hdrOutput by remember { mutableStateOf(restored.hdrOutput) }
+    var contentCredentials by remember { mutableStateOf(restored.contentCredentials) }
     // The sensor's un-binned mode, on a sensor that has one. See the chip.
     var fullResolution by remember { mutableStateOf(restored.fullResolution) }
 
@@ -1620,6 +1621,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         settings, burstFrames, lens, highlightGuard, captureMode, dngEnabled,
         timerSeconds, guides, mosaicPreset, localTone, outputFormat, showHistogram,
         mosaicReturnLens, fullResolution, manualBurst, rememberedBurst, hdrOutput, longExposureSeconds,
+        contentCredentials,
     ) {
         AppSettings.save(
             context,
@@ -1644,6 +1646,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 histogram = showHistogram,
                 fullResolution = fullResolution,
                 hdrOutput = hdrOutput,
+                contentCredentials = contentCredentials,
             ),
         )
     }
@@ -2634,6 +2637,8 @@ MechanicalShutter(
                     // which is written without a gain map.
                     hdrOutput = if (caps?.supportsHdrOutput == true && outputFormat == OutputFormat.JPEG) hdrOutput else null,
                     onHdrOutput = { if (!busy) hdrOutput = it },
+                    contentCredentials = if (outputFormat == OutputFormat.JPEG) contentCredentials else null,
+                    onContentCredentials = { if (!busy) contentCredentials = it },
                     onReset = {
                         // Back to what the app ships with. The save effect above
                         // is watching every one of these, so persisting it needs
@@ -2655,6 +2660,7 @@ MechanicalShutter(
                         localTone = fresh.localTone
                         outputFormat = fresh.outputFormat
                         hdrOutput = fresh.hdrOutput
+                        contentCredentials = fresh.contentCredentials
                         showHistogram = fresh.histogram
                         fullResolution = fresh.fullResolution
                         zebraOverride = null

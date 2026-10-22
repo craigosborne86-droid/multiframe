@@ -144,6 +144,9 @@ fun ServiceCaptureSettings(
     /** Null where the row is absent: below API 34, or while the pictures are HEIF. */
     hdrOutput: Boolean? = null,
     onHdrOutput: (Boolean) -> Unit = {},
+    /** Null where the row is absent: while the pictures are HEIF, which v1 does not sign. */
+    contentCredentials: Boolean? = null,
+    onContentCredentials: (Boolean) -> Unit = {},
     onReset: () -> Unit,
 ) {
     if (caps == null) return
@@ -165,6 +168,12 @@ fun ServiceCaptureSettings(
             detail = "Adds a gain map: highlights up to two stops brighter on an HDR screen.",
             active = enabled,
             onClick = { Haptics.segment(view); onHdrOutput(!enabled) })
+    }
+    contentCredentials?.let { enabled ->
+        ServiceRow("CONTENT CREDENTIALS", if (enabled) "ON" else "OFF",
+            detail = "Signs each photo on this phone: a computational capture, no generative AI.",
+            active = enabled,
+            onClick = { Haptics.segment(view); onContentCredentials(!enabled) })
     }
     Spacer(Modifier.height(12.dp))
     var resetRequested by remember { mutableStateOf(false) }

@@ -2775,6 +2775,54 @@ This is the one exception to "the reference frame is the newest".
 **No haptics during the span**; `Haptics.mechanicalRelease` fires after the
 last frame.
 
+### 3.11 Content Credentials: the Promise, Signed
+
+Every JPEG carries a C2PA manifest (`ContentCredentials`, the `CONTENT
+CREDENTIALS` setting, on by default; HEIF is not signed in this version and
+the row is absent while HEIF is chosen). It is built and signed on the phone,
+offline; nothing is fetched or sent.
+
+**Assertions.** `c2pa.actions.v2` with one `c2pa.created` action whose IPTC
+digital source type is `computationalCapture` -- a real scene, captured by a
+camera, processed by algorithms such as multi-frame merging. Not
+`digitalCapture` (a single unprocessed exposure) and never
+`trainedAlgorithmicMedia`. `dev.multiframe.capture` carries the photograph's
+report (§3.10's sibling, `CaptureReport`) and `generative_ai: false`.
+`c2pa.hash.data` binds the manifest to the pixels.
+
+**The data hash.** The manifest is a run of APP11 (JPEG-XT, CI "JP") segments
+inserted at offset P, after SOI and any APP0/APP1 and before an Ultra HDR
+file's APP2 MPF segment (its offsets are relative to the MPF header, so an
+insertion ahead of it leaves them valid). The hash assertion excludes exactly
+[P, P+L). The bytes it covers are then the file before insertion, so the hash
+is SHA-256 of that file, computed once. L depends on the manifest's size,
+which depends on L only through the CBOR width of the exclusion; the builder
+rebuilds with a placeholder signature of the final size until L is fixed,
+then signs once.
+
+**Signature.** COSE_Sign1 (tag 18), ES256, detached payload: the claim's CBOR
+bytes, with `x5chain` in the protected header. Java's DER signature is
+converted to COSE's 64-byte r‖s. Hashed URIs cover each assertion superbox
+without its 8-byte header.
+
+**Keys.** Two Android Keystore keys, EC P-256, StrongBox where present
+(`KeystoreCredentialSigner`): a device root (CA, keyCertSign) and a
+claim-signing leaf (digitalSignature; EKU emailProtection and
+documentSigning, which the C2PA certificate profile accepts). The
+certificates are written by `Der` and signed by the Keystore; the Keystore's
+own certificate carries no EKU and a validator rejects it.
+
+**What a verifier shows.** On the desk (c2patool 0.27.22,
+`work/c2pa-20261022/`): the signed sample is `Valid` -- claim signature
+validated, every hashed URI matched, data hash matched -- with one failure,
+`signingCredential.untrusted`, because the device root is on no trust list.
+A tampered copy reads `Invalid` with `assertion.dataHash.mismatch`. A
+trust-listed signer needs a certificate from a C2PA-recognised authority;
+that is a business decision outside the app.
+
+**Order.** Signing is the last write before the file is published (after
+EXIF and the gain map): any later write breaks the hash.
+
 ## Appendix: File Inventory by Subsystem
 
 ### Pipeline (app/src/main/java/dev/multiframe/camera/pipeline/)

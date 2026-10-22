@@ -242,6 +242,20 @@ object ImageSaver {
         put(MediaStore.MediaColumns.IS_PENDING, 1)
     }
 
+    /** Rewrites the pending JPEG at [uri] with a signed C2PA manifest; on any failure the unsigned file stays. */
+    private fun signContentCredentials(context: Context, uri: Uri, report: CaptureReport?) {
+        val started = System.currentTimeMillis()
+        val signer = KeystoreCredentialSigner.obtain(context) ?: return
+        runCatching {
+            val resolver = context.contentResolver
+            val original = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return
+            val signed = ContentCredentials.embedJpeg(original, signer, report, dev.multiframe.camera.BuildConfig.VERSION_NAME)
+            resolver.openOutputStream(uri, "wt")?.use { it.write(signed) } ?: return
+            Log.i(TAG, "content credentials: signed in %dms (+%d bytes)".format(
+                System.currentTimeMillis() - started, signed.size - original.size))
+        }.onFailure { Log.w(TAG, "content credentials: left unsigned", it) }
+    }
+
     /** Writes the metadata, clears the pending flag and records the capture. */
     private fun publish(
         context: Context,
@@ -257,6 +271,12 @@ object ImageSaver {
         // actually displays, which looks exactly like not writing them at all.
         if (metadata != null && !ExifWriter.write(context, uri, metadata)) {
             Log.w(TAG, "JPEG saved without metadata")
+        }
+        // Content Credentials last of all, after the EXIF and any gain map:
+        // the signature's hash covers the file exactly as it is published,
+        // and any later write would break it.
+        if (displayName.endsWith(".jpg", ignoreCase = true) && AppSettings.load(context).contentCredentials) {
+            signContentCredentials(context, uri, metadata?.report)
         }
 
         values.clear()
