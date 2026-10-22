@@ -10,8 +10,15 @@ difficulty classification, Low-first reasoning, stable context reuse and the
 
 Multiframe is a pure computational photography engine for Android. Every pixel
 in its output is a function of measured photon counts. No generative AI, no
-neural networks, no cloud processing. The user promise: "If you see it in the
-picture, the sensor saw it in the scene."
+cloud processing, and no network ever writes a pixel. The user promise: "If you
+see it in the picture, the sensor saw it in the scene."
+
+**Choice over defaults.** The default path is fully deterministic. A
+non-generative model may be offered as an opt-in (Labs or an explicit
+setting) when it only *analyses* measured data -- e.g. a sky/foreground mask
+that chooses which alignment a pixel's measured samples get -- and never
+creates, hallucinates or transfers detail. Every photograph it touches says so
+in its report and its Content Credentials.
 
 ## Architecture
 
@@ -279,9 +286,12 @@ the code comment should be updated.
 
 ## What Not to Do
 
-- **Do not add generative AI.** No neural networks for denoise, super-res,
-  demosaic, or any image processing. If computational denoise is ever added, it
-  must be wavelet or BM3D-family.
+- **Do not add generative AI.** No neural network may produce pixel values:
+  no learned denoise, super-res, demosaic, inpainting, sharpening or style. If
+  computational denoise is ever added, it must be wavelet or BM3D-family. The
+  one permitted use of a model is analysis that selects among measured samples
+  (a segmentation mask), opt-in, off by default, disclosed per photograph, with
+  a deterministic default doing the same job.
 - **Do not add cloud features.** No network permission, no upload, no sync.
 - **Do not skip haptics.** Every state change in the UI has a defined haptic
   response. See `docs/REFERENCE.md` section 1.3.

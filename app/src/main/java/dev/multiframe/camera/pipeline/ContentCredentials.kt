@@ -172,6 +172,10 @@ object ContentCredentials {
         report.lens?.let { put("lens", it) }
         put("alignment", report.alignment)
         report.plan?.let { put("plan", it) }
+        report.mlAnalysis?.let {
+            put("ml_analysis", it)
+            put("ml_analysis_role", "segmentation mask selecting among measured samples; no pixel values generated")
+        }
     }
 
     /**

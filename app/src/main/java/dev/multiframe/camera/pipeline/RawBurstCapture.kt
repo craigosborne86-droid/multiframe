@@ -275,6 +275,8 @@ object RawBurstCapture {
         plan: String? = null,
         /** [CaptureReport.ALIGN_TILES], or [CaptureReport.ALIGN_TRIPOD] where frames were summed in place. */
         alignment: String = CaptureReport.ALIGN_TILES,
+        /** The opt-in analysis model that shaped this picture, by name; null when none did. Disclosed in the report and Content Credentials. */
+        mlAnalysis: String? = null,
     ): RawBurstResult = coroutineScope {
         val stamp = stamp()
 
@@ -475,6 +477,7 @@ object RawBurstCapture {
                         hdr = gainMap != null,
                         plan = plan,
                         mergeMillis = mergeMillis,
+                        mlAnalysis = mlAnalysis,
                     ))
                 },
             )

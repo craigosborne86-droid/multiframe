@@ -218,7 +218,7 @@ object Haptics {
 | Shutter refused | Ring full, ring not refilled, or fewer frames ready than the press asked for | `Haptics.reject` | Nothing was taken; the status says so. A press never takes a short burst |
 | Self-timer tick | Each countdown second but the last | `Haptics.tick` | Light metronome, not distracting. The last second is silent: the frames the timer locks are exposed in it |
 | Mode toggle | GUARD, LOCAL TONE, HDR OUTPUT, HISTOGRAM, DNG, Labs Brenizer 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
-| Cycle value | FRAMES, TIMER, GUIDES, NIGHT's Long span stepped | `Haptics.segment` | Same detent feel for any discrete step |
+| Cycle value | FRAMES, TIMER, GUIDES, NIGHT's Long and Astro spans stepped | `Haptics.segment` | Same detent feel for any discrete step |
 | Mode selected | PHOTO or NIGHT chosen in the carousel | `Haptics.segment` | A dial detent; arming Brenizer Sweep also switches the lens, which has the same detent |
 | Super Res stopped | STOP tapped, or the back gesture while running | `Haptics.segment` | Acknowledging the request; the stop itself lands a moment later and is not felt |
 | Slider at detent | ISO at round number (100, 200, ...), EV at 0 | `Haptics.tick` | Subtle stop point, not every pixel of drag |
@@ -2856,6 +2856,60 @@ against ~187 for the defocused input.
 **Not the merge.** The merge rejects what differs between frames; here the
 frames differ on purpose. The stack is written through the ordinary develop
 and DNG writer, tagged `stack`, with its report (§3.11) saying so.
+
+### 3.13 Astro: Minutes of Night Sky
+
+NIGHT offers `Astro: 1 / 2 / 4 / 8 / 15 min` where the camera takes manual
+exposure and the ring holds a chunk of frames (`AstroCapture.supported`). The
+press is refused unless the gyroscope reads tripod (`MotionClass.TRIPOD`).
+Pixel's own astrophotography stops at four minutes; this has no ring-imposed
+limit, because frames are merged as they arrive and released.
+
+**Plan** (`AstroPlanner.solve`). Frame time t = min(sensor's longest,
+1.5 px / (f_px · ω), 16 s), ω = 7.2921·10⁻⁵ rad/s (sidereal): a star drifts
+at most 1.5 px within one frame -- 7.2 s on the 11 Pro's main lens (f = 2853
+px), 0.9 s on the 110 mm. Gain = half the meter's light over t (the guard's
+standing stop), held between the sensor's floor and its analog ceiling --
+past it the gain is digital and adds nothing the merge cannot. Frames = span
+/ t. The develop's metered gain gives the stop back.
+
+**Capture.** Still bursts of six (`captureStillBurst`), each frame merged
+then released; memory is two accumulators and the frames in flight, never
+the span. Cancel, or a thermal status of SEVERE (`AstroCapture.tooHot`), ends
+the span early and keeps the stack: the frames so far are merged and written.
+
+**Hot pixels** (`HotPixelMap`). From the first four frames: a pixel more than
+48 codes over the mean of its four same-colour neighbours in at least 75% of
+them is the sensor, not a star (a star moves). Marked pixels are replaced by
+that mean in every frame before it is merged, so an aligned sky does not draw
+their dotted trails.
+
+**Two stacks and a mask.** Every frame is merged into a *sky* stack, aligned
+by the tile search, and a *ground* stack, unshifted; both keep the motion
+rejection. Tiles that did not move (mostly ground) are given the frame's sky
+motion in the sky stack -- the median offset of the tiles that moved -- so a
+sliver of sky over the horizon is still aligned. Each frame's search starts
+from the previous frame's sky motion (the proxy is shifted by it first), so a
+fifteen-minute drift (~125 px at 24 mm) stays inside the search's reach.
+
+**The measured mask** (`SkyMask`, the default). Per proxy pixel, summed over
+the stack: |unshifted − reference| − |sky-aligned − reference|. Positive means
+the pixel moves with the stars. Box-smoothed over 13×13 proxy pixels and
+mapped through a logistic (½ at zero, softness 0.9 codes), it blends the sky
+and ground stacks per CFA cell. On the desk (`AstroTest`) a drifting star field
+over static ground reads 0.99 sky and 0.00 ground. No model is involved; the
+mask is the sensor's own evidence.
+
+**The model mask** (Labs, opt-in, `SkySegmenter`). Where the user enables it,
+a segmentation model's sky probability replaces the measured mask. It only
+chooses which of two stacks of measured samples a pixel takes; it computes no
+pixel value. The photograph's report and Content Credentials name the model
+(`ml_analysis`) and its role. The charter permits exactly this use and
+requires the measured default beside it.
+
+**Limits to measure on the phone.** The sensor's longest exposure (the probe
+records only the shortest), heat over a long span, battery, and how visible
+the horizon boundary is on real foregrounds.
 
 ## Appendix: File Inventory by Subsystem
 

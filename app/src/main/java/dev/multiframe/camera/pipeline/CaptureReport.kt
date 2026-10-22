@@ -47,6 +47,8 @@ data class CaptureReport(
     /** The plan, in words, where one chose the exposure: NIGHT's hand class, a long exposure's span. */
     val plan: String? = null,
     val mergeMillis: Long = 0,
+    /** The opt-in, non-generative analysis model that chose among measured samples (Labs), or null. */
+    val mlAnalysis: String? = null,
 ) {
     /** The noise reduction the merge's arithmetic gives, in stops; zero for a single frame. */
     val noiseGainStops: Float
@@ -75,6 +77,7 @@ data class CaptureReport(
         put("hdr", if (hdr) 1 else 0)
         put("p", plan)
         put("mm", mergeMillis)
+        put("ml", mlAnalysis)
     }
 
     /** The rows the Lightbox shows: a label and its value, in reading order. */
@@ -84,6 +87,7 @@ data class CaptureReport(
             KIND_LONG -> "Long exposure"
             KIND_SUPER_RES -> "2× super-resolution"
             KIND_STACK -> "Focus stack (Labs)"
+            KIND_ASTRO -> "Astro (night sky)"
             else -> "Burst"
         })
         plan?.let { add("Plan" to it) }
@@ -100,6 +104,7 @@ data class CaptureReport(
             if (localTone) "local tone" else "global tone",
             if (hdr) "HDR gain map" else null,
         ).joinToString(" · "))
+        mlAnalysis?.let { add("Analysis model" to "$it chose which alignment each pixel's measured samples got (Labs, opt-in); it made no pixels") }
         add("Generative AI" to "none: every pixel is a measured sample")
     }
 
@@ -110,6 +115,7 @@ data class CaptureReport(
         const val KIND_LONG = "long"
         const val KIND_SUPER_RES = "2x"
         const val KIND_STACK = "stack"
+        const val KIND_ASTRO = "astro"
         const val ALIGN_TILES = "aligned"
         const val ALIGN_TRIPOD = "tripod"
 
@@ -137,6 +143,7 @@ data class CaptureReport(
                 hdr = fields["hdr"] == "1",
                 plan = fields["p"],
                 mergeMillis = fields["mm"]?.toLongOrNull() ?: 0L,
+                mlAnalysis = fields["ml"],
             )
         }
 
@@ -146,6 +153,7 @@ data class CaptureReport(
             tag.startsWith("long") -> KIND_LONG
             tag.startsWith("night") -> KIND_NIGHT
             tag.startsWith("stack") -> KIND_STACK
+            tag.startsWith("astro") -> KIND_ASTRO
             else -> KIND_BURST
         }
     }

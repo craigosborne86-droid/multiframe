@@ -390,6 +390,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // Self-timer, and the last shot taken.
     var timerSeconds by remember { mutableIntStateOf(restored.timerSeconds) }
     var longExposureSeconds by remember { mutableIntStateOf(restored.longExposureSeconds) }
+    var astroMinutes by remember { mutableIntStateOf(restored.astroMinutes) }
+    // Labs, opt-in: a segmentation model marks the sky instead of the measured mask.
+    var mlSkyMask by remember { mutableStateOf(false) }
+    // Set by Cancel during astro: the stack so far is kept, not thrown away.
+    val astroStop = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    // The lens's focal length in pixels for the stream, for astro's trailing limit.
+    var astroPixelsPerRadian by remember { mutableStateOf(0f) }
     // Labs: the next press takes a focus stack. Not remembered across launches.
     var focusStackArmed by remember { mutableStateOf(false) }
     var countdown by remember { mutableIntStateOf(0) }
@@ -1355,6 +1362,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         val pixelsPerRadian = lensProfiles[stream.lensId]?.pixelsPerRadian(stream.config.width)
             ?: MosaicCapture.pixelsPerRadian(stream)
         val classifier = MotionClassifier(pixelsPerRadian)
+        astroPixelsPerRadian = pixelsPerRadian
         while (true) {
             kotlinx.coroutines.delay(NightPlanner.POLL_MS)
             val now = motion.nowNs()
@@ -1623,7 +1631,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         settings, burstFrames, lens, highlightGuard, captureMode, dngEnabled,
         timerSeconds, guides, mosaicPreset, localTone, outputFormat, showHistogram,
         mosaicReturnLens, fullResolution, manualBurst, rememberedBurst, hdrOutput, longExposureSeconds,
-        contentCredentials,
+        contentCredentials, astroMinutes,
     ) {
         AppSettings.save(
             context,
@@ -1641,6 +1649,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 captureMode = captureMode,
                 timerSeconds = timerSeconds,
                 longExposureSeconds = longExposureSeconds,
+                astroMinutes = astroMinutes,
                 guides = guides.name,
                 mosaicPreset = mosaicPreset,
                 localTone = localTone,
@@ -2102,6 +2111,68 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                         }
                         return
                     }
+                    // NIGHT's astro: minutes on a tripod, merged as the frames arrive.
+                    val astroSpan = astroMinutes.takeIf { captureMode == CaptureMode.NIGHT && !canvas2x } ?: 0
+                    if (astroSpan > 0 && currentCaps != null && dev.multiframe.camera.pipeline.AstroCapture.supported(currentCaps, stream)) {
+                        if (busy || lockPending || developing > 0) {
+                            Haptics.reject(view)
+                            status = if (developing > 0) "astro waits for $developing developing" else "busy — a moment"
+                            return
+                        }
+                        if (capturePlan?.night?.motion != dev.multiframe.camera.pipeline.MotionClass.TRIPOD) {
+                            Haptics.reject(view)
+                            status = "Astro needs the phone still: a tripod, or resting on something solid"
+                            return
+                        }
+                        val meter = stream.latestExposure()
+                        val ppr = astroPixelsPerRadian.takeIf { it > 0f }
+                        if (meter == null || ppr == null) {
+                            Haptics.reject(view)
+                            status = "Astro is still reading the scene — a moment"
+                            return
+                        }
+                        astroStop.set(false)
+                        val astroPlan = dev.multiframe.camera.pipeline.AstroPlanner.solve(
+                            astroSpan, ppr, meter.first, meter.second, currentCaps.exposureMaxNs,
+                            currentCaps.isoMin ?: 50, currentCaps.isoMax ?: 3200, currentCaps.maxAnalogIso,
+                        )
+                        busy = true
+                        captureJob = scope.launch {
+                            try {
+                                for (remaining in shotTimerSeconds downTo 1) {
+                                    countdown = remaining; status = "$remaining seconds · timer"
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                                countdown = 0
+                                val started = System.currentTimeMillis()
+                                status = "Astro · ${astroPlan.reading(displayLocale)}"
+                                val r = withContext(Dispatchers.Default) {
+                                    dev.multiframe.camera.pipeline.AstroCapture.capture(
+                                        context, stream, currentCaps, settings, astroPlan, rot,
+                                        segmenter = if (mlSkyMask) dev.multiframe.camera.pipeline.SkySegmenters.obtain(context) else null,
+                                        lensProfile = lensProfile, outputFormat = format,
+                                        develop = params, writeDng = dng,
+                                        shouldStop = { astroStop.get() || dev.multiframe.camera.pipeline.AstroCapture.tooHot(context) },
+                                    ) { done, total ->
+                                        val left = ((total - done) * astroPlan.exposureNs / 1_000_000_000L).toInt()
+                                        status = "Astro · %d / %d frames · %d:%02d left".format(displayLocale, done, total, left / 60, left % 60)
+                                    }
+                                }
+                                Haptics.mechanicalRelease(context)
+                                Log.i(TAG, "astro result: $r (${(System.currentTimeMillis() - started) / 1000}s)")
+                                val saved = dev.multiframe.camera.pipeline.CaptureSaveFeedback.forOutputs(
+                                    r.savedJpeg != null, r.savedDng != null, dng)
+                                status = saved.message ?: "Astro · ${r.framesCaptured} frames"
+                                if (saved.hasSavedOutput) shotsWritten++
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                status = "Astro cancelled"
+                                throw e
+                            } catch (e: Exception) {
+                                status = "Astro failed: ${e.message}"
+                            } finally { busy = false; countdown = 0; captureJob = null }
+                        }
+                        return
+                    }
                     val longSeconds = longExposureSeconds.takeIf { captureMode == CaptureMode.NIGHT && !canvas2x } ?: 0
                     if (longSeconds > 0) {
                         if (busy || lockPending || developing > 0) {
@@ -2323,6 +2394,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                     longExposureSeconds = dev.multiframe.camera.pipeline.LongExposureCapture.next(longExposureSeconds)
                     Haptics.segment(view)
                 },
+                astroMinutes = astroMinutes.takeIf {
+                    captureMode == CaptureMode.NIGHT && dev.multiframe.camera.pipeline.AstroCapture.supported(caps, zslStream)
+                },
+                onAstro = {
+                    astroMinutes = dev.multiframe.camera.pipeline.AstroPlanner.next(astroMinutes)
+                    Haptics.segment(view)
+                },
                 onTorch = { torchOn = !torchOn; Haptics.segment(view) },
                 onFront = {
                     val target = if (lens?.facingBack == false)
@@ -2338,7 +2416,9 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 onAuto = { settings = settings.returnToAuto(); manualBurst = false },
                 onManual = { settings = settings.restoreManual(caps); manualBurst = rememberedBurst },
                 onCancel = {
-                    if (superResPhase.inFlight) stopSuperRes()
+                    // Astro keeps what it has: stop after the frame in flight, then merge and write.
+                    if (busy && astroMinutes > 0 && captureMode == CaptureMode.NIGHT && captureJob?.isActive == true && countdown == 0) { astroStop.set(true); status = "Astro · finishing with the frames so far" }
+                    else if (superResPhase.inFlight) stopSuperRes()
                     else { captureJob?.cancel(); countdown = 0; busy = false }
                 },
                 cancellable = countdown > 0 || superResPhase.inFlight || (busy && captureJob?.isActive == true),
@@ -2710,6 +2790,7 @@ MechanicalShutter(
                         if (superResPhase.controlsEnabled) selectMode(fresh.captureMode)
                         timerSeconds = fresh.timerSeconds
                         longExposureSeconds = fresh.longExposureSeconds
+                        astroMinutes = fresh.astroMinutes
                         guides = GuideMode.OFF
                         mosaicPreset = fresh.mosaicPreset
                         localTone = fresh.localTone
