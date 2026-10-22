@@ -393,6 +393,8 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     var astroMinutes by remember { mutableIntStateOf(restored.astroMinutes) }
     // Labs, opt-in: a segmentation model marks the sky instead of the measured mask.
     var mlSkyMask by remember { mutableStateOf(false) }
+    // Labs, opt-in: keep each astro capture's (reference, measured mask) pair to train that model.
+    var collectSkyTraining by remember { mutableStateOf(false) }
     // Set by Cancel during astro: the stack so far is kept, not thrown away.
     val astroStop = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     // The lens's focal length in pixels for the stream, for astro's trailing limit.
@@ -2153,6 +2155,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                                         lensProfile = lensProfile, outputFormat = format,
                                         develop = params, writeDng = dng,
                                         shouldStop = { astroStop.get() || dev.multiframe.camera.pipeline.AstroCapture.tooHot(context) },
+                                        collectTraining = collectSkyTraining,
                                     ) { done, total ->
                                         val left = ((total - done) * astroPlan.exposureNs / 1_000_000_000L).toInt()
                                         status = "Astro · %d / %d frames · %d:%02d left".format(displayLocale, done, total, left / 60, left % 60)
@@ -2741,6 +2744,13 @@ MechanicalShutter(
                                 showSettings = false
                             },
                         )
+                        }
+                        if (dev.multiframe.camera.pipeline.AstroCapture.supported(caps, zslStream)) {
+                            dev.multiframe.camera.ui.AstroLabs(
+                                modelAvailable = dev.multiframe.camera.pipeline.SkySegmenters.available(context),
+                                useModel = mlSkyMask, onUseModel = { mlSkyMask = it },
+                                collect = collectSkyTraining, onCollect = { collectSkyTraining = it },
+                            )
                         }
                         if (dev.multiframe.camera.pipeline.FocusStackCapture.supported(caps, zslStream)) {
                             dev.multiframe.camera.ui.FocusStackLabs(

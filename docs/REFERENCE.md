@@ -2907,6 +2907,18 @@ pixel value. The photograph's report and Content Credentials name the model
 (`ml_analysis`) and its role. The charter permits exactly this use and
 requires the measured default beside it.
 
+**The model's provenance.** Multiframe's own: trained only on pairs this app
+collects (Labs, "COLLECT TRAINING PAIRS", off by default, kept on the phone)
+-- an astro capture's reference frame preprocessed as the phone feeds the
+model (`SkyModelContract`: 256×192, stretched to its 99th percentile) and the
+*measured* mask as the label. No third-party dataset. `tools/sky_segmenter/`
+trains a small U-Net and exports it through a SavedModel to TFLite; the
+contract is checked at export (input and output [1, 192, 256, 1] float32).
+A smoke run on synthetic scenes exported a 799 KB model; no model ships until
+it is trained on real captures. Runtime: LiteRT 1.4.2 on the CPU, the model
+memory-mapped uncompressed from the APK; the Labs row is absent until
+`assets/sky_segmenter.tflite` exists.
+
 **Limits to measure on the phone.** The sensor's longest exposure (the probe
 records only the shortest), heat over a long span, battery, and how visible
 the horizon boundary is on real foregrounds.

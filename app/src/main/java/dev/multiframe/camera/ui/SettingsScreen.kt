@@ -222,3 +222,21 @@ fun FocusStackLabs(armed: Boolean, enabled: Boolean, onArm: (Boolean) -> Unit) {
     ServiceRow("ARM FOCUS STACK", if (armed) "ARMED" else "START", active = armed, enabled = enabled,
         onClick = { Haptics.segment(view); onArm(!armed) })
 }
+
+/**
+ * Labs: astro's sky mask. The model row is absent until a model is bundled;
+ * collection keeps training pairs on the phone, nothing leaves it.
+ */
+@Composable
+fun AstroLabs(modelAvailable: Boolean, useModel: Boolean, onUseModel: (Boolean) -> Unit,
+              collect: Boolean, onCollect: (Boolean) -> Unit) {
+    val view = LocalView.current
+    Text("ASTRO SKY MASK / BETA", style = TitaniumTokens.Control,
+        color = TitaniumTokens.OpticalAmber, modifier = Modifier.padding(vertical = 8.dp))
+    if (modelAvailable) ServiceRow("SKY MASK", if (useModel) "ML MODEL" else "MEASURED",
+        detail = "The model only chooses which alignment each pixel's measured samples get; it makes no pixels. Photos say when it was used.",
+        active = useModel, onClick = { Haptics.segment(view); onUseModel(!useModel) })
+    ServiceRow("COLLECT TRAINING PAIRS", if (collect) "ON" else "OFF",
+        detail = "Saves each astro shot's reference frame and measured sky mask on this phone, to train Multiframe's own model.",
+        active = collect, onClick = { Haptics.segment(view); onCollect(!collect) })
+}

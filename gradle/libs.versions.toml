@@ -1,4 +1,5 @@
 [versions]
+litert = "1.4.2"
 agp = "9.3.2"
 kotlin = "2.4.10"
 coreKtx = "1.19.0"
@@ -14,6 +15,8 @@ truth = "1.4.5"
 androidxWindow = "1.5.0"
 
 [libraries]
+# On-device inference for the opt-in, analysis-only sky mask (Labs; CLAUDE.md "Choice over defaults").
+litert = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }

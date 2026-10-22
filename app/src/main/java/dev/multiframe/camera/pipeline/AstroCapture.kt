@@ -65,6 +65,8 @@ object AstroCapture {
         writeDng: Boolean = true,
         /** Checked between frames: true ends the span early and keeps the stack (Cancel, or heat). */
         shouldStop: () -> Boolean = { false },
+        /** Labs: save this capture's (reference, measured mask) pair for training the sky model. */
+        collectTraining: Boolean = false,
         onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
     ): RawBurstResult {
         val statsBefore = stream.stats().toString()
@@ -153,7 +155,10 @@ object AstroCapture {
             val ref = refProxy ?: return failed("astro took no frames", statsBefore)
             // The mask: the stack's own evidence, or the user's chosen model where one ran.
             val modelMask = segmenter?.let { s -> runCatching { s.skyMask(ref) }.getOrNull() }
-            val skyMask = modelMask ?: mask.finish()
+            val measuredMask = mask.finish()
+            // Training pairs are always the measured mask: the model learns what the stack proved.
+            if (collectTraining && mask.frames >= 8) SkySegmenters.collect(context, ref, measuredMask)
+            val skyMask = modelMask ?: measuredMask
             val out = ByteBuffer.allocateDirect(w * h * 2).order(ByteOrder.LITTLE_ENDIAN)
             SkyMask.blend(skyBuf, groundBuf, skyMask, w, h, out)
             val mergeMillis = System.currentTimeMillis() - tMerge

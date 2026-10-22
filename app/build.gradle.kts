@@ -14,6 +14,9 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
+    // The sky model is memory-mapped from the APK, which needs it stored uncompressed.
+    androidResources { noCompress += "tflite" }
+
     namespace = "dev.multiframe.camera"
     compileSdk = 37
 
@@ -141,6 +144,8 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.compose)
     implementation(libs.androidx.window)
+    // The opt-in sky mask's runtime. Loads nothing unless a model is bundled.
+    implementation(libs.litert)
 
     testImplementation(libs.junit)
     testImplementation(libs.truth)

@@ -126,7 +126,8 @@ in its report and its Content Credentials.
 - **Native:** NEON-vectorized merge, alignment, shading, rotation, JPEG encode
   (vendored libjpeg-turbo). All native code is in `app/src/main/cpp/`.
 - **No external image libraries.** No OpenCV, no RenderScript, no third-party
-  image processing. Alignment, feature matching, homography, demosaic, tone
+  image processing. The one exception is LiteRT, the on-device inference
+  runtime for the opt-in sky mask (it computes a mask, never pixels). Alignment, feature matching, homography, demosaic, tone
   mapping, color science — all hand-written.
 - **Build:** compileSdk 37, minSdk 33, targetSdk 36, NDK 28.2, arm64-v8a only.
 
