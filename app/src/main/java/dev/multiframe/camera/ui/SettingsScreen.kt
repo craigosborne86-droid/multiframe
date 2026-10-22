@@ -147,6 +147,10 @@ fun ServiceCaptureSettings(
     /** Null where the row is absent: while the pictures are HEIF, which v1 does not sign. */
     contentCredentials: Boolean? = null,
     onContentCredentials: (Boolean) -> Unit = {},
+    /** Null where the row is absent: no memory or native path for the 2x canvas. */
+    highRes: Boolean? = null,
+    highResMegapixels: Int = 48,
+    onHighRes: (Boolean) -> Unit = {},
     onReset: () -> Unit,
 ) {
     if (caps == null) return
@@ -168,6 +172,12 @@ fun ServiceCaptureSettings(
             detail = "Adds a gain map: highlights up to two stops brighter on an HDR screen.",
             active = enabled,
             onClick = { Haptics.segment(view); onHdrOutput(!enabled) })
+    }
+    highRes?.let { enabled ->
+        ServiceRow("HIGH RES", if (enabled) "$highResMegapixels MP" else "12 MP",
+            detail = "PHOTO merges 16 frames at twice the sensor's sampling. Real sub-pixel samples from your hand's movement; " +
+                "on a tripod or where they are missing, it saves at 12 MP and says why.",
+            active = enabled, onClick = { Haptics.segment(view); onHighRes(!enabled) })
     }
     contentCredentials?.let { enabled ->
         ServiceRow("CONTENT CREDENTIALS", if (enabled) "ON" else "OFF",

@@ -376,6 +376,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     // The gain map beside the JPEG; only offered where the platform writes one.
     var hdrOutput by remember { mutableStateOf(restored.hdrOutput) }
     var contentCredentials by remember { mutableStateOf(restored.contentCredentials) }
+    var highRes by remember { mutableStateOf(restored.highRes) }
     // The sensor's un-binned mode, on a sensor that has one. See the chip.
     var fullResolution by remember { mutableStateOf(restored.fullResolution) }
 
@@ -1633,7 +1634,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
         settings, burstFrames, lens, highlightGuard, captureMode, dngEnabled,
         timerSeconds, guides, mosaicPreset, localTone, outputFormat, showHistogram,
         mosaicReturnLens, fullResolution, manualBurst, rememberedBurst, hdrOutput, longExposureSeconds,
-        contentCredentials, astroMinutes,
+        contentCredentials, astroMinutes, highRes,
     ) {
         AppSettings.save(
             context,
@@ -1660,6 +1661,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 fullResolution = fullResolution,
                 hdrOutput = hdrOutput,
                 contentCredentials = contentCredentials,
+                highRes = highRes,
             ),
         )
     }
@@ -1686,7 +1688,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     }
     DisposableEffect(Unit) { onDispose { (view.context.activityForCamera() as? MainActivity)?.setShootingUi(false) } }
     val nextCanvas = dev.multiframe.camera.pipeline.SuperResPolicy.wantsCanvas(captureMode, digitalZoom,
-        superResOffered, lens?.zoomFactor ?: 1f)
+        superResOffered, lens?.zoomFactor ?: 1f, highRes)
     val nextFrames = if (nextCanvas) MosaicPreset.ONE_SHOT_FRAMES else capturePlan?.frames ?: burstFrames
 
     val measuredTilt = attitude?.takeUnless { it.facingUpOrDown }?.rollDegrees
@@ -2538,7 +2540,7 @@ MechanicalShutter(
 
                             if (stream != null) {
                                 val plan = capturePlan
-                                val canvas = dev.multiframe.camera.pipeline.SuperResPolicy.wantsCanvas(captureMode, digitalZoom, superResOffered, lens?.zoomFactor ?: 1f)
+                                val canvas = dev.multiframe.camera.pipeline.SuperResPolicy.wantsCanvas(captureMode, digitalZoom, superResOffered, lens?.zoomFactor ?: 1f, highRes)
                                 takeZsl(stream, if (canvas) MosaicPreset.ONE_SHOT_FRAMES else plan?.frames ?: burstFrames,
                                     if (canvas) "SUPER RES" else plan?.resolved?.label ?: "ZSL", canvas2x = canvas)
                                 return@MechanicalShutter
@@ -2784,6 +2786,9 @@ MechanicalShutter(
                     onHdrOutput = { if (!busy) hdrOutput = it },
                     contentCredentials = if (outputFormat == OutputFormat.JPEG) contentCredentials else null,
                     onContentCredentials = { if (!busy) contentCredentials = it },
+                    highRes = if (superResOffered) highRes else null,
+                    highResMegapixels = zslStream?.config?.let { ((it.width * 2L) * (it.height * 2L) / 1_000_000L).toInt() } ?: 48,
+                    onHighRes = { if (!busy) highRes = it },
                     onReset = {
                         // Back to what the app ships with. The save effect above
                         // is watching every one of these, so persisting it needs
@@ -2807,6 +2812,7 @@ MechanicalShutter(
                         outputFormat = fresh.outputFormat
                         hdrOutput = fresh.hdrOutput
                         contentCredentials = fresh.contentCredentials
+                        highRes = fresh.highRes
                         showHistogram = fresh.histogram
                         fullResolution = fresh.fullResolution
                         zebraOverride = null

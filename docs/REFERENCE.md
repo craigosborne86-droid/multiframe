@@ -2923,6 +2923,32 @@ memory-mapped uncompressed from the APK; the Labs row is absent until
 records only the shortest), heat over a long span, battery, and how visible
 the horizon boundary is on real foregrounds.
 
+### 3.14 HIGH RES: the Full Frame on the 2x Canvas
+
+A setting, off by default, offered wherever the 2x canvas is
+(`CameraCapabilities.supportsSuperRes`). With it on, a PHOTO press at 1x
+takes the 16-frame burst onto the sub-pixel canvas (§3.6) for the whole frame:
+about 48 MP from a 12 MP readout (`SuperResPolicy.wantsCanvas`, `highRes`).
+NIGHT is unchanged; its frames are spent on noise.
+
+**Why not the sensor's own 50 MP.** Pixel's 50 MP mode reads the quad-Bayer
+sensor remosaiced at full resolution. Neither development phone exposes that
+readout to applications (`ULTRA_HIGH_RESOLUTION_SENSOR` absent, no
+maximum-resolution stream map; §2.4), so `supportsFullResolution` is false and
+the `12 MP | 50 MP` chip is absent. Where a phone does expose it, both are
+offered: the chip reads the sensor, HIGH RES merges frames.
+
+**What the extra pixels are.** Measured samples: the hand's sub-pixel motion
+places each frame's samples between the reference's, and the canvas keeps
+them where they fell (registration median ~0.05 px since the Lucas-Kanade
+refinement, §3.3.1). Where a burst lacks that motion -- a tripod, a flat
+scene -- the coverage gate declines the canvas and the photograph is saved at
+12 MP, with the reason in its status and report. On the desk the canvas
+resolves finer star detail than a Lanczos enlargement on 16-frame bursts
+(0.47–0.55 vs 0.35–0.39 cy/px) but not yet higher MTF50 (0.329 vs 0.335): its
+reconstruction filter is the remaining limit, and real-photo detail is
+unproven until the phone shoots a chart.
+
 ## Appendix: File Inventory by Subsystem
 
 ### Pipeline (app/src/main/java/dev/multiframe/camera/pipeline/)

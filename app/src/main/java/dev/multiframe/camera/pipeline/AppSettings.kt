@@ -89,6 +89,13 @@ data class AppSettings(
      * default: it is the app's promise, made checkable.
      */
     val contentCredentials: Boolean = true,
+    /**
+     * HIGH RES: PHOTO accumulates the full frame on the 2x canvas (about
+     * 48 MP from a 12 MP readout) instead of merging at the sensor's size.
+     * Off by default; where the burst lacks the sub-pixel motion it needs,
+     * the photograph is saved at 12 MP and says why.
+     */
+    val highRes: Boolean = false,
 ) {
 
     /** The develop's parameters as these settings ask for them. */
@@ -136,6 +143,7 @@ data class AppSettings(
         KEY_FULL_RESOLUTION to fullResolution.toString(),
         KEY_HDR_OUTPUT to hdrOutput.toString(),
         KEY_CONTENT_CREDENTIALS to contentCredentials.toString(),
+        KEY_HIGH_RES to highRes.toString(),
     ) + (lensId?.let { mapOf(KEY_LENS to it) } ?: emptyMap())
 
     companion object {
@@ -165,6 +173,7 @@ data class AppSettings(
         const val KEY_FULL_RESOLUTION = "fullResolution"
         const val KEY_HDR_OUTPUT = "hdrOutput"
         const val KEY_CONTENT_CREDENTIALS = "contentCredentials"
+        const val KEY_HIGH_RES = "highRes"
 
         private const val PREFERENCES = "multiframe.settings"
 
@@ -237,6 +246,7 @@ data class AppSettings(
                 fullResolution = bool(KEY_FULL_RESOLUTION, defaults.fullResolution),
                 hdrOutput = bool(KEY_HDR_OUTPUT, defaults.hdrOutput),
                 contentCredentials = bool(KEY_CONTENT_CREDENTIALS, defaults.contentCredentials),
+                highRes = bool(KEY_HIGH_RES, defaults.highRes),
             )
         }
 

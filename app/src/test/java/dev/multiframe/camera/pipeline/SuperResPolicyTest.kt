@@ -12,4 +12,13 @@ class SuperResPolicyTest {
         }
         assertThat(MosaicPreset.ONE_SHOT_FRAMES).isEqualTo(16)
     }
+
+    @Test fun highResAccumulatesTheFullFrameInPhotoOnly() {
+        assertThat(SuperResPolicy.wantsCanvas(CaptureMode.PHOTO, 1f, capable = true, opticalZoom = 1f, highRes = true)).isTrue()
+        assertThat(SuperResPolicy.wantsCanvas(CaptureMode.NIGHT, 1f, capable = true, opticalZoom = 1f, highRes = true)).isFalse()
+        assertThat(SuperResPolicy.wantsCanvas(CaptureMode.PHOTO, 1f, capable = true, opticalZoom = 1f, highRes = false)).isFalse()
+        assertThat(SuperResPolicy.wantsCanvas(CaptureMode.PHOTO, 1f, capable = false, opticalZoom = 1f, highRes = true)).isFalse()
+        assertThat(AppSettings.decode(AppSettings(highRes = true).encode()).highRes).isTrue()
+        assertThat(AppSettings().highRes).isFalse()
+    }
 }
