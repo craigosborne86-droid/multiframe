@@ -388,6 +388,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
 
     // Self-timer, and the last shot taken.
     var timerSeconds by remember { mutableIntStateOf(restored.timerSeconds) }
+    var longExposureSeconds by remember { mutableIntStateOf(restored.longExposureSeconds) }
     var countdown by remember { mutableIntStateOf(0) }
     // Held so the self-timer can be called off. Only the countdown is
     // cancellable: once frames are captured the work is a few long native
@@ -1616,7 +1617,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
     LaunchedEffect(
         settings, burstFrames, lens, highlightGuard, captureMode, dngEnabled,
         timerSeconds, guides, mosaicPreset, localTone, outputFormat, showHistogram,
-        mosaicReturnLens, fullResolution, manualBurst, rememberedBurst, hdrOutput,
+        mosaicReturnLens, fullResolution, manualBurst, rememberedBurst, hdrOutput, longExposureSeconds,
     ) {
         AppSettings.save(
             context,
@@ -1633,6 +1634,7 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 dngEnabled = dngEnabled,
                 captureMode = captureMode,
                 timerSeconds = timerSeconds,
+                longExposureSeconds = longExposureSeconds,
                 guides = guides.name,
                 mosaicPreset = mosaicPreset,
                 localTone = localTone,
@@ -2048,6 +2050,54 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                             settings.effectiveExposureTimeNs(currentCaps) > 33_333_333L -> settings
                         else -> null
                     }
+                    // NIGHT's long exposure: the stream's frames for the
+                    // chosen span, averaged with rejection off. It merges as
+                    // it captures, so it does not go through the develop
+                    // queue, and it waits for that queue to be empty: the
+                    // accumulator and a queued merge would hold two copies.
+                    val longSeconds = longExposureSeconds.takeIf { captureMode == CaptureMode.NIGHT && !canvas2x } ?: 0
+                    if (longSeconds > 0) {
+                        if (busy || lockPending || developing > 0) {
+                            Haptics.reject(view)
+                            status = if (developing > 0) "long exposure waits for $developing developing" else "busy — a moment"
+                            return
+                        }
+                        busy = true
+                        val steady = capturePlan?.night?.motion == dev.multiframe.camera.pipeline.MotionClass.TRIPOD
+                        captureJob = scope.launch {
+                            try {
+                                for (remaining in shotTimerSeconds downTo 1) {
+                                    countdown = remaining; status = "$remaining seconds · timer"
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                                countdown = 0
+                                status = "Long exposure · 0 / $longSeconds s"
+                                val r = withContext(Dispatchers.Default) {
+                                    dev.multiframe.camera.pipeline.LongExposureCapture.capture(
+                                        context, stream, longSeconds * 1000L, steady, rot,
+                                        lensProfile = lensProfile, outputFormat = format,
+                                        develop = params, writeDng = dng,
+                                    ) { elapsed, n ->
+                                        status = "Long exposure · %.1f / %d s · %d frames".format(
+                                            displayLocale, elapsed / 1000f, longSeconds, n)
+                                    }
+                                }
+                                // After the last frame, never during: the motor would be in the picture.
+                                Haptics.mechanicalRelease(context)
+                                Log.i(TAG, "long exposure result: $r")
+                                val saved = dev.multiframe.camera.pipeline.CaptureSaveFeedback.forOutputs(
+                                    r.savedJpeg != null, r.savedDng != null, dng)
+                                status = saved.message ?: "Long exposure · ${r.framesCaptured} frames · ${r.burstSpanMillis / 1000f} s"
+                                if (saved.hasSavedOutput) shotsWritten++
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                status = "Long exposure cancelled"
+                                throw e
+                            } catch (e: Exception) {
+                                status = "Long exposure failed: ${e.message}"
+                            } finally { busy = false; countdown = 0; captureJob = null }
+                        }
+                        return
+                    }
                     if (currentCaps != null && stillSettings != null) {
                         if (busy || lockPending) return
                         if (stream.lockedFrames() + frames > stream.ringCapacity) {
@@ -2218,6 +2268,13 @@ fun CameraScreen(modifier: Modifier = Modifier) {
                 onWhiteBalance = { showWhiteBalance = !showWhiteBalance; showPro = false; showCaptureInfo = false },
                 onInfo = { showCaptureInfo = !showCaptureInfo; showPro = false; showWhiteBalance = false },
                 onTimer = { handleControl(ControlBar.TIMER) },
+                // NIGHT only, and only on a stream: the long exposure is the
+                // ring's frames averaged, so it needs the ring.
+                longExposureSeconds = longExposureSeconds.takeIf { captureMode == CaptureMode.NIGHT && zslStream != null },
+                onLongExposure = {
+                    longExposureSeconds = dev.multiframe.camera.pipeline.LongExposureCapture.next(longExposureSeconds)
+                    Haptics.segment(view)
+                },
                 onTorch = { torchOn = !torchOn; Haptics.segment(view) },
                 onFront = {
                     val target = if (lens?.facingBack == false)
@@ -2589,6 +2646,7 @@ MechanicalShutter(
                         dngEnabled = fresh.dngEnabled
                         if (superResPhase.controlsEnabled) selectMode(fresh.captureMode)
                         timerSeconds = fresh.timerSeconds
+                        longExposureSeconds = fresh.longExposureSeconds
                         guides = GuideMode.OFF
                         mosaicPreset = fresh.mosaicPreset
                         localTone = fresh.localTone

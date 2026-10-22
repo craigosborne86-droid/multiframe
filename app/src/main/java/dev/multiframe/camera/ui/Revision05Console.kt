@@ -47,6 +47,8 @@ internal fun Revision05Console(
     turret: @Composable () -> Unit, shutter: @Composable () -> Unit, gallery: @Composable () -> Unit,
     panel: @Composable () -> Unit, selectedTab: RangefinderTab, onTab: (RangefinderTab) -> Unit,
     exposureAvailable: Boolean = true, focusAvailable: Boolean = true,
+    /** NIGHT's long exposure span in seconds, zero off; null where long exposure is not offered. */
+    longExposureSeconds: Int? = null, onLongExposure: () -> Unit = {},
     /** NIGHT's plan from the hand, a live reading: Amber, in the console, never on the photograph. */
     nightReading: String? = null,
 ) {
@@ -112,6 +114,9 @@ internal fun Revision05Console(
                         "revision05-auto-wb",onWhiteBalance)
                     InstrumentButton(if(timerSeconds==0) "Timer: Off" else "Timer: $timerSeconds seconds","Timer",timerSeconds>0,
                         controlsEnabled,"rangefinder-timer",onTimer)
+                    if(longExposureSeconds != null) InstrumentButton(
+                        if(longExposureSeconds==0) "Long: Off" else "Long: $longExposureSeconds s",
+                        "Long exposure",longExposureSeconds>0,controlsEnabled,"revision05-long-exposure",onLongExposure)
                     if(torchAvailable) InstrumentButton("Light","Torch",torchOn,controlsEnabled,"rangefinder-torch",onTorch)
                     if(focusAssistAvailable) InstrumentButton("Loupe","Magnified focus assist",focusAssistOpen,controlsEnabled,
                         "rangefinder-focus-assist-toggle",onFocusAssist)

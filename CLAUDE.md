@@ -39,7 +39,8 @@ picture, the sensor saw it in the scene."
   normalised as `black + (raw − black) / g` (`bayer_merge.cpp`,
   `BayerMerger.kt`); dividing the raw code drags the merge under black and
   the white balance turns that green. The reference frame is the newest
-  (lowest-ISO only under DCG). The DNG carries the guard's pull undone in
+  (lowest-ISO only under DCG; the first after the press in NIGHT's long
+  exposure, which merges with rejection off, REFERENCE §3.10). The DNG carries the guard's pull undone in
   `BaselineExposure`; do not brighten the raw pixels instead.
 - **The DNG is written by our own writer** (`DngWriter`, `TiffDirectory`,
   `DngCamera2`, REFERENCE §3.9): DNG 1.7.1, the tags `DngCreator` wrote with

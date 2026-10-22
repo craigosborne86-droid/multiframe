@@ -218,7 +218,7 @@ object Haptics {
 | Shutter refused | Ring full, ring not refilled, or fewer frames ready than the press asked for | `Haptics.reject` | Nothing was taken; the status says so. A press never takes a short burst |
 | Self-timer tick | Each countdown second but the last | `Haptics.tick` | Light metronome, not distracting. The last second is silent: the frames the timer locks are exposed in it |
 | Mode toggle | GUARD, LOCAL TONE, HDR OUTPUT, HISTOGRAM, DNG, Labs Brenizer 2×2/3×3 changed | `Haptics.segment` | Detent feel, like a mechanical switch |
-| Cycle value | FRAMES, TIMER, GUIDES stepped | `Haptics.segment` | Same detent feel for any discrete step |
+| Cycle value | FRAMES, TIMER, GUIDES, NIGHT's Long span stepped | `Haptics.segment` | Same detent feel for any discrete step |
 | Mode selected | PHOTO or NIGHT chosen in the carousel | `Haptics.segment` | A dial detent; arming Brenizer Sweep also switches the lens, which has the same detent |
 | Super Res stopped | STOP tapped, or the back gesture while running | `Haptics.segment` | Acknowledging the request; the stop itself lands a moment later and is not felt |
 | Slider at detent | ISO at round number (100, 200, ...), EV at 0 | `Haptics.tick` | Subtle stop point, not every pixel of drag |
@@ -2736,6 +2736,44 @@ maps no byte order of their own. Ours are big-endian, like the GainMap opcode
 whose fields they share; a reader that takes the file's order would read them
 wrongly. `work/dng-writer-20261021/` has the tower with the payload each way,
 for Lightroom to answer.
+
+### 3.10 The Long Exposure: the Stream Averaged
+
+NIGHT offers a long exposure of 2, 4 or 8 seconds (`LongExposureCapture`,
+the console's `Long` control, NIGHT only, only where the ZSL stream runs).
+After the press, every frame the ring takes for that span is merged into one
+raw picture; the result goes through the ordinary develop and DNG writer.
+
+**Why an average.** A single multi-second frame clips every highlight in
+daylight, and a phone has no neutral-density filter. N frames of exposure
+t_f each, averaged, render motion over the span T = N·t_f(1+gap) while every
+frame keeps the highlight guard's exposure; the sum is held in floats, so the
+average clips nothing a single frame did not. Noise falls as 1/√N, as in the
+burst merge.
+
+**Rejection off.** The merge's finite-support weight (§3.2) drops a sample
+whose residual exceeds 2n. In a long exposure the moving part *is* the
+picture, so the accumulator is created with `noiseTolerance = 1e6`
+(`LongExposureCapture.NO_REJECTION_TOLERANCE`): every residual is inside n and
+every sample keeps weight 1, which makes the merge the plain mean. The
+gain normalisation `black + (raw − black)/g` is unchanged, so a meter that
+moves during the span does not step the picture's brightness.
+
+**Alignment.** On a tripod (`MotionClass.TRIPOD`) frames are summed where they
+land; aligning would chase the water. Otherwise each frame is aligned onto the
+first by the burst's tile search (§3.3) and the CFA offsets stay even. Frames
+are taken newest-first as fast as alignment allows; the log records how many
+of the span's frames were sampled. A sampled rate below the stream rate leaves
+gaps in fast light trails -- the cost to measure on the phone, and the reason
+a pure-sum NEON kernel is the next step if it shows.
+
+**Reference.** The first frame after the press, not the newest: the long
+exposure is the span after the shutter, and the first frame is the one the
+photographer framed. With rejection off the reference sets geometry only.
+This is the one exception to "the reference frame is the newest".
+
+**No haptics during the span**; `Haptics.mechanicalRelease` fires after the
+last frame.
 
 ## Appendix: File Inventory by Subsystem
 

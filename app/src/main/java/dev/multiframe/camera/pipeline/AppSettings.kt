@@ -29,6 +29,8 @@ data class AppSettings(
     val captureMode: CaptureMode = CaptureMode.PHOTO,
     /** Self-timer delay in seconds; zero is off. */
     val timerSeconds: Int = 0,
+    /** NIGHT's long exposure span in seconds, one of [LongExposureCapture.DURATIONS_SECONDS]; zero is off. */
+    val longExposureSeconds: Int = 0,
     /** Which composition guides are drawn, by [dev.multiframe.camera.ui.GuideMode] name. */
     val guides: String = "OFF",
     /**
@@ -118,6 +120,7 @@ data class AppSettings(
         KEY_LOCAL_TONE to localTone.toString(),
         KEY_MODE to captureMode.name,
         KEY_TIMER to timerSeconds.toString(),
+        KEY_LONG_EXPOSURE to longExposureSeconds.toString(),
         KEY_GUIDES to guides,
         KEY_FORMAT to outputFormat.name,
         KEY_HISTOGRAM to histogram.toString(),
@@ -142,6 +145,7 @@ data class AppSettings(
         const val KEY_DNG = "dng"
         const val KEY_MODE = "mode"
         const val KEY_TIMER = "timer"
+        const val KEY_LONG_EXPOSURE = "long_exposure"
         const val KEY_GUIDES = "guides"
         const val KEY_MOSAIC_PRESET = "mosaicPreset"
         const val KEY_LOCAL_TONE = "localTone"
@@ -207,6 +211,8 @@ data class AppSettings(
                 // anywhere else cannot strand it.
                 timerSeconds = int(KEY_TIMER, defaults.timerSeconds)
                     .takeIf { it in TIMER_DELAYS } ?: defaults.timerSeconds,
+                longExposureSeconds = int(KEY_LONG_EXPOSURE, defaults.longExposureSeconds)
+                    .takeIf { it in LongExposureCapture.DURATIONS_SECONDS } ?: defaults.longExposureSeconds,
                 guides = stored[KEY_GUIDES]?.takeIf { it.isNotBlank() } ?: defaults.guides,
                 // The key was "sweepPreset" for one release; a phone that
                 // stored it under that name keeps its choice.

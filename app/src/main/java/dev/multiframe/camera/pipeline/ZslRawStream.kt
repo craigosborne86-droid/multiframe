@@ -21,6 +21,9 @@ import android.util.Range
 import android.util.Size
 import android.view.Surface
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicLong
@@ -337,6 +340,7 @@ class ZslRawStream private constructor(
 
     internal fun onFramePushed(slot: Int, timestampNs: Long) {
         latestImageTimestamp = timestampNs
+        framePushed.value = timestampNs
         if (!followerActive()) return
         if (!ring.histogramSlot(slot, capBins, sensorProfile)) return
         val level = ShutterCap.meanLevel(capBins)
@@ -458,6 +462,17 @@ class ZslRawStream private constructor(
 
     /** The sensor timestamp of the newest frame in the ring, or 0 with none. */
     fun newestFrameTimestampNs(): Long = if (closed) 0L else ring.newestTimestampNs()
+
+    /** The sensor timestamp of the frame the ring took last, for [awaitFrameAfter]. */
+    private val framePushed = MutableStateFlow(0L)
+
+    /**
+     * Suspends until the ring holds a frame newer than [timestampNs], or
+     * [timeoutMillis] passes. A long exposure takes the stream frame by
+     * frame; this is how it waits for the next one without polling.
+     */
+    suspend fun awaitFrameAfter(timestampNs: Long, timeoutMillis: Long): Boolean =
+        withTimeoutOrNull(timeoutMillis) { framePushed.first { it > timestampNs } } != null
 
     /** Largest burst this ring can serve while still accepting incoming frames. */
     val maxBurst: Int get() = RawRingBudget.burstForDepth(ring.capacity)
